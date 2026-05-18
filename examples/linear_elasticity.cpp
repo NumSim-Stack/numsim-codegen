@@ -29,6 +29,6 @@ int main() {
 
   model.add_output("stress", sigma);
 
-  std::cout << model.emit();
+  std::cout << model.emit_compute_function();
   return 0;
 }

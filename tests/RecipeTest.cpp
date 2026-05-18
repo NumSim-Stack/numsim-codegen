@@ -18,7 +18,7 @@ TEST(Recipe, ScalarRecipeProducesValidFunctionSignature) {
   auto x = m.add_scalar_input("x");
   m.add_output("y", a * x + b);
 
-  auto src = m.emit();
+  auto src = m.emit_compute_function();
 
   // Function name must match the model name.
   EXPECT_NE(src.find("void ScaleAdd_compute"), std::string::npos)
@@ -39,7 +39,7 @@ TEST(Recipe, TensorRecipeProducesTmechTypedSignature) {
   auto eps = m.add_tensor_input("eps", 3, 2);
   m.add_output("y", k * eps);
 
-  auto src = m.emit();
+  auto src = m.emit_compute_function();
 
   EXPECT_NE(src.find("tmech::tensor<double, 3, 2> const &eps"),
             std::string::npos)
@@ -58,7 +58,7 @@ TEST(Recipe, LinearElasticityShearTermEmitsSomething) {
   auto sigma = 2 * mu * eps;
   m.add_output("stress", sigma);
 
-  auto src = m.emit();
+  auto src = m.emit_compute_function();
 
   EXPECT_NE(src.find("mu"), std::string::npos) << "got:\n" << src;
   EXPECT_NE(src.find("eps"), std::string::npos) << "got:\n" << src;
@@ -77,7 +77,7 @@ TEST(Recipe, MultipleOutputsShareCseAcrossBody) {
   m.add_output("y1", shared + 1);
   m.add_output("y2", shared * 2);
 
-  auto src = m.emit();
+  auto src = m.emit_compute_function();
 
   // sin(a*x) should appear exactly once in the body — both outputs reference
   // the same temporary.

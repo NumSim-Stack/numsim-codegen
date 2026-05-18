@@ -1,2 +1,5 @@
 add_executable(linear_elasticity linear_elasticity.cpp)
 target_link_libraries(linear_elasticity PRIVATE numsim::codegen)
+
+add_executable(moose_linear_elastic moose_linear_elastic.cpp)
+target_link_libraries(moose_linear_elastic PRIVATE numsim::codegen)

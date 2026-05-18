@@ -19,6 +19,7 @@ add_executable(numsim_codegen_tests
     CodegenContextTest.cpp
     ScalarCodeEmitTest.cpp
     RecipeTest.cpp
+    MooseTargetTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests

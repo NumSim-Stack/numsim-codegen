@@ -19,22 +19,49 @@
 
 namespace numsim::codegen {
 
-// Declaration of an external symbol (input, parameter) that the generated
-// function takes as a parameter.
+// Semantic tag indicating what role an input plays in the constitutive
+// model. Backends interpret these to wire the recipe to framework-specific
+// inputs — Strain becomes MaterialProperty<RankTwoTensor>("strain") in
+// MOOSE, the STRAN array in Abaqus UMAT, etc.
+enum class InputRole {
+  Strain,             // ε — primary driving variable
+  StrainIncrement,    // Δε — Abaqus DSTRAN, viscoplastic increment
+  DeformationGradient,// F — finite-strain models
+  Stress,             // σ — for stress-driven formulations
+  Temperature,        // T
+  History,            // a state variable carried from the previous step
+  Other,              // generic input the backend treats as a coupled var
+};
+
+// Semantic tag for outputs. Backends route these to the right framework
+// sink — Stress to _stress[_qp] in MOOSE / STRESS in Abaqus UMAT, etc.
+enum class OutputRole {
+  Stress,             // σ
+  ConsistentTangent,  // dσ/dε
+  HistoryNew,         // updated state variable
+  Dissipation,        // for dissipation-checking
+  Other,
+};
+
+// Declaration of an external symbol (input, parameter). The codegen treats
+// inputs and parameters the same on the scalar/tensor level (both are
+// read-only) but backends distinguish them — parameters come from MOOSE
+// input file via getParam, inputs come from coupled variables / state.
 struct SymbolDecl {
-  enum class Role { Input, Parameter };
+  enum class Category { Input, Parameter };
   enum class Kind { Scalar, Tensor };
 
   std::string name;
-  Role role;
+  Category category;
   Kind kind;
   std::size_t dim = 0;   // tensor only
   std::size_t rank = 0;  // tensor only
   std::optional<double> default_value; // parameter only
   std::string doc;
+  InputRole role = InputRole::Other;  // semantic tag; Other for parameters
 };
 
-// Declaration of a computed output that the generated function returns.
+// Declaration of a computed output that the generated function emits.
 struct OutputDecl {
   enum class Kind { Scalar, Tensor };
 
@@ -44,17 +71,15 @@ struct OutputDecl {
       cas::expression_holder<cas::scalar_expression>,
       cas::expression_holder<cas::tensor_expression>>
       expr;
-  // For tensor outputs, store the realised dim/rank so the codegen knows the
-  // return type without re-querying the expression (the expression might be
-  // moved / consumed elsewhere by the time emit() runs).
   std::size_t dim = 0;
   std::size_t rank = 0;
+  OutputRole role = OutputRole::Other;
 };
 
-// The constitutive-model registry. Holds declared inputs, parameters, and
-// outputs; emits a self-contained C++ function that computes the outputs
-// from the inputs. Phase A scope — no history, no internal Newton solves,
-// no MOOSE Material wrapping yet.
+// The constitutive-model registry. Holds declared inputs, parameters,
+// outputs, and their semantic role tags. Target-agnostic — the same
+// recipe can be emitted as standalone C++, MOOSE Material, Abaqus UMAT,
+// etc., by passing it through the appropriate Target backend.
 class ConstitutiveModel {
 public:
   explicit ConstitutiveModel(std::string name) : m_name(std::move(name)) {}
@@ -63,20 +88,25 @@ public:
 
   // ─── Input declarations ─────────────────────────────────────────
 
-  auto add_scalar_input(std::string name)
+  auto add_scalar_input(std::string name, InputRole role = InputRole::Other)
       -> cas::expression_holder<cas::scalar_expression> {
     auto var = cas::make_expression<cas::scalar>(name);
-    m_symbols.push_back(
-        {name, SymbolDecl::Role::Input, SymbolDecl::Kind::Scalar});
+    SymbolDecl decl{name, SymbolDecl::Category::Input,
+                    SymbolDecl::Kind::Scalar};
+    decl.role = role;
+    m_symbols.push_back(std::move(decl));
     m_scalar_symbols.emplace_back(name, var);
     return var;
   }
 
-  auto add_tensor_input(std::string name, std::size_t dim, std::size_t rank)
+  auto add_tensor_input(std::string name, std::size_t dim, std::size_t rank,
+                        InputRole role = InputRole::Other)
       -> cas::expression_holder<cas::tensor_expression> {
     auto var = cas::make_expression<cas::tensor>(name, dim, rank);
-    m_symbols.push_back({name, SymbolDecl::Role::Input,
-                         SymbolDecl::Kind::Tensor, dim, rank});
+    SymbolDecl decl{name, SymbolDecl::Category::Input,
+                    SymbolDecl::Kind::Tensor, dim, rank};
+    decl.role = role;
+    m_symbols.push_back(std::move(decl));
     m_tensor_symbols.emplace_back(name, var);
     return var;
   }
@@ -87,7 +117,7 @@ public:
                      std::string doc = "")
       -> cas::expression_holder<cas::scalar_expression> {
     auto var = cas::make_expression<cas::scalar>(name);
-    SymbolDecl decl{name, SymbolDecl::Role::Parameter,
+    SymbolDecl decl{name, SymbolDecl::Category::Parameter,
                     SymbolDecl::Kind::Scalar};
     decl.default_value = default_value;
     decl.doc = std::move(doc);
@@ -99,30 +129,34 @@ public:
   // ─── Output declarations ────────────────────────────────────────
 
   void add_output(std::string name,
-                  cas::expression_holder<cas::scalar_expression> expr) {
-    OutputDecl decl{name, OutputDecl::Kind::Scalar, expr, 0, 0};
+                  cas::expression_holder<cas::scalar_expression> expr,
+                  OutputRole role = OutputRole::Other) {
+    OutputDecl decl{name, OutputDecl::Kind::Scalar, expr, 0, 0, role};
     m_outputs.push_back(std::move(decl));
   }
 
   void add_output(std::string name,
-                  cas::expression_holder<cas::tensor_expression> expr) {
+                  cas::expression_holder<cas::tensor_expression> expr,
+                  OutputRole role = OutputRole::Other) {
     OutputDecl decl{name, OutputDecl::Kind::Tensor, expr, expr.get().dim(),
-                    expr.get().rank()};
+                    expr.get().rank(), role};
     m_outputs.push_back(std::move(decl));
   }
 
-  // ─── Emit ───────────────────────────────────────────────────────
+  // ─── Layer 2: generic compute function emission ────────────────
+  //
+  // Emit a target-agnostic C++ function `<name>_compute` taking the declared
+  // inputs/parameters and writing outputs to out-parameters. All tensors are
+  // tmech-typed. Backends (MOOSE, Abaqus, ...) wrap this function with their
+  // framework-specific boundary conversions.
 
-  // Emit a self-contained C++ function `<name>_compute` that takes the
-  // declared inputs/parameters and writes the outputs to out-parameters.
-  [[nodiscard]] auto emit() const -> std::string {
+  [[nodiscard]] auto emit_compute_function(bool emit_includes = true) const
+      -> std::string {
     CodeGenContext ctx;
     ScalarCodeEmit scalar_emit(ctx);
     TensorCodeEmit tensor_emit(ctx, scalar_emit);
     TensorToScalarCodeEmit t2s_emit(ctx, scalar_emit, tensor_emit);
 
-    // Register every declared symbol so the visitor uses the user-facing
-    // name (e.g. "lam", "eps") instead of allocating a temporary.
     for (auto const &[name, expr] : m_scalar_symbols) {
       ctx.register_symbol_scalar(expr, name);
     }
@@ -130,8 +164,6 @@ public:
       ctx.register_symbol_tensor(expr, name);
     }
 
-    // Walk every output. Each call appends its dependency chain (in topo
-    // order) to the shared statement list.
     std::vector<std::string> output_rhs;
     output_rhs.reserve(m_outputs.size());
     for (auto const &out : m_outputs) {
@@ -149,10 +181,10 @@ public:
           out.expr));
     }
 
-    return render_function(ctx, output_rhs);
+    return render_compute_function(ctx, output_rhs, emit_includes);
   }
 
-  // ─── Read-only accessors (for downstream MOOSE-wrapper generation) ──
+  // ─── Read-only accessors for backends ───────────────────────────
 
   [[nodiscard]] auto symbols() const -> std::vector<SymbolDecl> const & {
     return m_symbols;
@@ -162,30 +194,73 @@ public:
     return m_outputs;
   }
 
+  // Helpers for backends to find specific roles.
+  [[nodiscard]] auto find_input_by_role(InputRole role) const
+      -> SymbolDecl const * {
+    for (auto const &s : m_symbols) {
+      if (s.category == SymbolDecl::Category::Input && s.role == role) {
+        return &s;
+      }
+    }
+    return nullptr;
+  }
+
+  [[nodiscard]] auto find_output_by_role(OutputRole role) const
+      -> OutputDecl const * {
+    for (auto const &o : m_outputs) {
+      if (o.role == role) {
+        return &o;
+      }
+    }
+    return nullptr;
+  }
+
+  // Parameters as a separate filtered view (useful for MOOSE's validParams).
+  [[nodiscard]] auto parameters() const -> std::vector<SymbolDecl> {
+    std::vector<SymbolDecl> out;
+    for (auto const &s : m_symbols) {
+      if (s.category == SymbolDecl::Category::Parameter) {
+        out.push_back(s);
+      }
+    }
+    return out;
+  }
+
+  [[nodiscard]] auto inputs() const -> std::vector<SymbolDecl> {
+    std::vector<SymbolDecl> out;
+    for (auto const &s : m_symbols) {
+      if (s.category == SymbolDecl::Category::Input) {
+        out.push_back(s);
+      }
+    }
+    return out;
+  }
+
 private:
-  [[nodiscard]] auto render_function(
+  [[nodiscard]] auto render_compute_function(
       CodeGenContext const &ctx,
-      std::vector<std::string> const &output_rhs) const -> std::string {
+      std::vector<std::string> const &output_rhs,
+      bool emit_includes) const -> std::string {
     std::ostringstream os;
 
     os << "// Auto-generated by numsim-codegen. Do not edit.\n";
     os << "// Model: " << m_name << "\n\n";
-    os << "#include <tmech/tmech.h>\n";
-    os << "#include <cmath>\n\n";
+    if (emit_includes) {
+      os << "#include <tmech/tmech.h>\n";
+      os << "#include <cmath>\n\n";
+    }
 
     os << "inline void " << m_name << "_compute(\n";
 
-    // Parameters (read-only)
     bool first = true;
     for (auto const &s : m_symbols) {
       if (!first) {
         os << ",\n";
       }
       first = false;
-      os << "    " << param_decl(s, /*as_input=*/true);
+      os << "    " << param_decl(s);
     }
 
-    // Outputs (write)
     for (auto const &out : m_outputs) {
       if (!first) {
         os << ",\n";
@@ -195,10 +270,8 @@ private:
     }
     os << ") {\n";
 
-    // Body — temporaries in topological order.
     os << ctx.render_statements();
 
-    // Assignments to out-parameters.
     for (std::size_t i = 0; i < m_outputs.size(); ++i) {
       os << "  " << m_outputs[i].name << "_out = " << output_rhs[i] << ";\n";
     }
@@ -207,10 +280,10 @@ private:
     return os.str();
   }
 
-  static auto param_decl(SymbolDecl const &s, bool as_input) -> std::string {
+  static auto param_decl(SymbolDecl const &s) -> std::string {
     std::ostringstream os;
     if (s.kind == SymbolDecl::Kind::Scalar) {
-      os << "double " << (as_input ? "const " : "") << s.name;
+      os << "double const " << s.name;
     } else {
       os << "tmech::tensor<double, " << s.dim << ", " << s.rank << "> const &"
          << s.name;
@@ -233,9 +306,6 @@ private:
   std::vector<SymbolDecl> m_symbols;
   std::vector<OutputDecl> m_outputs;
 
-  // Storage for the symbol expression_holders. Needed because the codegen
-  // context uses pointer identity for lookup — the holders must outlive the
-  // codegen walk.
   std::vector<
       std::pair<std::string, cas::expression_holder<cas::scalar_expression>>>
       m_scalar_symbols;
