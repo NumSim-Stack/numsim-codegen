@@ -1,0 +1,2 @@
+add_executable(linear_elasticity linear_elasticity.cpp)
+target_link_libraries(linear_elasticity PRIVATE numsim::codegen)
