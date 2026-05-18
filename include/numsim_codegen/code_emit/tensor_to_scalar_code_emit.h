@@ -89,14 +89,18 @@ public:
 
   void operator()(cas::tensor_to_scalar_negative const &v) override {
     auto inner = apply(v.expr());
-    m_result = register_temp(&v, "-(" + inner + ")");
+    if (is_single_token(inner)) {
+      m_result = "-" + inner;
+    } else {
+      m_result = register_temp(&v, "-(" + inner + ")");
+    }
   }
 
   void operator()(cas::tensor_to_scalar_add const &v) override {
     std::ostringstream os;
     bool first = true;
     if (v.coeff().is_valid()) {
-      os << apply(v.coeff());
+      os << wrap_if_compound(apply(v.coeff()));
       first = false;
     }
     for (auto const &child : v.symbol_map() | std::views::values) {
@@ -104,7 +108,7 @@ public:
       if (!first) {
         os << " + ";
       }
-      os << "(" << term << ")";
+      os << wrap_if_compound(term);
       first = false;
     }
     if (first) {
@@ -118,7 +122,7 @@ public:
     std::ostringstream os;
     bool first = true;
     if (v.coeff().is_valid()) {
-      os << apply(v.coeff());
+      os << wrap_if_compound(apply(v.coeff()));
       first = false;
     }
     for (auto const &child : v.symbol_map() | std::views::values) {
@@ -126,7 +130,7 @@ public:
       if (!first) {
         os << " * ";
       }
-      os << "(" << term << ")";
+      os << wrap_if_compound(term);
       first = false;
     }
     if (first) {
@@ -167,7 +171,16 @@ private:
     if (auto *existing = m_ctx.find(ptr)) {
       return *existing;
     }
-    return m_ctx.emit_temporary(ptr, std::move(rhs), "double");
+    return m_ctx.emit_temporary(ptr, std::move(rhs));
+  }
+
+  static auto is_single_token(std::string const &s) -> bool {
+    return s.find(' ') == std::string::npos &&
+           s.find('(') == std::string::npos;
+  }
+
+  static auto wrap_if_compound(std::string const &s) -> std::string {
+    return is_single_token(s) ? s : "(" + s + ")";
   }
 
   CodeGenContext &m_ctx;

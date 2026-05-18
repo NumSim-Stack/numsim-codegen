@@ -30,3 +30,35 @@ target_link_libraries(numsim_codegen_tests
 
 include(GoogleTest)
 gtest_discover_tests(numsim_codegen_tests)
+
+# ─── Compile-check test ────────────────────────────────────────────────────
+#
+# Round-trip test: build a small recipe, run it to generate a header,
+# compile a driver that #include's the generated header, run the driver.
+# Catches codegen bugs that produce syntactically invalid C++ or
+# semantically wrong math — the regular unit tests only check strings.
+
+add_executable(generate_compile_check_recipe
+    generated/generate_compile_check_recipe.cpp)
+target_link_libraries(generate_compile_check_recipe PRIVATE numsim::codegen)
+
+set(GENERATED_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/CompileCheck.h)
+
+add_custom_command(
+    OUTPUT ${GENERATED_HEADER}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND $<TARGET_FILE:generate_compile_check_recipe> ${GENERATED_HEADER}
+    DEPENDS generate_compile_check_recipe
+    COMMENT "Generating CompileCheck.h via numsim-codegen"
+    VERBATIM)
+
+add_executable(compile_check_driver
+    generated/compile_check_driver.cpp
+    ${GENERATED_HEADER})
+target_include_directories(compile_check_driver
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(compile_check_driver
+    PRIVATE numsim::codegen GTest::gtest GTest::gtest_main)
+
+gtest_discover_tests(compile_check_driver)

@@ -33,7 +33,7 @@ TEST(Recipe, ScalarRecipeProducesValidFunctionSignature) {
   EXPECT_NE(src.find("y_out = "), std::string::npos) << "got: " << src;
 }
 
-TEST(Recipe, TensorRecipeProducesTmechTypedSignature) {
+TEST(Recipe, TensorRecipeProducesTemplatedSignature) {
   ConstitutiveModel m("Scale");
   auto k = m.add_parameter("k", 1.5);
   auto eps = m.add_tensor_input("eps", 3, 2);
@@ -41,11 +41,14 @@ TEST(Recipe, TensorRecipeProducesTmechTypedSignature) {
 
   auto src = m.emit_compute_function();
 
-  EXPECT_NE(src.find("tmech::tensor<double, 3, 2> const &eps"),
+  // Tensor arguments are template parameters so the caller can pass a
+  // tmech::tensor, a tmech::adaptor, or any other tmech::tensor_base
+  // subclass without forcing a materialised copy.
+  EXPECT_NE(src.find("template <typename T0, typename T1>"),
             std::string::npos)
       << "got: " << src;
-  EXPECT_NE(src.find("tmech::tensor<double, 3, 2> &y_out"), std::string::npos)
-      << "got: " << src;
+  EXPECT_NE(src.find("T0 const &eps"), std::string::npos) << "got: " << src;
+  EXPECT_NE(src.find("T1 &y_out"), std::string::npos) << "got: " << src;
 }
 
 TEST(Recipe, LinearElasticityShearTermEmitsSomething) {
@@ -63,8 +66,8 @@ TEST(Recipe, LinearElasticityShearTermEmitsSomething) {
   EXPECT_NE(src.find("mu"), std::string::npos) << "got:\n" << src;
   EXPECT_NE(src.find("eps"), std::string::npos) << "got:\n" << src;
   EXPECT_NE(src.find("stress_out = "), std::string::npos) << "got:\n" << src;
-  EXPECT_NE(src.find("tmech::tensor<double, 3, 2>"), std::string::npos)
-      << "got:\n" << src;
+  // Templated parameters (T0, T1) replace concrete tmech::tensor.
+  EXPECT_NE(src.find("template <"), std::string::npos) << "got:\n" << src;
 }
 
 TEST(Recipe, MultipleOutputsShareCseAcrossBody) {
