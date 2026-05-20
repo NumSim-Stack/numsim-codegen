@@ -10,11 +10,21 @@ namespace numsim::codegen {
 
 // Multi-file output bundle: a target may emit one or more source files
 // (e.g. MOOSE produces a .h + .C pair; standalone C++ produces a single
-// inline header). Backends construct EmittedFiles entries and the user
-// writes them to disk.
+// inline header). Backends construct EmittedFile entries and the user
+// writes them to disk in the target's conventional install layout.
 struct EmittedFile {
-  std::string filename;   // suggested filename (no directory)
-  std::string contents;   // full source text
+  enum class Kind {
+    Header,        // C++ header — typically lives in include/...
+    Source,        // C++ source — typically lives in src/...
+    Other,         // anything else (build snippet, CMake fragment, etc.)
+  };
+
+  std::string filename;        // basename, no directory
+  std::string contents;        // full source text
+  std::string install_subdir;  // suggested relative install directory,
+                               // e.g. "include/materials" or "src/materials".
+                               // Empty if the target has no convention.
+  Kind kind = Kind::Other;
 };
 
 // Abstract backend interface. Each target framework (MOOSE, Abaqus UMAT,

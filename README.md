@@ -65,8 +65,16 @@ int main() {
 
 This generates two files (`LinearElasticShear.h` and `LinearElasticShear.C`) containing
 a complete MOOSE `Material` subclass with `validParams`, constructor, and
-`computeQpProperties` body. The body wraps MOOSE's `RankTwoTensor` storage with
-`tmech::adaptor<double, 3, 2, tmech::full<3>>` so the boundary conversion is zero-copy.
+`computeQpProperties` body.
+
+The generated Layer-2 compute function is **templated on tensor argument types**, so
+the MOOSE boundary passes `tmech::adaptor<double, 3, 2, tmech::full<3>>` directly to
+the compute function — no intermediate `tmech::tensor` materialisation in either
+direction. The only data motion is the unavoidable read-from-strain and
+write-to-stress at the FEM/constitutive boundary. A compile-check test
+(`tests/generated/`) verifies this end-to-end by including the generated header,
+calling the function with both `tmech::tensor` and `tmech::adaptor` arguments, and
+asserting numerical results.
 
 The generated body uses common-subexpression elimination — each unique subterm of the
 DAG is emitted exactly once as `auto tN = ...;`.

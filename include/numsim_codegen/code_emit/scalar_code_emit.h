@@ -60,18 +60,18 @@ public:
   void operator()(cas::scalar_one const &) override { m_result = "1.0"; }
 
   void operator()(cas::scalar_constant const &v) override {
-    m_result = std::visit(
-        [](auto const &val) -> std::string {
+    auto [literal, is_compound] = std::visit(
+        [](auto const &val) -> std::pair<std::string, bool> {
           using V = std::decay_t<decltype(val)>;
           if constexpr (std::is_same_v<V, std::complex<double>>) {
             std::ostringstream os;
             os << "std::complex<double>(" << val.real() << ", "
                << val.imag() << ")";
-            return os.str();
+            return {os.str(), true};
           } else if constexpr (std::is_same_v<V, cas::rational_t>) {
             std::ostringstream os;
             os << "(" << val.num << ".0 / " << val.den << ".0)";
-            return os.str();
+            return {os.str(), true};
           } else {
             std::ostringstream os;
             os << static_cast<double>(val);
@@ -81,17 +81,34 @@ public:
                 s.find('E') == std::string::npos) {
               s += ".0";
             }
-            return s;
+            return {s, false};
           }
         },
         v.value().raw());
+
+    // Trivial literals (plain doubles) stay inline — they read naturally
+    // and the compiler folds duplicates. Compound forms (rational, complex)
+    // benefit from a temporary: if the same constant appears twice, we
+    // emit the literal once and reference the temp.
+    if (is_compound) {
+      m_result = register_temp(&v, literal);
+    } else {
+      m_result = literal;
+    }
   }
 
   // ─── Unary / function nodes ──────────────────────────────────────
 
   void operator()(cas::scalar_negative const &v) override {
     auto inner = apply(v.expr());
-    m_result = register_temp(&v, "-(" + inner + ")");
+    // If the inner result is a single token (named leaf, temp, or literal)
+    // emit `-x` inline without allocating a temporary. If it has structure,
+    // wrap and register as a temp.
+    if (is_single_token(inner)) {
+      m_result = "-" + inner;
+    } else {
+      m_result = register_temp(&v, "-(" + inner + ")");
+    }
   }
 
   void operator()(cas::scalar_sign const &v) override {
@@ -152,7 +169,7 @@ public:
     std::ostringstream os;
     bool first = true;
     if (v.coeff().is_valid()) {
-      os << apply(v.coeff());
+      os << wrap_if_compound(apply(v.coeff()));
       first = false;
     }
     for (auto const &child : v.symbol_map() | std::views::values) {
@@ -160,7 +177,7 @@ public:
       if (!first) {
         os << " + ";
       }
-      os << "(" << term << ")";
+      os << wrap_if_compound(term);
       first = false;
     }
     if (first) {
@@ -174,7 +191,7 @@ public:
     std::ostringstream os;
     bool first = true;
     if (v.coeff().is_valid()) {
-      os << apply(v.coeff());
+      os << wrap_if_compound(apply(v.coeff()));
       first = false;
     }
     for (auto const &child : v.symbol_map() | std::views::values) {
@@ -182,7 +199,7 @@ public:
       if (!first) {
         os << " * ";
       }
-      os << "(" << term << ")";
+      os << wrap_if_compound(term);
       first = false;
     }
     if (first) {
@@ -202,7 +219,21 @@ private:
     if (auto *existing = m_ctx.find(ptr)) {
       return *existing;
     }
-    return m_ctx.emit_temporary(ptr, std::move(rhs), "double");
+    return m_ctx.emit_temporary(ptr, std::move(rhs));
+  }
+
+  // A "single token" is a named leaf (no spaces, no parens) — safe to use
+  // unparenthesised as a sub-expression. Anything else has internal
+  // structure and needs parens to maintain precedence.
+  static auto is_single_token(std::string const &s) -> bool {
+    return s.find(' ') == std::string::npos &&
+           s.find('(') == std::string::npos;
+  }
+
+  // Wrap a sub-expression in parens iff it has internal operators. Keeps
+  // generated code readable: `t1 + t2 + t3` rather than `(t1) + (t2) + (t3)`.
+  static auto wrap_if_compound(std::string const &s) -> std::string {
+    return is_single_token(s) ? s : "(" + s + ")";
   }
 
   CodeGenContext &m_ctx;

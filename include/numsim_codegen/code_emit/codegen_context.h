@@ -21,10 +21,12 @@ namespace numsim::codegen {
 // table mapping declared inputs / parameters to their C++ names.
 class CodeGenContext {
 public:
+  // A single generated assignment line. The codegen always uses `auto` for
+  // the LHS — tmech expression templates produce types the user cannot
+  // spell, so an explicit type field would be more brittle than helpful.
   struct Statement {
     std::string lhs;       // e.g. "t5"
     std::string rhs;       // e.g. "lam * t3"
-    std::string type;      // e.g. "double" or "tmech::tensor<double, 3, 2>"
   };
 
   // Register a named external symbol (input, parameter, history variable).
@@ -61,11 +63,12 @@ public:
 
   // Allocate a fresh temporary name and emit an `auto tN = rhs;` statement.
   // The void* is the pointer-identity of the expression node, used for
-  // future CSE lookups.
-  auto emit_temporary(void const *ptr, std::string rhs, std::string type)
-      -> std::string {
+  // future CSE lookups. The `type` argument from older callers is accepted
+  // for source compatibility but ignored — the generated code uses `auto`.
+  auto emit_temporary(void const *ptr, std::string rhs,
+                      std::string /*type*/ = {}) -> std::string {
     auto name = fresh_name();
-    m_statements.push_back({name, std::move(rhs), std::move(type)});
+    m_statements.push_back({name, std::move(rhs)});
     m_cse_table[ptr] = name;
     return name;
   }
@@ -88,12 +91,21 @@ public:
     return m_statements.size();
   }
 
+  // Clear statements and CSE table for a new emission pass. The temporary
+  // counter is intentionally NOT reset — that way, if two rendered outputs
+  // ever end up in the same scope (e.g. concatenated into one function),
+  // their names cannot collide. Call full_reset() if you genuinely want
+  // the counter zeroed.
   void reset() {
     m_statements.clear();
     m_cse_table.clear();
+    // m_counter and m_named_symbols deliberately preserved.
+  }
+
+  void full_reset() {
+    reset();
     m_counter = 0;
-    // Note: deliberately keep m_named_symbols across resets so the user can
-    // emit multiple functions sharing the same input declarations.
+    m_named_symbols.clear();
   }
 
 private:

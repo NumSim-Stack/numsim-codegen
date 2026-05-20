@@ -54,27 +54,27 @@ public:
   void operator()(cas::tensor_zero const &v) override {
     std::ostringstream os;
     os << "tmech::tensor<double, " << v.dim() << ", " << v.rank() << ">{}";
-    m_result = register_temp(&v, os.str(), tensor_type(v.dim(), v.rank()));
+    m_result = register_temp(&v, os.str());
   }
 
   void operator()(cas::kronecker_delta const &v) override {
     std::ostringstream os;
     os << "tmech::eye<double, " << v.dim() << ", " << v.rank() << ">()";
-    m_result = register_temp(&v, os.str(), tensor_type(v.dim(), v.rank()));
+    m_result = register_temp(&v, os.str());
   }
 
   void operator()(cas::identity_tensor const &v) override {
     if (v.rank() == 2) {
       std::ostringstream os;
       os << "tmech::eye<double, " << v.dim() << ", 2>()";
-      m_result = register_temp(&v, os.str(), tensor_type(v.dim(), v.rank()));
+      m_result = register_temp(&v, os.str());
       return;
     }
     if (v.rank() == 4) {
       std::ostringstream os;
       os << "tmech::otimesu(tmech::eye<double, " << v.dim()
          << ", 2>(), tmech::eye<double, " << v.dim() << ", 2>())";
-      m_result = register_temp(&v, os.str(), tensor_type(v.dim(), v.rank()));
+      m_result = register_temp(&v, os.str());
       return;
     }
     throw std::runtime_error(
@@ -86,15 +86,18 @@ public:
 
   void operator()(cas::tensor_negative const &v) override {
     auto inner = apply(v.expr());
-    m_result = register_temp(&v, "-(" + inner + ")",
-                             tensor_type(v.dim(), v.rank()));
+    if (is_single_token(inner)) {
+      m_result = "-" + inner;
+    } else {
+      m_result = register_temp(&v, "-(" + inner + ")");
+    }
   }
 
   void operator()(cas::tensor_add const &v) override {
     std::ostringstream os;
     bool first = true;
     if (v.coeff().is_valid()) {
-      os << apply(v.coeff());
+      os << wrap_if_compound(apply(v.coeff()));
       first = false;
     }
     for (auto const &child : v.symbol_map() | std::views::values) {
@@ -102,17 +105,27 @@ public:
       if (!first) {
         os << " + ";
       }
-      os << "(" << term << ")";
+      os << wrap_if_compound(term);
       first = false;
     }
-    m_result = register_temp(&v, os.str(), tensor_type(v.dim(), v.rank()));
+    if (first) {
+      // Empty tensor_add — emit a zero tensor of matching dim/rank.
+      // The simplifier normally collapses this, but a defensive fallback
+      // is cheap and avoids the `auto t0 = ;` trap if a future rewrite
+      // produces an empty add.
+      std::ostringstream zero;
+      zero << "tmech::tensor<double, " << v.dim() << ", " << v.rank() << ">{}";
+      m_result = register_temp(&v, zero.str());
+    } else {
+      m_result = register_temp(&v, os.str());
+    }
   }
 
   void operator()(cas::tensor_scalar_mul const &v) override {
     auto lhs = m_scalar.apply(v.expr_lhs());
     auto rhs = apply(v.expr_rhs());
-    m_result = register_temp(&v, "(" + lhs + ") * (" + rhs + ")",
-                             tensor_type(v.dim(), v.rank()));
+    m_result = register_temp(&v, wrap_if_compound(lhs) + " * " +
+                                     wrap_if_compound(rhs));
   }
 
   // ─── Phase A stubs — node types not yet implemented ─────────────
@@ -139,18 +152,20 @@ public:
 #undef NUMSIM_CODEGEN_TENSOR_STUB
 
 private:
-  static auto tensor_type(std::size_t dim, std::size_t rank) -> std::string {
-    std::ostringstream os;
-    os << "tmech::tensor<double, " << dim << ", " << rank << ">";
-    return os.str();
-  }
-
-  auto register_temp(void const *ptr, std::string rhs, std::string type)
-      -> std::string {
+  auto register_temp(void const *ptr, std::string rhs) -> std::string {
     if (auto *existing = m_ctx.find(ptr)) {
       return *existing;
     }
-    return m_ctx.emit_temporary(ptr, std::move(rhs), std::move(type));
+    return m_ctx.emit_temporary(ptr, std::move(rhs));
+  }
+
+  static auto is_single_token(std::string const &s) -> bool {
+    return s.find(' ') == std::string::npos &&
+           s.find('(') == std::string::npos;
+  }
+
+  static auto wrap_if_compound(std::string const &s) -> std::string {
+    return is_single_token(s) ? s : "(" + s + ")";
   }
 
   CodeGenContext &m_ctx;

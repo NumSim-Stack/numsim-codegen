@@ -2,6 +2,7 @@
 #define NUMSIM_CODEGEN_RECIPE_H
 
 #include <numsim_codegen/code_emit/codegen_context.h>
+#include <numsim_codegen/code_emit/leaf_collector.h>
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_to_scalar_code_emit.h>
@@ -12,7 +13,9 @@
 
 #include <cstddef>
 #include <optional>
+#include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <variant>
 #include <vector>
@@ -94,7 +97,8 @@ public:
     SymbolDecl decl{name, SymbolDecl::Category::Input,
                     SymbolDecl::Kind::Scalar};
     decl.role = role;
-    m_symbols.push_back(std::move(decl));
+    m_symbols.push_back(decl);
+    m_inputs_cache.push_back(decl);
     m_scalar_symbols.emplace_back(name, var);
     return var;
   }
@@ -106,7 +110,8 @@ public:
     SymbolDecl decl{name, SymbolDecl::Category::Input,
                     SymbolDecl::Kind::Tensor, dim, rank};
     decl.role = role;
-    m_symbols.push_back(std::move(decl));
+    m_symbols.push_back(decl);
+    m_inputs_cache.push_back(decl);
     m_tensor_symbols.emplace_back(name, var);
     return var;
   }
@@ -121,7 +126,8 @@ public:
                     SymbolDecl::Kind::Scalar};
     decl.default_value = default_value;
     decl.doc = std::move(doc);
-    m_symbols.push_back(std::move(decl));
+    m_symbols.push_back(decl);
+    m_parameters_cache.push_back(decl);
     m_scalar_symbols.emplace_back(name, var);
     return var;
   }
@@ -150,8 +156,58 @@ public:
   // tmech-typed. Backends (MOOSE, Abaqus, ...) wrap this function with their
   // framework-specific boundary conversions.
 
-  [[nodiscard]] auto emit_compute_function(bool emit_includes = true) const
-      -> std::string {
+  // Verify that every leaf symbol referenced by any output expression has
+  // been declared (via add_*_input or add_parameter). Throws
+  // std::runtime_error listing the missing symbols. Called automatically
+  // from emit_compute_function() but exposed for explicit pre-flight checks.
+  void validate() const {
+    LeafCollector lc;
+    for (auto const &o : m_outputs) {
+      std::visit(
+          [&](auto const &e) {
+            using T = std::decay_t<decltype(e)>;
+            if constexpr (std::is_same_v<
+                              T,
+                              cas::expression_holder<cas::scalar_expression>>) {
+              lc.collect_scalar(e);
+            } else {
+              lc.collect_tensor(e);
+            }
+          },
+          o.expr);
+    }
+
+    std::set<std::string> declared_scalar;
+    std::set<std::string> declared_tensor;
+    for (auto const &[name, _] : m_scalar_symbols) declared_scalar.insert(name);
+    for (auto const &[name, _] : m_tensor_symbols) declared_tensor.insert(name);
+
+    std::vector<std::string> missing;
+    for (auto const &name : lc.scalar_names()) {
+      if (!declared_scalar.contains(name)) {
+        missing.push_back("scalar input/parameter '" + name + "'");
+      }
+    }
+    for (auto const &name : lc.tensor_names()) {
+      if (!declared_tensor.contains(name)) {
+        missing.push_back("tensor input '" + name + "'");
+      }
+    }
+
+    if (!missing.empty()) {
+      std::string msg = "ConstitutiveModel '" + m_name +
+                        "': outputs reference undeclared symbol(s):";
+      for (auto const &m : missing) msg += "\n  - " + m;
+      msg += "\nCall add_scalar_input / add_tensor_input / add_parameter "
+             "before referencing a symbol in an output expression.";
+      throw std::runtime_error(msg);
+    }
+  }
+
+  // Emit the generic compute function. Does not emit #include directives;
+  // backends own the file-level framing (includes, namespacing, registration).
+  [[nodiscard]] auto emit_compute_function() const -> std::string {
+    validate();
     CodeGenContext ctx;
     ScalarCodeEmit scalar_emit(ctx);
     TensorCodeEmit tensor_emit(ctx, scalar_emit);
@@ -181,7 +237,7 @@ public:
           out.expr));
     }
 
-    return render_compute_function(ctx, output_rhs, emit_includes);
+    return render_compute_function(ctx, output_rhs);
   }
 
   // ─── Read-only accessors for backends ───────────────────────────
@@ -215,50 +271,49 @@ public:
     return nullptr;
   }
 
-  // Parameters as a separate filtered view (useful for MOOSE's validParams).
-  [[nodiscard]] auto parameters() const -> std::vector<SymbolDecl> {
-    std::vector<SymbolDecl> out;
-    for (auto const &s : m_symbols) {
-      if (s.category == SymbolDecl::Category::Parameter) {
-        out.push_back(s);
-      }
-    }
-    return out;
+  // Cached views maintained incrementally by the add_* methods — avoids
+  // an O(N) filter on every call. Backends typically call these multiple
+  // times per emit.
+  [[nodiscard]] auto parameters() const
+      -> std::vector<SymbolDecl> const & {
+    return m_parameters_cache;
   }
 
-  [[nodiscard]] auto inputs() const -> std::vector<SymbolDecl> {
-    std::vector<SymbolDecl> out;
-    for (auto const &s : m_symbols) {
-      if (s.category == SymbolDecl::Category::Input) {
-        out.push_back(s);
-      }
-    }
-    return out;
+  [[nodiscard]] auto inputs() const -> std::vector<SymbolDecl> const & {
+    return m_inputs_cache;
   }
 
 private:
   [[nodiscard]] auto render_compute_function(
       CodeGenContext const &ctx,
-      std::vector<std::string> const &output_rhs,
-      bool emit_includes) const -> std::string {
+      std::vector<std::string> const &output_rhs) const -> std::string {
     std::ostringstream os;
 
     os << "// Auto-generated by numsim-codegen. Do not edit.\n";
     os << "// Model: " << m_name << "\n\n";
-    if (emit_includes) {
-      os << "#include <tmech/tmech.h>\n";
-      os << "#include <cmath>\n\n";
-    }
 
+    // Template parameter list: one T<n> per tensor argument so the caller
+    // can pass any tmech::tensor_base subclass (tensor, adaptor, expression
+    // template) without forcing a materialised copy.
+    int const n_tmpl = tensor_arg_count();
+    if (n_tmpl > 0) {
+      os << "template <";
+      for (int i = 0; i < n_tmpl; ++i) {
+        if (i > 0) os << ", ";
+        os << "typename T" << i;
+      }
+      os << ">\n";
+    }
     os << "inline void " << m_name << "_compute(\n";
 
+    int tmpl_counter = 0;
     bool first = true;
     for (auto const &s : m_symbols) {
       if (!first) {
         os << ",\n";
       }
       first = false;
-      os << "    " << param_decl(s);
+      os << "    " << param_decl(s, tmpl_counter);
     }
 
     for (auto const &out : m_outputs) {
@@ -266,7 +321,7 @@ private:
         os << ",\n";
       }
       first = false;
-      os << "    " << output_decl(out);
+      os << "    " << output_decl(out, tmpl_counter);
     }
     os << ") {\n";
 
@@ -280,30 +335,48 @@ private:
     return os.str();
   }
 
-  static auto param_decl(SymbolDecl const &s) -> std::string {
+  static auto param_decl(SymbolDecl const &s, int &tmpl_counter)
+      -> std::string {
     std::ostringstream os;
     if (s.kind == SymbolDecl::Kind::Scalar) {
       os << "double const " << s.name;
     } else {
-      os << "tmech::tensor<double, " << s.dim << ", " << s.rank << "> const &"
-         << s.name;
+      // Tensor parameters are templates over a tensor-like type so the
+      // caller can pass a `tmech::tensor<...>`, a `tmech::adaptor<...>`,
+      // or any other `tmech::tensor_base<Derived>` without forcing a
+      // copy. This is what makes the MOOSE boundary zero-copy.
+      os << "T" << tmpl_counter++ << " const &" << s.name;
     }
     return os.str();
   }
 
-  static auto output_decl(OutputDecl const &o) -> std::string {
+  static auto output_decl(OutputDecl const &o, int &tmpl_counter)
+      -> std::string {
     std::ostringstream os;
     if (o.kind == OutputDecl::Kind::Scalar) {
       os << "double &" << o.name << "_out";
     } else {
-      os << "tmech::tensor<double, " << o.dim << ", " << o.rank << "> &"
-         << o.name << "_out";
+      os << "T" << tmpl_counter++ << " &" << o.name << "_out";
     }
     return os.str();
   }
 
+  // Count how many tensor parameters / outputs need template params.
+  [[nodiscard]] auto tensor_arg_count() const -> int {
+    int n = 0;
+    for (auto const &s : m_symbols) {
+      if (s.kind == SymbolDecl::Kind::Tensor) ++n;
+    }
+    for (auto const &o : m_outputs) {
+      if (o.kind == OutputDecl::Kind::Tensor) ++n;
+    }
+    return n;
+  }
+
   std::string m_name;
   std::vector<SymbolDecl> m_symbols;
+  std::vector<SymbolDecl> m_parameters_cache;
+  std::vector<SymbolDecl> m_inputs_cache;
   std::vector<OutputDecl> m_outputs;
 
   std::vector<
