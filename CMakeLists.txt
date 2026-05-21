@@ -20,9 +20,20 @@ option(NUMSIM_CODEGEN_BUILD_TESTS "Build numsim-codegen tests" ON)
 option(NUMSIM_CODEGEN_BUILD_EXAMPLES "Build numsim-codegen examples" ON)
 option(NUMSIM_CODEGEN_USE_LOCAL_CAS "Use a local numsim-cas checkout (set NUMSIM_CAS_SOURCE_DIR)" OFF)
 
-# ─── numsim-cas dependency ──────────────────────────────────────────────────
+# ─── Dependency manager: CPM ───────────────────────────────────────────────
+#
+# Vendored single-file CMake package manager (cmake/CPM.cmake). Wraps
+# FetchContent with explicit SHA pinning, a global source cache (set
+# CPM_SOURCE_CACHE env or -DCPM_SOURCE_CACHE=<path> to share downloads
+# across builds), and source-availability detection.
+#
+# To bump CPM itself: download a newer release asset from
+#   https://github.com/cpm-cmake/CPM.cmake/releases
+# and overwrite cmake/CPM.cmake.
 
-include(FetchContent)
+include(cmake/CPM.cmake)
+
+# ─── numsim-cas dependency ──────────────────────────────────────────────────
 
 # Suppress numsim-cas's own tests/examples — we only need the library.
 set(NUMSIM_CAS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -37,13 +48,14 @@ if(NUMSIM_CODEGEN_USE_LOCAL_CAS)
     message(STATUS "Using local numsim-cas at ${NUMSIM_CAS_SOURCE_DIR}")
     add_subdirectory(${NUMSIM_CAS_SOURCE_DIR} numsim_cas_build EXCLUDE_FROM_ALL)
 else()
-    FetchContent_Declare(
-        numsim_cas
-        GIT_REPOSITORY https://github.com/NumSim-Stack/numsim-cas.git
-        GIT_TAG main
-        GIT_SHALLOW TRUE
+    # Pin: bump this SHA deliberately. The previous `GIT_TAG main` made CI
+    # non-reproducible — a breaking upstream commit would have flipped CI
+    # red with no commit here. See issues #13, #21.
+    CPMAddPackage(
+        NAME numsim_cas
+        GITHUB_REPOSITORY NumSim-Stack/numsim-cas
+        GIT_TAG d9a9e8db574d4e3e1f56537b7702bd4fbb1fad44
     )
-    FetchContent_MakeAvailable(numsim_cas)
 endif()
 
 # ─── Library (header-only) ──────────────────────────────────────────────────
