@@ -151,6 +151,10 @@ endif()
 # exists so heavy template libraries never appear in the umbrella header.
 
 add_library(numsim_codegen_headers INTERFACE)
+# `numsim::codegen_headers` is the type-only alias for downstream consumers
+# that want the recipe/role/codegen-emit API without linking the STATIC
+# backend implementations. Useful for headers-only adapter libraries and
+# for the future Layer-2 `CompiledModel` work tracked in #18.
 add_library(numsim::codegen_headers ALIAS numsim_codegen_headers)
 
 target_include_directories(numsim_codegen_headers
@@ -167,6 +171,19 @@ add_library(numsim_codegen STATIC
 add_library(numsim::codegen ALIAS numsim_codegen)
 target_link_libraries(numsim_codegen PUBLIC numsim_codegen_headers)
 
+# POSITION_INDEPENDENT_CODE ON: downstream MOOSE apps and similar consumers
+# typically build as shared libraries / plugins. Linking a non-PIC STATIC
+# into a .so fails on x86_64 with R_X86_64_32 relocation errors.
+#
+# Hidden visibility + inlines-hidden: prepares the STATIC for the future
+# inja + nlohmann/json PRIVATE link (#20) — symbols from those deps must
+# not leak into consumers' dynamic-symbol tables.
+set_target_properties(numsim_codegen PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
+
 # ─── Tests ──────────────────────────────────────────────────────────────────
 
 if(NUMSIM_CODEGEN_BUILD_TESTS)
@@ -181,9 +198,14 @@ if(NUMSIM_CODEGEN_BUILD_EXAMPLES)
 endif()
 
 # ─── Install ────────────────────────────────────────────────────────────────
-# Header-only install. CMake package config / export targets are deferred
-# until numsim-cas itself exports installable targets (currently it does not
-# expose NumSim_CAS in an export set, which blocks install(EXPORT) here).
+# CMake package config / export targets are deferred until numsim-cas itself
+# exports installable targets (currently it does not expose NumSim_CAS in an
+# export set, which blocks install(EXPORT) here). When that lands, switch
+# to install(TARGETS ... EXPORT NumSimCodegenTargets) and emit a config file.
 
 include(GNUInstallDirs)
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(TARGETS numsim_codegen numsim_codegen_headers
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
