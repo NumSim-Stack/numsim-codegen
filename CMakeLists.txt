@@ -1,4 +1,8 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.25)
+# 3.25 minimum so that CPM's `SYSTEM YES` parameter (CMP0167-era feature)
+# actually propagates SYSTEM-include semantics to numsim-cas's headers.
+# On CMake 3.20-3.24 it would silently no-op. CI uses ubuntu-24.04
+# (CMake 3.28+), so no cost.
 
 project(NumSim_CodeGen
     VERSION 0.1.0
@@ -53,15 +57,23 @@ else()
     # non-reproducible — a breaking upstream commit would have flipped CI
     # red with no commit here. See issues #13, #21.
     #
-    # CPM 0.42.3+: GIT_SHALLOW is intentionally absent. CPM auto-disables
-    # shallow clones when GIT_TAG is a commit hash (a SHA pin cannot be
-    # fetched shallowly without server-side uploadpack.allowReachableSHA1InWant,
-    # which GitHub does not guarantee). See cmake/CPM.cmake:929-934.
+    # GIT_SHALLOW is intentionally absent. CPM auto-disables shallow clones
+    # when GIT_TAG is a commit hash (a SHA pin cannot be fetched shallowly
+    # without server-side uploadpack.allowReachableSHA1InWant, which GitHub
+    # does not guarantee). See `cpm_is_git_tag_commit_hash` in cmake/CPM.cmake.
     #
-    # SYSTEM YES suppresses warnings from numsim-cas headers in our builds.
-    # EXCLUDE_FROM_ALL keeps numsim-cas off the default build target unless
-    # something actually depends on it. OPTIONS scopes the cache vars to
-    # the subproject (vs leaking into the parent project's cache).
+    # SYSTEM YES marks numsim-cas's include directories as system-includes
+    # so its warnings don't surface in our builds (requires CMake 3.25+).
+    #
+    # EXCLUDE_FROM_ALL keeps numsim-cas's *own internal* targets (its tests,
+    # examples, benchmark) off the default build. The NumSim_CAS library
+    # itself is still pulled in transitively via the link dependency below
+    # (target_link_libraries(numsim_codegen INTERFACE NumSim_CAS)).
+    #
+    # OPTIONS forwards the four NUMSIM_CAS_* flags as plain (non-cache)
+    # variables into the subproject's directory scope; CPM forces
+    # CMP0077 NEW, so these override numsim-cas's `option()` defaults
+    # without touching the parent project's cache.
     CPMAddPackage(
         NAME numsim_cas
         GITHUB_REPOSITORY NumSim-Stack/numsim-cas

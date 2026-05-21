@@ -114,6 +114,7 @@ GPL-3.0. Matches numsim-cas.
 ### Third-party
 
 `cmake/CPM.cmake` is a vendored release of [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake)
-by Lars Melchior, distributed under the MIT License (see the SPDX header at the
-top of that file). Bump by replacing the file with a newer release from
-<https://github.com/cpm-cmake/CPM.cmake/releases>.
+by Lars Melchior, distributed under the MIT License. Full attribution and
+license text in [`LICENSES/CPM-MIT.txt`](LICENSES/CPM-MIT.txt). Bump by
+replacing the file with a newer release from
+[the CPM.cmake releases page](https://github.com/cpm-cmake/CPM.cmake/releases).
