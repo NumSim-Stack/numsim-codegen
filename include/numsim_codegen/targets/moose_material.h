@@ -278,7 +278,8 @@ private:
   //   `\\` unescaped backslash starts an unintended escape sequence
   //   `\n` raw newline in a string literal is forbidden by [lex.string]
   //   `\r` produces an embedded CR — implementation-defined behavior
-  //   `\0` silently truncates the literal at the null byte
+  //   `\0` embeds a null byte in the string value, which silently
+  //         truncates downstream C-string APIs
   // Tabs and other control bytes pass through unchanged (ugly but legal).
   // Cross-ref #14 → CORR-B4 for a future general-identifier validator
   // that would reject non-identifier names at recipe-build time.
