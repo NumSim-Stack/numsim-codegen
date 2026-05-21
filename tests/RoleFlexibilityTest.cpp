@@ -103,6 +103,34 @@ TEST(RoleFlexibility, AcceptsExactCatalogueMatchConstructedFromScratch) {
 
 // ─── Role::name owns the string — no lifetime hazard on temporaries ──────
 
+// Role names with embedded special characters must be escaped before
+// being concatenated into the generated C++ string literal. Without the
+// escape, a literal `"` or `\n` produces ill-formed C++.
+
+TEST(RoleFlexibility, RoleNameWithSpecialCharsIsEscapedInGeneratedSource) {
+  ConstitutiveModel m("EscapeTest");
+  // Pathological-but-not-rejected role names — none of the catalogue
+  // entries would match, and there's no identifier validator yet.
+  Role bad_name{.name = "with\"quote\nand\\bs",
+                .is_driving = true, .expected_rank = 0};
+  auto x = m.add_scalar_input("x", bad_name);
+  m.add_output("y", x);
+
+  MooseMaterialTarget target;
+  auto files = target.emit(m);
+  auto const &source = files[1].contents;
+
+  // The four special chars must appear in their escaped form, never as
+  // raw characters that would break the validParams docstring literal.
+  EXPECT_NE(source.find("Coupled with\\\"quote\\nand\\\\bs"),
+            std::string::npos)
+      << "expected escaped form 'Coupled with\\\"quote\\nand\\\\bs' in:\n"
+      << source;
+  // Confirm none of the raw forms slipped through.
+  EXPECT_EQ(source.find("Coupled with\""), std::string::npos);
+  EXPECT_EQ(source.find("Coupled with\\\"quote\n"), std::string::npos);
+}
+
 TEST(RoleFlexibility, RoleNameSurvivesTemporaryStringSource) {
   ConstitutiveModel m("LifetimeTest");
   {

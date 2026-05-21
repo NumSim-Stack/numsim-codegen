@@ -272,17 +272,28 @@ private:
   }
 
   // Escape a user-supplied string for safe inclusion in a C++ string
-  // literal. Escapes the two characters that would break the emitted
-  // "..." form: double-quote and backslash. Other characters (newlines,
-  // tabs, control codes) pass through and would produce ugly-but-valid
-  // C++; callers should additionally validate identifiers if needed.
-  // Cross-ref #14 → CORR-B4 for a future general-identifier validator.
+  // literal. Handles the five characters that would otherwise produce
+  // ill-formed C++:
+  //   `"`  unescaped quote terminates the literal early
+  //   `\\` unescaped backslash starts an unintended escape sequence
+  //   `\n` raw newline in a string literal is forbidden by [lex.string]
+  //   `\r` produces an embedded CR — implementation-defined behavior
+  //   `\0` silently truncates the literal at the null byte
+  // Tabs and other control bytes pass through unchanged (ugly but legal).
+  // Cross-ref #14 → CORR-B4 for a future general-identifier validator
+  // that would reject non-identifier names at recipe-build time.
   static auto escape_for_cpp_literal(std::string_view s) -> std::string {
     std::string out;
     out.reserve(s.size());
     for (char c : s) {
-      if (c == '"' || c == '\\') out += '\\';
-      out += c;
+      switch (c) {
+        case '"':  out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n";  break;
+        case '\r': out += "\\r";  break;
+        case '\0': out += "\\0";  break;
+        default:   out += c;      break;
+      }
     }
     return out;
   }

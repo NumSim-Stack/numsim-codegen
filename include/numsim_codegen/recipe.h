@@ -61,6 +61,13 @@ struct Role {
 // attributes are set appropriately. `inline const` (not `constexpr`)
 // because `Role` contains `std::string`, which is not a portable literal
 // type — `inline` still gives single-definition-across-TUs.
+//
+// NOTE: these globals are dynamically initialised (std::string member).
+// Calling `ConstitutiveModel::add_*` from another TU's static-init phase
+// is unsafe — the catalogue may not yet be constructed. Build recipes
+// at runtime (inside `main`, in a function), not at namespace scope as
+// `static ConstitutiveModel g_model("...");`. Tracked for hardening if a
+// real consumer ever hits the dynamic-init-order trap.
 namespace roles {
   inline const Role Strain              {"strain",               false, true,  true,  2};
   inline const Role StrainIncrement     {"strain_increment",     false, true,  true,  2};
@@ -125,8 +132,8 @@ public:
     SymbolDecl decl{name, SymbolDecl::Category::Input,
                     SymbolDecl::Kind::Scalar};
     decl.role = std::move(role);
-    m_symbols.push_back(decl);
-    m_inputs_cache.push_back(decl);
+    m_inputs_cache.push_back(decl);            // copy
+    m_symbols.push_back(std::move(decl));      // move (no copy)
     m_scalar_symbols.emplace_back(name, var);
     return var;
   }
@@ -139,8 +146,8 @@ public:
     SymbolDecl decl{name, SymbolDecl::Category::Input,
                     SymbolDecl::Kind::Tensor, dim, rank};
     decl.role = std::move(role);
-    m_symbols.push_back(decl);
     m_inputs_cache.push_back(decl);
+    m_symbols.push_back(std::move(decl));
     m_tensor_symbols.emplace_back(name, var);
     return var;
   }
@@ -155,8 +162,8 @@ public:
                     SymbolDecl::Kind::Scalar};
     decl.default_value = default_value;
     decl.doc = std::move(doc);
-    m_symbols.push_back(decl);
     m_parameters_cache.push_back(decl);
+    m_symbols.push_back(std::move(decl));
     m_scalar_symbols.emplace_back(name, var);
     return var;
   }
