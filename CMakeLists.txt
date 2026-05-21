@@ -136,19 +136,36 @@ else()
     )
 endif()
 
-# ─── Library (header-only) ──────────────────────────────────────────────────
+# ─── Library ────────────────────────────────────────────────────────────────
+#
+# Two-target layout:
+#   numsim_codegen_headers — INTERFACE façade. Public recipe/role/codegen-emit
+#                            headers. Pulls only lightweight deps (numsim-cas,
+#                            tmech). Safe for any consuming TU to include.
+#   numsim_codegen         — STATIC core. Backend implementations live here as
+#                            .cpp translation units. Future heavy deps (inja,
+#                            nlohmann/json — see issue #20) will link PRIVATE
+#                            here, never escaping into the public ABI.
+#
+# Downstream users link `numsim::codegen` and get both transitively. The split
+# exists so heavy template libraries never appear in the umbrella header.
 
-add_library(numsim_codegen INTERFACE)
-add_library(numsim::codegen ALIAS numsim_codegen)
+add_library(numsim_codegen_headers INTERFACE)
+add_library(numsim::codegen_headers ALIAS numsim_codegen_headers)
 
-target_include_directories(numsim_codegen
+target_include_directories(numsim_codegen_headers
     INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
+target_link_libraries(numsim_codegen_headers INTERFACE NumSim_CAS)
+target_compile_features(numsim_codegen_headers INTERFACE cxx_std_23)
 
-target_link_libraries(numsim_codegen INTERFACE NumSim_CAS)
-target_compile_features(numsim_codegen INTERFACE cxx_std_23)
+add_library(numsim_codegen STATIC
+    src/targets/standalone_cxx.cpp
+    src/targets/moose_material.cpp)
+add_library(numsim::codegen ALIAS numsim_codegen)
+target_link_libraries(numsim_codegen PUBLIC numsim_codegen_headers)
 
 # ─── Tests ──────────────────────────────────────────────────────────────────
 
