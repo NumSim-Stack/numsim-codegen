@@ -16,15 +16,29 @@ if(NOT DEFINED DISALLOWED_PATTERN)
     message(FATAL_ERROR "DISALLOWED_PATTERN not set")
 endif()
 
+# Glob the common C/C++ header extensions. file(GLOB_RECURSE) re-evaluates
+# every invocation when this script runs in -P (script) mode, so new headers
+# are picked up automatically without CONFIGURE_DEPENDS.
 file(GLOB_RECURSE HEADERS
     "${SEARCH_ROOT}/*.h"
     "${SEARCH_ROOT}/*.hpp"
+    "${SEARCH_ROOT}/*.hh"
+    "${SEARCH_ROOT}/*.hxx"
+    "${SEARCH_ROOT}/*.inl"
+    "${SEARCH_ROOT}/*.tpp"
+    "${SEARCH_ROOT}/*.ipp"
+    "${SEARCH_ROOT}/*.ixx"
 )
 
+# file(READ) the whole file rather than file(STRINGS), which truncates
+# lines at an implementation-defined length and could let a long
+# auto-generated header escape detection. Cost is proportional to total
+# header bytes — fine for any realistic public-API surface.
 set(VIOLATIONS "")
 foreach(HEADER IN LISTS HEADERS)
-    file(STRINGS "${HEADER}" MATCHES REGEX "${DISALLOWED_PATTERN}")
-    if(MATCHES)
+    file(READ "${HEADER}" CONTENT)
+    string(REGEX MATCH "${DISALLOWED_PATTERN}" HEADER_HIT "${CONTENT}")
+    if(NOT HEADER_HIT STREQUAL "")
         list(APPEND VIOLATIONS "${HEADER}")
     endif()
 endforeach()
@@ -37,4 +51,5 @@ if(VIOLATIONS)
     message(FATAL_ERROR "HeaderPurity check failed")
 endif()
 
-message(STATUS "HeaderPurity: scanned ${HEADERS} — no violations")
+list(LENGTH HEADERS HEADER_COUNT)
+message(STATUS "HeaderPurity: scanned ${HEADER_COUNT} headers — no violations")
