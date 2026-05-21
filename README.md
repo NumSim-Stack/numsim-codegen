@@ -98,8 +98,22 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
-The build pulls numsim-cas via `FetchContent`. No manual install needed.
+The build pulls numsim-cas via [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake)
+(vendored at `cmake/CPM.cmake`, pinned to an explicit SHA). No manual install
+needed. To share downloads across builds, point CPM at a cache directory:
+
+```bash
+cmake -B build -DCPM_SOURCE_CACHE=$HOME/.cache/CPM
+# or set CPM_SOURCE_CACHE in the environment.
+```
 
 ## License
 
 GPL-3.0. Matches numsim-cas.
+
+### Third-party
+
+`cmake/CPM.cmake` is a vendored release of [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake)
+by Lars Melchior, distributed under the MIT License (see the SPDX header at the
+top of that file). Bump by replacing the file with a newer release from
+<https://github.com/cpm-cmake/CPM.cmake/releases>.

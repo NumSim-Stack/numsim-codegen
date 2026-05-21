@@ -35,13 +35,14 @@ include(cmake/CPM.cmake)
 
 # ─── numsim-cas dependency ──────────────────────────────────────────────────
 
-# Suppress numsim-cas's own tests/examples — we only need the library.
-set(NUMSIM_CAS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(NUMSIM_CAS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(NUMSIM_CAS_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
-set(NUMSIM_CAS_INSTALL_LIBRARY OFF CACHE BOOL "" FORCE)
-
 if(NUMSIM_CODEGEN_USE_LOCAL_CAS)
+    # Suppress numsim-cas's own tests/examples in the local-checkout path.
+    # CPM scopes these via OPTIONS in the else-branch below.
+    set(NUMSIM_CAS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(NUMSIM_CAS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(NUMSIM_CAS_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
+    set(NUMSIM_CAS_INSTALL_LIBRARY OFF CACHE BOOL "" FORCE)
+
     if(NOT NUMSIM_CAS_SOURCE_DIR)
         message(FATAL_ERROR "NUMSIM_CODEGEN_USE_LOCAL_CAS=ON requires NUMSIM_CAS_SOURCE_DIR to be set")
     endif()
@@ -51,10 +52,27 @@ else()
     # Pin: bump this SHA deliberately. The previous `GIT_TAG main` made CI
     # non-reproducible — a breaking upstream commit would have flipped CI
     # red with no commit here. See issues #13, #21.
+    #
+    # CPM 0.42.3+: GIT_SHALLOW is intentionally absent. CPM auto-disables
+    # shallow clones when GIT_TAG is a commit hash (a SHA pin cannot be
+    # fetched shallowly without server-side uploadpack.allowReachableSHA1InWant,
+    # which GitHub does not guarantee). See cmake/CPM.cmake:929-934.
+    #
+    # SYSTEM YES suppresses warnings from numsim-cas headers in our builds.
+    # EXCLUDE_FROM_ALL keeps numsim-cas off the default build target unless
+    # something actually depends on it. OPTIONS scopes the cache vars to
+    # the subproject (vs leaking into the parent project's cache).
     CPMAddPackage(
         NAME numsim_cas
         GITHUB_REPOSITORY NumSim-Stack/numsim-cas
         GIT_TAG d9a9e8db574d4e3e1f56537b7702bd4fbb1fad44
+        SYSTEM YES
+        EXCLUDE_FROM_ALL YES
+        OPTIONS
+            "NUMSIM_CAS_BUILD_TESTS OFF"
+            "NUMSIM_CAS_BUILD_EXAMPLES OFF"
+            "NUMSIM_CAS_BUILD_BENCHMARK OFF"
+            "NUMSIM_CAS_INSTALL_LIBRARY OFF"
     )
 endif()
 
