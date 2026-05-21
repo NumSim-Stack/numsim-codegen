@@ -38,10 +38,16 @@ public:
     // Stateful symbols would need old/new MaterialProperty pair handling
     // that the MOOSE backend doesn't implement yet. Fail loudly rather
     // than silently emit a regular read.
+    //
+    // NOTE: stateful *outputs* (is_stateful == true on an OutputDecl) are
+    // NOT guarded here. They are currently accepted silently and produce
+    // a regular non-stateful MaterialProperty write, which is semantically
+    // wrong for state-variable updates. Tracked in issue #15. When adding
+    // the output guard, mirror the pattern below.
     for (auto const &i : model.inputs()) {
       if (i.role.is_stateful) {
         throw std::runtime_error(
-            "MooseMaterialTarget: stateful role '" + std::string(i.role.name) +
+            "MooseMaterialTarget: stateful role '" + i.role.name +
             "' on input '" + i.name +
             "' requires the History machinery (old/new MaterialProperty pair, "
             "stateful initialisation) which is not implemented in this phase. "
@@ -135,7 +141,8 @@ private:
     }
     for (auto const &i : model.inputs()) {
       os << "  params.addRequiredParam<MaterialPropertyName>(\"" << i.name
-         << "\", \"Coupled " << i.role.name << "\");\n";
+         << "\", \"Coupled " << escape_for_cpp_literal(i.role.name)
+         << "\");\n";
     }
     os << "  return params;\n";
     os << "}\n\n";
@@ -262,6 +269,22 @@ private:
         "MooseMaterialTarget: tensor rank " + std::to_string(rank) +
         " has no MOOSE storage type. Only rank 2 (RankTwoTensor) and "
         "rank 4 (RankFourTensor) are supported.");
+  }
+
+  // Escape a user-supplied string for safe inclusion in a C++ string
+  // literal. Escapes the two characters that would break the emitted
+  // "..." form: double-quote and backslash. Other characters (newlines,
+  // tabs, control codes) pass through and would produce ugly-but-valid
+  // C++; callers should additionally validate identifiers if needed.
+  // Cross-ref #14 → CORR-B4 for a future general-identifier validator.
+  static auto escape_for_cpp_literal(std::string_view s) -> std::string {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+      if (c == '"' || c == '\\') out += '\\';
+      out += c;
+    }
+    return out;
   }
 
   std::string m_app_name;
