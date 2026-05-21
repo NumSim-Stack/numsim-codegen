@@ -21,6 +21,7 @@ endif()
 # are picked up automatically without CONFIGURE_DEPENDS.
 file(GLOB_RECURSE HEADERS
     "${SEARCH_ROOT}/*.h"
+    "${SEARCH_ROOT}/*.H"
     "${SEARCH_ROOT}/*.hpp"
     "${SEARCH_ROOT}/*.hh"
     "${SEARCH_ROOT}/*.hxx"

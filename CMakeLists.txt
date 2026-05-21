@@ -205,7 +205,12 @@ endif()
 
 include(GNUInstallDirs)
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(TARGETS numsim_codegen numsim_codegen_headers
+# Only the STATIC target produces an installable archive. The INTERFACE
+# `numsim_codegen_headers` target has no binary artifact — its headers
+# are already installed via `install(DIRECTORY include/ ...)` above. It
+# will get added to install(TARGETS ... EXPORT ...) once the export-set
+# story lands (see the comment block above).
+install(TARGETS numsim_codegen
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
