@@ -17,34 +17,53 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 namespace numsim::codegen {
 
-// Semantic tag indicating what role an input plays in the constitutive
-// model. Backends interpret these to wire the recipe to framework-specific
-// inputs — Strain becomes MaterialProperty<RankTwoTensor>("strain") in
-// MOOSE, the STRAN array in Abaqus UMAT, etc.
-enum class InputRole {
-  Strain,             // ε — primary driving variable
-  StrainIncrement,    // Δε — Abaqus DSTRAN, viscoplastic increment
-  DeformationGradient,// F — finite-strain models
-  Stress,             // σ — for stress-driven formulations
-  Temperature,        // T
-  History,            // a state variable carried from the previous step
-  Other,              // generic input the backend treats as a coupled var
+// Semantic role describing what an input or output represents in a
+// constitutive model. Carries a name (used for documentation and identity
+// comparison) plus structured attributes that backends switch on to decide
+// how to wire the symbol to the framework — MOOSE's stateful-pair handling
+// triggers on `is_stateful`, Abaqus's symmetric-storage encoding triggers
+// on `is_symmetric` etc.
+//
+// The `roles::` namespace below ships a catalogue of common roles. Users
+// can construct custom Role values directly (e.g.
+//   `Role{.name="phase_field", .is_driving=true, .expected_rank=0}`)
+// without library changes — backends route them by attribute, not identity.
+//
+// Equality is name-based: two Role values with the same name compare equal
+// regardless of attribute differences. Don't redefine the canonical names
+// in `roles::` with different attribute values.
+struct Role {
+  std::string_view name;
+  bool is_stateful  = false;   // requires old/new pair (state variable)
+  bool is_driving   = false;   // primary kinematic/kinetic input
+  bool is_symmetric = false;   // symmetric rank-2 tensor
+  std::optional<std::size_t> expected_rank = std::nullopt;
+
+  friend constexpr auto operator==(Role const &a, Role const &b) -> bool {
+    return a.name == b.name;
+  }
 };
 
-// Semantic tag for outputs. Backends route these to the right framework
-// sink — Stress to _stress[_qp] in MOOSE / STRESS in Abaqus UMAT, etc.
-enum class OutputRole {
-  Stress,             // σ
-  ConsistentTangent,  // dσ/dε
-  HistoryNew,         // updated state variable
-  Dissipation,        // for dissipation-checking
-  Other,
-};
+// Catalogue of common roles. Backends recognise these by attribute, not
+// identity, so user-defined roles flow through correctly as long as their
+// attributes are set appropriately.
+namespace roles {
+  inline constexpr Role Strain              {"strain",               false, true,  true,  2};
+  inline constexpr Role StrainIncrement     {"strain_increment",     false, true,  true,  2};
+  inline constexpr Role DeformationGradient {"deformation_gradient", false, true,  false, 2};
+  inline constexpr Role Stress              {"stress",               false, false, true,  2};
+  inline constexpr Role ConsistentTangent   {"consistent_tangent",   false, false, false, 4};
+  inline constexpr Role Temperature         {"temperature",          false, true,  false, 0};
+  inline constexpr Role History             {"history",              true,  false, false};
+  inline constexpr Role Dissipation         {"dissipation",          false, false, false, 0};
+  inline constexpr Role Other               {"other"};
+} // namespace roles
 
 // Declaration of an external symbol (input, parameter). The codegen treats
 // inputs and parameters the same on the scalar/tensor level (both are
@@ -61,7 +80,7 @@ struct SymbolDecl {
   std::size_t rank = 0;  // tensor only
   std::optional<double> default_value; // parameter only
   std::string doc;
-  InputRole role = InputRole::Other;  // semantic tag; Other for parameters
+  Role role = roles::Other;  // semantic tag; Other for parameters
 };
 
 // Declaration of a computed output that the generated function emits.
@@ -76,7 +95,7 @@ struct OutputDecl {
       expr;
   std::size_t dim = 0;
   std::size_t rank = 0;
-  OutputRole role = OutputRole::Other;
+  Role role = roles::Other;
 };
 
 // The constitutive-model registry. Holds declared inputs, parameters,
@@ -91,7 +110,7 @@ public:
 
   // ─── Input declarations ─────────────────────────────────────────
 
-  auto add_scalar_input(std::string name, InputRole role = InputRole::Other)
+  auto add_scalar_input(std::string name, Role role = roles::Other)
       -> cas::expression_holder<cas::scalar_expression> {
     auto var = cas::make_expression<cas::scalar>(name);
     SymbolDecl decl{name, SymbolDecl::Category::Input,
@@ -104,7 +123,7 @@ public:
   }
 
   auto add_tensor_input(std::string name, std::size_t dim, std::size_t rank,
-                        InputRole role = InputRole::Other)
+                        Role role = roles::Other)
       -> cas::expression_holder<cas::tensor_expression> {
     auto var = cas::make_expression<cas::tensor>(name, dim, rank);
     SymbolDecl decl{name, SymbolDecl::Category::Input,
@@ -136,14 +155,14 @@ public:
 
   void add_output(std::string name,
                   cas::expression_holder<cas::scalar_expression> expr,
-                  OutputRole role = OutputRole::Other) {
+                  Role role = roles::Other) {
     OutputDecl decl{name, OutputDecl::Kind::Scalar, expr, 0, 0, role};
     m_outputs.push_back(std::move(decl));
   }
 
   void add_output(std::string name,
                   cas::expression_holder<cas::tensor_expression> expr,
-                  OutputRole role = OutputRole::Other) {
+                  Role role = roles::Other) {
     OutputDecl decl{name, OutputDecl::Kind::Tensor, expr, expr.get().dim(),
                     expr.get().rank(), role};
     m_outputs.push_back(std::move(decl));
@@ -251,7 +270,7 @@ public:
   }
 
   // Helpers for backends to find specific roles.
-  [[nodiscard]] auto find_input_by_role(InputRole role) const
+  [[nodiscard]] auto find_input_by_role(Role const &role) const
       -> SymbolDecl const * {
     for (auto const &s : m_symbols) {
       if (s.category == SymbolDecl::Category::Input && s.role == role) {
@@ -261,7 +280,7 @@ public:
     return nullptr;
   }
 
-  [[nodiscard]] auto find_output_by_role(OutputRole role) const
+  [[nodiscard]] auto find_output_by_role(Role const &role) const
       -> OutputDecl const * {
     for (auto const &o : m_outputs) {
       if (o.role == role) {

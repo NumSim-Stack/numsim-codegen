@@ -13,8 +13,8 @@ namespace {
 auto build_linear_elastic_shear() -> ConstitutiveModel {
   ConstitutiveModel m("LinearElasticShear");
   auto mu = m.add_parameter("mu", 0.5, "Shear modulus");
-  auto eps = m.add_tensor_input("eps", 3, 2, InputRole::Strain);
-  m.add_output("stress", 2 * mu * eps, OutputRole::Stress);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
   return m;
 }
 } // namespace
@@ -115,16 +115,16 @@ TEST(MooseTarget, ComputeQpUsesAdaptorAndCallsLayer2) {
 }
 
 TEST(MooseTarget, RecipeRolesDriveOutputMapping) {
-  // The OutputRole::Stress tag should make the corresponding output a
+  // The roles::Stress tag should make the corresponding output a
   // RankTwoTensor MaterialProperty named consistently in the generated
   // boilerplate. Test this end-to-end by checking the header members.
   MooseMaterialTarget target;
   auto m = build_linear_elastic_shear();
-  auto const *stress_decl = m.find_output_by_role(OutputRole::Stress);
+  auto const *stress_decl = m.find_output_by_role(roles::Stress);
   ASSERT_NE(stress_decl, nullptr);
   EXPECT_EQ(stress_decl->name, "stress");
 
-  auto const *strain_decl = m.find_input_by_role(InputRole::Strain);
+  auto const *strain_decl = m.find_input_by_role(roles::Strain);
   ASSERT_NE(strain_decl, nullptr);
   EXPECT_EQ(strain_decl->name, "eps");
 }
