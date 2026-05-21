@@ -1,8 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
-# 3.25 minimum so that CPM's `SYSTEM YES` parameter (CMP0167-era feature)
-# actually propagates SYSTEM-include semantics to numsim-cas's headers.
-# On CMake 3.20-3.24 it would silently no-op. CI uses ubuntu-24.04
-# (CMake 3.28+), so no cost.
+# 3.25 minimum so that CPM's `SYSTEM YES` parameter actually propagates
+# SYSTEM-include semantics to numsim-cas's headers. CMake 3.25 added the
+# `SYSTEM` argument to `add_subdirectory()` and `FetchContent_Declare()`;
+# CPM forwards it through (see cmake/CPM.cmake around lines 974 and 1163).
+# On CMake 3.20-3.24 it would simply not be appended — no warning, no
+# effect. CI uses ubuntu-24.04 (CMake 3.28+), so no cost to bumping.
 
 project(NumSim_CodeGen
     VERSION 0.1.0
