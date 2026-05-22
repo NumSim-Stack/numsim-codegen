@@ -136,19 +136,53 @@ else()
     )
 endif()
 
-# ─── Library (header-only) ──────────────────────────────────────────────────
+# ─── Library ────────────────────────────────────────────────────────────────
+#
+# Two-target layout:
+#   numsim_codegen_headers — INTERFACE façade. Public recipe/role/codegen-emit
+#                            headers. Pulls only lightweight deps (numsim-cas,
+#                            tmech). Safe for any consuming TU to include.
+#   numsim_codegen         — STATIC core. Backend implementations live here as
+#                            .cpp translation units. Future heavy deps (inja,
+#                            nlohmann/json — see issue #20) will link PRIVATE
+#                            here, never escaping into the public ABI.
+#
+# Downstream users link `numsim::codegen` and get both transitively. The split
+# exists so heavy template libraries never appear in the umbrella header.
 
-add_library(numsim_codegen INTERFACE)
-add_library(numsim::codegen ALIAS numsim_codegen)
+add_library(numsim_codegen_headers INTERFACE)
+# `numsim::codegen_headers` is the type-only alias for downstream consumers
+# that want the recipe/role/codegen-emit API without linking the STATIC
+# backend implementations. Useful for headers-only adapter libraries and
+# for the future Layer-2 `CompiledModel` work tracked in #18.
+add_library(numsim::codegen_headers ALIAS numsim_codegen_headers)
 
-target_include_directories(numsim_codegen
+target_include_directories(numsim_codegen_headers
     INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
 )
+target_link_libraries(numsim_codegen_headers INTERFACE NumSim_CAS)
+target_compile_features(numsim_codegen_headers INTERFACE cxx_std_23)
 
-target_link_libraries(numsim_codegen INTERFACE NumSim_CAS)
-target_compile_features(numsim_codegen INTERFACE cxx_std_23)
+add_library(numsim_codegen STATIC
+    src/targets/standalone_cxx.cpp
+    src/targets/moose_material.cpp)
+add_library(numsim::codegen ALIAS numsim_codegen)
+target_link_libraries(numsim_codegen PUBLIC numsim_codegen_headers)
+
+# POSITION_INDEPENDENT_CODE ON: downstream MOOSE apps and similar consumers
+# typically build as shared libraries / plugins. Linking a non-PIC STATIC
+# into a .so fails on x86_64 with R_X86_64_32 relocation errors.
+#
+# Hidden visibility + inlines-hidden: prepares the STATIC for the future
+# inja + nlohmann/json PRIVATE link (#20) — symbols from those deps must
+# not leak into consumers' dynamic-symbol tables.
+set_target_properties(numsim_codegen PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
 
 # ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -164,9 +198,19 @@ if(NUMSIM_CODEGEN_BUILD_EXAMPLES)
 endif()
 
 # ─── Install ────────────────────────────────────────────────────────────────
-# Header-only install. CMake package config / export targets are deferred
-# until numsim-cas itself exports installable targets (currently it does not
-# expose NumSim_CAS in an export set, which blocks install(EXPORT) here).
+# CMake package config / export targets are deferred until numsim-cas itself
+# exports installable targets (currently it does not expose NumSim_CAS in an
+# export set, which blocks install(EXPORT) here). When that lands, switch
+# to install(TARGETS ... EXPORT NumSimCodegenTargets) and emit a config file.
 
 include(GNUInstallDirs)
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+# Only the STATIC target produces an installable archive. The INTERFACE
+# `numsim_codegen_headers` target has no binary artifact — its headers
+# are already installed via `install(DIRECTORY include/ ...)` above. It
+# will get added to install(TARGETS ... EXPORT ...) once the export-set
+# story lands (see the comment block above).
+install(TARGETS numsim_codegen
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
