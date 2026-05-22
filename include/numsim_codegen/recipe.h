@@ -17,34 +17,68 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 namespace numsim::codegen {
 
-// Semantic tag indicating what role an input plays in the constitutive
-// model. Backends interpret these to wire the recipe to framework-specific
-// inputs — Strain becomes MaterialProperty<RankTwoTensor>("strain") in
-// MOOSE, the STRAN array in Abaqus UMAT, etc.
-enum class InputRole {
-  Strain,             // ε — primary driving variable
-  StrainIncrement,    // Δε — Abaqus DSTRAN, viscoplastic increment
-  DeformationGradient,// F — finite-strain models
-  Stress,             // σ — for stress-driven formulations
-  Temperature,        // T
-  History,            // a state variable carried from the previous step
-  Other,              // generic input the backend treats as a coupled var
+// Semantic role describing what an input or output represents in a
+// constitutive model. Carries a name (used for documentation and identity
+// comparison) plus structured attributes that backends switch on to decide
+// how to wire the symbol to the framework — MOOSE's stateful-pair handling
+// triggers on `is_stateful`, Abaqus's symmetric-storage encoding triggers
+// on `is_symmetric` etc.
+//
+// The `roles::` namespace below ships a catalogue of common roles. Users
+// can construct custom Role values directly (e.g.
+//   `Role{.name="phase_field", .is_driving=true, .expected_rank=0}`)
+// without library changes — backends route them by attribute, not identity.
+//
+// Equality is name-based: two Role values with the same name compare equal
+// regardless of attribute differences. Constructing a Role that shares its
+// name with a `roles::` catalogue entry but carries different attributes
+// throws at `add_*` time (see `ConstitutiveModel::validate_role_attributes`)
+// — silent attribute mismatch would otherwise mis-route through
+// `find_*_by_role`.
+//
+// `name` is held by value (`std::string`) so users may construct a Role
+// from a temporary or a local string without lifetime hazards.
+struct Role {
+  std::string name;
+  bool is_stateful  = false;   // requires old/new pair (state variable)
+  bool is_driving   = false;   // primary kinematic/kinetic input
+  bool is_symmetric = false;   // symmetric rank-2 tensor
+  std::optional<std::size_t> expected_rank = std::nullopt;
+
+  friend auto operator==(Role const &a, Role const &b) -> bool {
+    return a.name == b.name;
+  }
 };
 
-// Semantic tag for outputs. Backends route these to the right framework
-// sink — Stress to _stress[_qp] in MOOSE / STRESS in Abaqus UMAT, etc.
-enum class OutputRole {
-  Stress,             // σ
-  ConsistentTangent,  // dσ/dε
-  HistoryNew,         // updated state variable
-  Dissipation,        // for dissipation-checking
-  Other,
-};
+// Catalogue of common roles. Backends recognise these by attribute, not
+// identity, so user-defined roles flow through correctly as long as their
+// attributes are set appropriately. `inline const` (not `constexpr`)
+// because `Role` contains `std::string`, which is not a portable literal
+// type — `inline` still gives single-definition-across-TUs.
+//
+// NOTE: these globals are dynamically initialised (std::string member).
+// Calling `ConstitutiveModel::add_*` from another TU's static-init phase
+// is unsafe — the catalogue may not yet be constructed. Build recipes
+// at runtime (inside `main`, in a function), not at namespace scope as
+// `static ConstitutiveModel g_model("...");`. Tracked for hardening if a
+// real consumer ever hits the dynamic-init-order trap.
+namespace roles {
+  inline const Role Strain              {"strain",               false, true,  true,  2};
+  inline const Role StrainIncrement     {"strain_increment",     false, true,  true,  2};
+  inline const Role DeformationGradient {"deformation_gradient", false, true,  false, 2};
+  inline const Role Stress              {"stress",               false, false, true,  2};
+  inline const Role ConsistentTangent   {"consistent_tangent",   false, false, false, 4};
+  inline const Role Temperature         {"temperature",          false, true,  false, 0};
+  inline const Role History             {"history",              true,  false, false};
+  inline const Role Dissipation         {"dissipation",          false, false, false, 0};
+  inline const Role Other               {"other"};
+} // namespace roles
 
 // Declaration of an external symbol (input, parameter). The codegen treats
 // inputs and parameters the same on the scalar/tensor level (both are
@@ -61,7 +95,7 @@ struct SymbolDecl {
   std::size_t rank = 0;  // tensor only
   std::optional<double> default_value; // parameter only
   std::string doc;
-  InputRole role = InputRole::Other;  // semantic tag; Other for parameters
+  Role role = roles::Other;  // semantic tag; Other for parameters
 };
 
 // Declaration of a computed output that the generated function emits.
@@ -76,7 +110,7 @@ struct OutputDecl {
       expr;
   std::size_t dim = 0;
   std::size_t rank = 0;
-  OutputRole role = OutputRole::Other;
+  Role role = roles::Other;
 };
 
 // The constitutive-model registry. Holds declared inputs, parameters,
@@ -91,27 +125,29 @@ public:
 
   // ─── Input declarations ─────────────────────────────────────────
 
-  auto add_scalar_input(std::string name, InputRole role = InputRole::Other)
+  auto add_scalar_input(std::string name, Role role = roles::Other)
       -> cas::expression_holder<cas::scalar_expression> {
+    validate_role_attributes(role);
     auto var = cas::make_expression<cas::scalar>(name);
     SymbolDecl decl{name, SymbolDecl::Category::Input,
                     SymbolDecl::Kind::Scalar};
-    decl.role = role;
-    m_symbols.push_back(decl);
-    m_inputs_cache.push_back(decl);
+    decl.role = std::move(role);
+    m_inputs_cache.push_back(decl);            // copy
+    m_symbols.push_back(std::move(decl));      // move (no copy)
     m_scalar_symbols.emplace_back(name, var);
     return var;
   }
 
   auto add_tensor_input(std::string name, std::size_t dim, std::size_t rank,
-                        InputRole role = InputRole::Other)
+                        Role role = roles::Other)
       -> cas::expression_holder<cas::tensor_expression> {
+    validate_role_attributes(role);
     auto var = cas::make_expression<cas::tensor>(name, dim, rank);
     SymbolDecl decl{name, SymbolDecl::Category::Input,
                     SymbolDecl::Kind::Tensor, dim, rank};
-    decl.role = role;
-    m_symbols.push_back(decl);
+    decl.role = std::move(role);
     m_inputs_cache.push_back(decl);
+    m_symbols.push_back(std::move(decl));
     m_tensor_symbols.emplace_back(name, var);
     return var;
   }
@@ -126,8 +162,8 @@ public:
                     SymbolDecl::Kind::Scalar};
     decl.default_value = default_value;
     decl.doc = std::move(doc);
-    m_symbols.push_back(decl);
     m_parameters_cache.push_back(decl);
+    m_symbols.push_back(std::move(decl));
     m_scalar_symbols.emplace_back(name, var);
     return var;
   }
@@ -136,16 +172,19 @@ public:
 
   void add_output(std::string name,
                   cas::expression_holder<cas::scalar_expression> expr,
-                  OutputRole role = OutputRole::Other) {
-    OutputDecl decl{name, OutputDecl::Kind::Scalar, expr, 0, 0, role};
+                  Role role = roles::Other) {
+    validate_role_attributes(role);
+    OutputDecl decl{name, OutputDecl::Kind::Scalar, expr, 0, 0,
+                    std::move(role)};
     m_outputs.push_back(std::move(decl));
   }
 
   void add_output(std::string name,
                   cas::expression_holder<cas::tensor_expression> expr,
-                  OutputRole role = OutputRole::Other) {
+                  Role role = roles::Other) {
+    validate_role_attributes(role);
     OutputDecl decl{name, OutputDecl::Kind::Tensor, expr, expr.get().dim(),
-                    expr.get().rank(), role};
+                    expr.get().rank(), std::move(role)};
     m_outputs.push_back(std::move(decl));
   }
 
@@ -251,7 +290,7 @@ public:
   }
 
   // Helpers for backends to find specific roles.
-  [[nodiscard]] auto find_input_by_role(InputRole role) const
+  [[nodiscard]] auto find_input_by_role(Role const &role) const
       -> SymbolDecl const * {
     for (auto const &s : m_symbols) {
       if (s.category == SymbolDecl::Category::Input && s.role == role) {
@@ -261,7 +300,7 @@ public:
     return nullptr;
   }
 
-  [[nodiscard]] auto find_output_by_role(OutputRole role) const
+  [[nodiscard]] auto find_output_by_role(Role const &role) const
       -> OutputDecl const * {
     for (auto const &o : m_outputs) {
       if (o.role == role) {
@@ -284,6 +323,36 @@ public:
   }
 
 private:
+  // Reject a user-defined Role that shares a name with a `roles::` catalogue
+  // entry but carries different attribute values. Name-only equality means
+  // such a mismatch would otherwise silently mis-route through
+  // find_*_by_role and confuse backends. Called from every `add_*` so the
+  // error surfaces at the offending call, not at emit time.
+  static void validate_role_attributes(Role const &r) {
+    auto check = [&](Role const &canon, char const *constant_name) {
+      if (r.name != canon.name) return;
+      if (r.is_stateful   != canon.is_stateful
+       || r.is_driving    != canon.is_driving
+       || r.is_symmetric  != canon.is_symmetric
+       || r.expected_rank != canon.expected_rank) {
+        throw std::runtime_error(
+            "Role '" + r.name + "' shares its name with predefined " +
+            constant_name + " but carries different attribute values. " +
+            "Either use the predefined constant directly, or pick a different "
+            "name for the custom role.");
+      }
+    };
+    check(roles::Strain,              "roles::Strain");
+    check(roles::StrainIncrement,     "roles::StrainIncrement");
+    check(roles::DeformationGradient, "roles::DeformationGradient");
+    check(roles::Stress,              "roles::Stress");
+    check(roles::ConsistentTangent,   "roles::ConsistentTangent");
+    check(roles::Temperature,         "roles::Temperature");
+    check(roles::History,             "roles::History");
+    check(roles::Dissipation,         "roles::Dissipation");
+    check(roles::Other,               "roles::Other");
+  }
+
   [[nodiscard]] auto render_compute_function(
       CodeGenContext const &ctx,
       std::vector<std::string> const &output_rhs) const -> std::string {

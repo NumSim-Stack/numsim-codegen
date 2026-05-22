@@ -24,9 +24,10 @@ namespace numsim::codegen {
 // underlying storage is contiguous row-major doubles, which matches
 // MOOSE's internal layout for RankTwoTensorTempl<Real> / RankFourTensorTempl.
 //
-// Inputs tagged with InputRole::Strain become MaterialProperty<RankTwoTensor>
-// reads. Outputs tagged with OutputRole::Stress become
-// MaterialProperty<RankTwoTensor> writes. Other roles are mapped likewise.
+// Inputs tagged with roles::Strain become MaterialProperty<RankTwoTensor>
+// reads. Outputs tagged with roles::Stress become MaterialProperty<RankTwoTensor>
+// writes. Role attributes (is_stateful, is_symmetric, ...) drive backend
+// decisions — user-defined roles flow through transparently.
 class MooseMaterialTarget : public Target {
 public:
   explicit MooseMaterialTarget(std::string app_name = "MyApp")
@@ -34,13 +35,20 @@ public:
 
   [[nodiscard]] auto emit(ConstitutiveModel const &model) const
       -> std::vector<EmittedFile> override {
-    // History symbols would need old/new MaterialProperty pair handling
+    // Stateful symbols would need old/new MaterialProperty pair handling
     // that the MOOSE backend doesn't implement yet. Fail loudly rather
     // than silently emit a regular read.
+    //
+    // NOTE: stateful *outputs* (is_stateful == true on an OutputDecl) are
+    // NOT guarded here. They are currently accepted silently and produce
+    // a regular non-stateful MaterialProperty write, which is semantically
+    // wrong for state-variable updates. Tracked in issue #15. When adding
+    // the output guard, mirror the pattern below.
     for (auto const &i : model.inputs()) {
-      if (i.role == InputRole::History) {
+      if (i.role.is_stateful) {
         throw std::runtime_error(
-            "MooseMaterialTarget: InputRole::History on input '" + i.name +
+            "MooseMaterialTarget: stateful role '" + i.role.name +
+            "' on input '" + i.name +
             "' requires the History machinery (old/new MaterialProperty pair, "
             "stateful initialisation) which is not implemented in this phase. "
             "See the numsim-codegen Phase B roadmap.");
@@ -133,7 +141,8 @@ private:
     }
     for (auto const &i : model.inputs()) {
       os << "  params.addRequiredParam<MaterialPropertyName>(\"" << i.name
-         << "\", \"Coupled " << input_role_doc(i.role) << "\");\n";
+         << "\", \"Coupled " << escape_for_cpp_literal(i.role.name)
+         << "\");\n";
     }
     os << "  return params;\n";
     os << "}\n\n";
@@ -262,17 +271,32 @@ private:
         "rank 4 (RankFourTensor) are supported.");
   }
 
-  static auto input_role_doc(InputRole role) -> std::string {
-    switch (role) {
-      case InputRole::Strain:             return "strain tensor";
-      case InputRole::StrainIncrement:    return "strain increment tensor";
-      case InputRole::DeformationGradient:return "deformation gradient";
-      case InputRole::Stress:             return "stress tensor";
-      case InputRole::Temperature:        return "temperature";
-      case InputRole::History:            return "history variable";
-      case InputRole::Other:              return "input";
+  // Escape a user-supplied string for safe inclusion in a C++ string
+  // literal. Handles the five characters that would otherwise produce
+  // ill-formed C++:
+  //   `"`  unescaped quote terminates the literal early
+  //   `\\` unescaped backslash starts an unintended escape sequence
+  //   `\n` raw newline in a string literal is forbidden by [lex.string]
+  //   `\r` produces an embedded CR — implementation-defined behavior
+  //   `\0` embeds a null byte in the string value, which silently
+  //         truncates downstream C-string APIs
+  // Tabs and other control bytes pass through unchanged (ugly but legal).
+  // Cross-ref #14 → CORR-B4 for a future general-identifier validator
+  // that would reject non-identifier names at recipe-build time.
+  static auto escape_for_cpp_literal(std::string_view s) -> std::string {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+      switch (c) {
+        case '"':  out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n";  break;
+        case '\r': out += "\\r";  break;
+        case '\0': out += "\\0";  break;
+        default:   out += c;      break;
+      }
     }
-    return "input";
+    return out;
   }
 
   std::string m_app_name;

@@ -17,10 +17,10 @@ int main() {
   ConstitutiveModel model("LinearElasticShear");
 
   auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
-  auto eps = model.add_tensor_input("eps", 3, 2, InputRole::Strain);
+  auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
 
   auto sigma = 2 * mu * eps;
-  model.add_output("stress", sigma, OutputRole::Stress);
+  model.add_output("stress", sigma, roles::Stress);
 
   MooseMaterialTarget target("ConstitutiveApp");
   for (auto const &file : target.emit(model)) {
