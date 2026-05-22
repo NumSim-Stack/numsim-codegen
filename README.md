@@ -98,7 +98,25 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
-The build pulls numsim-cas via `FetchContent`. No manual install needed.
+The build uses [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake) (downloaded
+once at configure time and SHA256-pinned in `CMakeLists.txt`) to pull
+numsim-cas. The first `cmake -B build` needs network access; subsequent
+configures reuse the cached copy. To share that cache across projects,
+point CPM at a local cache directory — either via env var:
+
+```bash
+export CPM_SOURCE_CACHE=$HOME/.cache/CPM
+cmake -B build
+```
+
+…or per-invocation via `-D`:
+
+```bash
+cmake -B build -DCPM_SOURCE_CACHE=/path/to/cache
+```
+
+CMake does not expand `~` in paths supplied to `-D`, so use `$HOME` or an
+absolute path.
 
 ## License
 
