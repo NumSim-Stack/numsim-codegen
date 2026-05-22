@@ -28,16 +28,45 @@ option(NUMSIM_CODEGEN_USE_LOCAL_CAS "Use a local numsim-cas checkout (set NUMSIM
 
 # ─── Dependency manager: CPM ───────────────────────────────────────────────
 #
-# Vendored single-file CMake package manager (cmake/CPM.cmake). Wraps
-# FetchContent with explicit SHA pinning, a global source cache (set
-# CPM_SOURCE_CACHE env or -DCPM_SOURCE_CACHE=<path> to share downloads
-# across builds), and source-availability detection.
+# CPM.cmake is downloaded once at configure time and reused thereafter.
+# This is the pattern CPM's own README recommends — avoids vendoring a
+# 1300-line third-party file in our tree, keeps bumping to a one-line
+# change, and stays reproducible via the SHA256 pin below.
 #
-# To bump CPM itself: download a newer release asset from
-#   https://github.com/cpm-cmake/CPM.cmake/releases
-# and overwrite cmake/CPM.cmake.
+# To bump CPM:
+#   1. Pick a new release at https://github.com/cpm-cmake/CPM.cmake/releases
+#   2. Update CPM_DOWNLOAD_VERSION and CPM_HASH_SHA256 below.
+#      (curl -sL <url> | sha256sum  for the hash.)
+#
+# CPM_SOURCE_CACHE (env var or -D) — share the downloaded CPM.cmake AND
+# all CPM-fetched dependencies across projects on the same machine.
+# Recommended for local dev:  export CPM_SOURCE_CACHE=$HOME/.cache/CPM
 
-include(cmake/CPM.cmake)
+set(CPM_DOWNLOAD_VERSION 0.42.3)
+set(CPM_HASH_SHA256
+    a609e875fd532b067174250f6abbc3dac22fe2d64869783fb1e80bda1625c844)
+
+if(CPM_SOURCE_CACHE)
+    set(CPM_DOWNLOAD_LOCATION
+        "${CPM_SOURCE_CACHE}/cpm/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
+elseif(DEFINED ENV{CPM_SOURCE_CACHE})
+    set(CPM_DOWNLOAD_LOCATION
+        "$ENV{CPM_SOURCE_CACHE}/cpm/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
+else()
+    set(CPM_DOWNLOAD_LOCATION
+        "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
+endif()
+
+if(NOT EXISTS "${CPM_DOWNLOAD_LOCATION}")
+    message(STATUS
+        "Downloading CPM.cmake v${CPM_DOWNLOAD_VERSION} to ${CPM_DOWNLOAD_LOCATION}")
+    file(DOWNLOAD
+        "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake"
+        "${CPM_DOWNLOAD_LOCATION}"
+        EXPECTED_HASH SHA256=${CPM_HASH_SHA256})
+endif()
+
+include("${CPM_DOWNLOAD_LOCATION}")
 
 # ─── numsim-cas dependency ──────────────────────────────────────────────────
 
