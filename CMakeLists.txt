@@ -57,7 +57,24 @@ else()
         "${CMAKE_BINARY_DIR}/cmake/CPM_${CPM_DOWNLOAD_VERSION}.cmake")
 endif()
 
-if(NOT EXISTS "${CPM_DOWNLOAD_LOCATION}")
+# Verify the cached file's hash on every configure (not just on initial
+# download). A truncated download (interrupted ctrl-C), disk corruption,
+# or tampering with a shared CPM_SOURCE_CACHE would otherwise be trusted
+# silently. file(SHA256) on a ~60 KB file is sub-millisecond, so the cost
+# is negligible.
+set(_numsim_cpm_cache_ok FALSE)
+if(EXISTS "${CPM_DOWNLOAD_LOCATION}")
+    file(SHA256 "${CPM_DOWNLOAD_LOCATION}" _numsim_cpm_cached_hash)
+    if(_numsim_cpm_cached_hash STREQUAL "${CPM_HASH_SHA256}")
+        set(_numsim_cpm_cache_ok TRUE)
+    else()
+        message(STATUS
+            "Cached CPM.cmake at ${CPM_DOWNLOAD_LOCATION} has wrong hash; re-downloading")
+        file(REMOVE "${CPM_DOWNLOAD_LOCATION}")
+    endif()
+endif()
+
+if(NOT _numsim_cpm_cache_ok)
     message(STATUS
         "Downloading CPM.cmake v${CPM_DOWNLOAD_VERSION} to ${CPM_DOWNLOAD_LOCATION}")
     file(DOWNLOAD
