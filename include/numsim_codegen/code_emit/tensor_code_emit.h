@@ -171,12 +171,15 @@ public:
     if (v.rank() != 2) {
       throw std::runtime_error(
           "TensorCodeEmit: tensor_inv of rank " + std::to_string(v.rank()) +
-          " is not yet supported. Rank-2 ships now; rank-4 emit lands once "
-          "numsim-cas exposes the inv-contraction pair on the tensor_inv "
-          "node (NumSim-Stack/numsim-cas#248).");
+          " is not yet supported. Use rank-2 tensors, or track "
+          "NumSim-Stack/numsim-cas#248 for rank-4 support landing upstream.");
     }
     auto inner = apply(v.expr());
-    m_result = register_temp(&v, "tmech::inv(" + inner + ")");
+    // wrap_if_compound: today `inner` is always a single token (named symbol
+    // or temp from a prior register_temp), so this is a no-op. The wrap
+    // future-proofs against any node that starts returning a compound
+    // `m_result` (cf. the same pattern in tensor_scalar_mul).
+    m_result = register_temp(&v, "tmech::inv(" + wrap_if_compound(inner) + ")");
   }
 
 private:

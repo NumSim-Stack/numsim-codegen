@@ -78,7 +78,10 @@ TEST(TensorCodeEmit, TensorInvEmitsTmechInv) {
 
 TEST(TensorCodeEmit, TensorInvOnCompoundInputReusesTemp) {
   // The inner expression should resolve through CSE; tmech::inv operates
-  // on a temp name, not on a parenthesised inline expression.
+  // on a temp name, not on a parenthesised inline expression. Substring
+  // match on `tmech::inv(t` avoids depending on the exact counter value
+  // (which is preserved across `ctx.reset()` calls and could shift if the
+  // test fixture ever shares a context).
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
   TensorCodeEmit emit(ctx, scalar_emit);
@@ -88,17 +91,26 @@ TEST(TensorCodeEmit, TensorInvOnCompoundInputReusesTemp) {
   ctx.register_symbol_tensor(A, "A");
   ctx.register_symbol_tensor(B, "B");
 
-  // inv(A + B) — the sum gets its own temp; inv operates on that temp.
   emit.apply(cas::make_expression<cas::tensor_inv>(A + B));
   auto rendered = ctx.render_statements();
-  EXPECT_NE(rendered.find("tmech::inv(t0)"), std::string::npos)
+  EXPECT_NE(rendered.find("tmech::inv(t"), std::string::npos)
       << "got: " << rendered;
+  // And the sum itself was emitted as a temp (i.e. the inv argument is a
+  // temp name, not an inline parenthesised expression).
+  EXPECT_NE(rendered.find(" + "), std::string::npos) << "got: " << rendered;
 }
 
+// TODO(numsim-cas#248): once upstream lands rank-4 tensor_inv support,
+// remove this test (and the rank-4 throw branch in TensorCodeEmit), and
+// add a new test asserting the templated `tmech::inv<sequence<...>,
+// sequence<...>>(...)` emit shape. Tracking on the codegen side: #43.
 TEST(TensorCodeEmit, TensorInvRank4ThrowsClearly) {
-  // Rank-4 inverse needs the contraction-index pair from numsim-cas;
-  // current emit refuses to guess and throws with an actionable message
-  // pointing at the upstream issue (NumSim-Stack/numsim-cas#248).
+  // The numsim-cas `inv()` factory rejects rank-4 inputs (per
+  // numsim-cas#192) so this codepath is unreachable through the normal
+  // public API. We bypass the factory via `make_expression<tensor_inv>`
+  // to exercise the emitter's independent guard — defensive against
+  // any future code path that constructs a rank-4 tensor_inv directly
+  // (e.g. serialisation round-trip without factory validation).
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
   TensorCodeEmit emit(ctx, scalar_emit);
