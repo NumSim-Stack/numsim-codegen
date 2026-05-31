@@ -139,6 +139,8 @@ TEST(ScalarCodeEmit, GreaterThanEmitsStaticCastDouble) {
   auto [x, y] = make_two_scalars(ctx);
   emit.apply(cas::gt(x, y));
   auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("static_cast<double>"), std::string::npos)
+      << "got: " << rendered;
   EXPECT_NE(rendered.find(" > "), std::string::npos) << "got: " << rendered;
 }
 
@@ -148,6 +150,8 @@ TEST(ScalarCodeEmit, LessEqualEmitsStaticCastDouble) {
   auto [x, y] = make_two_scalars(ctx);
   emit.apply(cas::le(x, y));
   auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("static_cast<double>"), std::string::npos)
+      << "got: " << rendered;
   EXPECT_NE(rendered.find(" <= "), std::string::npos) << "got: " << rendered;
 }
 
@@ -157,6 +161,8 @@ TEST(ScalarCodeEmit, GreaterEqualEmitsStaticCastDouble) {
   auto [x, y] = make_two_scalars(ctx);
   emit.apply(cas::ge(x, y));
   auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("static_cast<double>"), std::string::npos)
+      << "got: " << rendered;
   EXPECT_NE(rendered.find(" >= "), std::string::npos) << "got: " << rendered;
 }
 
@@ -166,6 +172,8 @@ TEST(ScalarCodeEmit, EqualEmitsStaticCastDouble) {
   auto [x, y] = make_two_scalars(ctx);
   emit.apply(cas::eq(x, y));
   auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("static_cast<double>"), std::string::npos)
+      << "got: " << rendered;
   EXPECT_NE(rendered.find(" == "), std::string::npos) << "got: " << rendered;
 }
 
@@ -175,6 +183,8 @@ TEST(ScalarCodeEmit, NotEqualEmitsStaticCastDouble) {
   auto [x, y] = make_two_scalars(ctx);
   emit.apply(cas::ne(x, y));
   auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("static_cast<double>"), std::string::npos)
+      << "got: " << rendered;
   EXPECT_NE(rendered.find(" != "), std::string::npos) << "got: " << rendered;
 }
 

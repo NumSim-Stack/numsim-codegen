@@ -4,6 +4,8 @@
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
 
+#include <numsim_cas/tensor/identity_tensor.h>
+#include <numsim_cas/tensor/levi_civita_tensor.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_visitor_typedef.h>
 
