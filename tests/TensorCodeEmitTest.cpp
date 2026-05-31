@@ -97,7 +97,8 @@ TEST(TensorCodeEmit, TensorInvOnCompoundInputReusesTemp) {
 
 TEST(TensorCodeEmit, TensorInvRank4ThrowsClearly) {
   // Rank-4 inverse needs the contraction-index pair from numsim-cas;
-  // current emit refuses to guess and throws with an actionable message.
+  // current emit refuses to guess and throws with an actionable message
+  // pointing at the upstream issue (NumSim-Stack/numsim-cas#248).
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
   TensorCodeEmit emit(ctx, scalar_emit);
@@ -111,7 +112,7 @@ TEST(TensorCodeEmit, TensorInvRank4ThrowsClearly) {
   } catch (std::runtime_error const &e) {
     std::string msg(e.what());
     EXPECT_NE(msg.find("rank 4"), std::string::npos) << "msg: " << msg;
-    EXPECT_NE(msg.find("contraction-index"), std::string::npos)
+    EXPECT_NE(msg.find("numsim-cas#248"), std::string::npos)
         << "msg: " << msg;
   }
 }

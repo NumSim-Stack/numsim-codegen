@@ -161,20 +161,19 @@ public:
   // `inv` needs explicit contraction-index sequences (e.g.
   // `tmech::inv<tmech::sequence<1,2>, tmech::sequence<3,4>>(A)` for the
   // natural rank-4 inverse). That index pair is a property of the
-  // tensor's algebraic structure and should be carried on the
-  // `cas::tensor_inv` node itself, not chosen by the codegen. Tracked
-  // as an upstream extension to numsim-cas (carry an
-  // `inv_contraction_pair()` accessor; codegen plumbs it into the
-  // emitted template-arg list). Until then, rank ≠ 2 throws with a
-  // pointer at this comment.
+  // tensor's algebraic structure and is being added to `cas::tensor_inv`
+  // upstream — see NumSim-Stack/numsim-cas#248 (decision: Option A,
+  // landing in a future numsim-cas release). Once the accessor is
+  // available, this emit case reads it and produces the templated
+  // `tmech::inv<sequence<...>, sequence<...>>(...)` form; the rank-2
+  // path below is unchanged. Local follow-up: #43.
   void operator()(cas::tensor_inv const &v) override {
     if (v.rank() != 2) {
       throw std::runtime_error(
           "TensorCodeEmit: tensor_inv of rank " + std::to_string(v.rank()) +
-          " needs the contraction-index sequence pair from numsim-cas. "
-          "Rank-2 is supported now; rank-4 emit lands once numsim-cas "
-          "exposes the inv-contraction pair on the tensor_inv node "
-          "(tracked upstream).");
+          " is not yet supported. Rank-2 ships now; rank-4 emit lands once "
+          "numsim-cas exposes the inv-contraction pair on the tensor_inv "
+          "node (NumSim-Stack/numsim-cas#248).");
     }
     auto inner = apply(v.expr());
     m_result = register_temp(&v, "tmech::inv(" + inner + ")");
