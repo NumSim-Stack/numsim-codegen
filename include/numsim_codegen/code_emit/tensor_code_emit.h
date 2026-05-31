@@ -8,6 +8,7 @@
 #include <numsim_cas/tensor/levi_civita_tensor.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_visitor_typedef.h>
+#include <numsim_cas/tensor/wrappers/tensor_inv.h>
 
 #include <ranges>
 #include <sstream>
@@ -147,11 +148,23 @@ public:
   NUMSIM_CODEGEN_TENSOR_STUB(permute_indices_wrapper)
   NUMSIM_CODEGEN_TENSOR_STUB(outer_product_wrapper)
   NUMSIM_CODEGEN_TENSOR_STUB(simple_outer_product)
-  NUMSIM_CODEGEN_TENSOR_STUB(tensor_inv)
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_projector)
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_to_scalar_with_tensor_mul)
 
 #undef NUMSIM_CODEGEN_TENSOR_STUB
+
+  // ─── Implemented unary nodes ─────────────────────────────────────
+
+  // tensor_inv → tmech::inv(...). tmech's variadic signature
+  // `inv(_Tensor &&, _Sequences ...)` accepts the default form for any
+  // supported rank (rank-2 matrix inverse and the natural rank-4 inverse
+  // via internal 6×6 / 9×9 flatten). When the algorithmic-tangent pass
+  // (D7 / #35) needs a specific contraction-index pair for rank-4, swap
+  // in the explicit-sequence form here.
+  void operator()(cas::tensor_inv const &v) override {
+    auto inner = apply(v.expr());
+    m_result = register_temp(&v, "tmech::inv(" + inner + ")");
+  }
 
 private:
   auto register_temp(void const *ptr, std::string rhs) -> std::string {
