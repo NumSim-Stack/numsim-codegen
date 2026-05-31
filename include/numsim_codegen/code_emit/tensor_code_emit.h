@@ -4,6 +4,7 @@
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
 
+#include <numsim_cas/basic_functions.h>
 #include <numsim_cas/tensor/identity_tensor.h>
 #include <numsim_cas/tensor/levi_civita_tensor.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
@@ -144,10 +145,7 @@ public:
 
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_mul)
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_pow)
-  NUMSIM_CODEGEN_TENSOR_STUB(inner_product_wrapper)
   NUMSIM_CODEGEN_TENSOR_STUB(permute_indices_wrapper)
-  NUMSIM_CODEGEN_TENSOR_STUB(outer_product_wrapper)
-  NUMSIM_CODEGEN_TENSOR_STUB(simple_outer_product)
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_to_scalar_with_tensor_mul)
 
 #undef NUMSIM_CODEGEN_TENSOR_STUB
@@ -226,6 +224,78 @@ public:
         "P_dev {Symmetric, Deviatoric}.");
   }
 
+  // outer_product_wrapper → tmech::outer_product<sequence<...>, sequence<...>>.
+  //
+  // numsim-cas stores contraction/placement sequences 0-based; tmech's
+  // template sequence is 1-based, hence the +1 in `tmech_sequence_str`.
+  void operator()(cas::outer_product_wrapper const &v) override {
+    auto lhs = apply(v.expr_lhs());
+    auto rhs = apply(v.expr_rhs());
+    std::ostringstream os;
+    os << "tmech::outer_product<" << tmech_sequence_str(v.indices_lhs()) << ", "
+       << tmech_sequence_str(v.indices_rhs()) << ">(" << lhs << ", " << rhs
+       << ")";
+    m_result = register_temp(&v, os.str());
+  }
+
+  // simple_outer_product → chained tmech::outer_product calls.
+  //
+  // The cas node is n-ary with no per-child index control: indices of the
+  // result are children's indices concatenated left-to-right. We accumulate
+  // left-to-right with rank-based 1-based sequences `<1..r_acc>` × `<r_acc+1
+  // ..r_acc+r_child>`. Inlining the nested calls keeps a single `auto tN =
+  // …;` line — the compiler's expression-template machinery sees through it.
+  void operator()(cas::simple_outer_product const &v) override {
+    auto const &children = v.data();
+    if (children.empty()) {
+      // Defensive fallback — simplifier normally collapses an empty product.
+      std::ostringstream zero;
+      zero << "tmech::tensor<double, " << v.dim() << ", " << v.rank() << ">{}";
+      m_result = register_temp(&v, zero.str());
+      return;
+    }
+    if (children.size() == 1) {
+      m_result = apply(children.front());
+      return;
+    }
+    std::string acc = apply(children.front());
+    std::size_t acc_rank = children.front().get().rank();
+    for (std::size_t i = 1; i < children.size(); ++i) {
+      auto rhs_name = apply(children[i]);
+      const std::size_t rhs_rank = children[i].get().rank();
+      std::ostringstream os;
+      os << "tmech::outer_product<" << contiguous_sequence_str(1, acc_rank)
+         << ", " << contiguous_sequence_str(acc_rank + 1, acc_rank + rhs_rank)
+         << ">(" << acc << ", " << rhs_name << ")";
+      acc = os.str();
+      acc_rank += rhs_rank;
+    }
+    m_result = register_temp(&v, std::move(acc));
+  }
+
+  // inner_product_wrapper → tmech::inner_product<sequence<...>, sequence<...>>.
+  //
+  // Short-circuit: if LHS is a rank-4 P_{sym|skew|vol|dev} projector and the
+  // contraction matches the rank-2 application pattern `{3,4} × {1,2}`, emit
+  // the equivalent unary tmech op directly. This is the same optimisation
+  // numsim-cas's tensor_evaluator applies (tensor_evaluator.h:110) — keeps
+  // generated code readable and avoids materialising the projector tensor.
+  void operator()(cas::inner_product_wrapper const &v) override {
+    if (auto fn = projector_short_circuit_fn(v)) {
+      auto rhs = apply(v.expr_rhs());
+      m_result = register_temp(&v, std::string{"tmech::"} + fn + "(" + rhs +
+                                       ")");
+      return;
+    }
+    auto lhs = apply(v.expr_lhs());
+    auto rhs = apply(v.expr_rhs());
+    std::ostringstream os;
+    os << "tmech::inner_product<" << tmech_sequence_str(v.indices_lhs()) << ", "
+       << tmech_sequence_str(v.indices_rhs()) << ">(" << lhs << ", " << rhs
+       << ")";
+    m_result = register_temp(&v, os.str());
+  }
+
   // tensor_inv → tmech::inv(...). Rank-2 only in this phase.
   //
   // For rank ≠ 2 the inverse is well-defined algebraically but tmech's
@@ -268,6 +338,70 @@ private:
 
   static auto wrap_if_compound(std::string const &s) -> std::string {
     return is_single_token(s) ? s : "(" + s + ")";
+  }
+
+  // Render a cas::sequence (0-based) as a 1-based tmech::sequence<...>.
+  static auto tmech_sequence_str(cas::sequence const &s) -> std::string {
+    std::ostringstream os;
+    os << "tmech::sequence<";
+    bool first = true;
+    for (auto i : s.indices()) {
+      if (!first)
+        os << ", ";
+      os << (i + 1); // cas stores 0-based; tmech uses 1-based.
+      first = false;
+    }
+    os << ">";
+    return os.str();
+  }
+
+  // Render `tmech::sequence<lo, lo+1, ..., hi>` (1-based, inclusive).
+  static auto contiguous_sequence_str(std::size_t lo, std::size_t hi)
+      -> std::string {
+    std::ostringstream os;
+    os << "tmech::sequence<";
+    for (std::size_t k = lo; k <= hi; ++k) {
+      if (k != lo)
+        os << ", ";
+      os << k;
+    }
+    os << ">";
+    return os.str();
+  }
+
+  // If `v` is `P : A` for a known rank-4 projector preset applied to a
+  // rank-2 tensor (`{3,4} × {1,2}` contraction), return the tmech unary
+  // function name. Otherwise return nullptr.
+  static auto projector_short_circuit_fn(cas::inner_product_wrapper const &v)
+      -> const char * {
+    if (v.indices_lhs() != cas::sequence{3, 4} ||
+        v.indices_rhs() != cas::sequence{1, 2}) {
+      return nullptr;
+    }
+    if (v.expr_rhs().get().rank() != 2) {
+      return nullptr;
+    }
+    if (!cas::is_same<cas::tensor_projector>(v.expr_lhs())) {
+      return nullptr;
+    }
+    auto const &proj = v.expr_lhs().template get<cas::tensor_projector>();
+    if (proj.acts_on_rank() != 2) {
+      return nullptr;
+    }
+    auto const &sp = proj.space();
+    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
+        std::holds_alternative<cas::AnyTraceTag>(sp.trace))
+      return "sym";
+    if (std::holds_alternative<cas::Skew>(sp.perm) &&
+        std::holds_alternative<cas::AnyTraceTag>(sp.trace))
+      return "skew";
+    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
+        std::holds_alternative<cas::VolumetricTag>(sp.trace))
+      return "vol";
+    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
+        std::holds_alternative<cas::DeviatoricTag>(sp.trace))
+      return "dev";
+    return nullptr;
   }
 
   CodeGenContext &m_ctx;

@@ -285,4 +285,222 @@ TEST(TensorCodeEmit, ProjectorActsOnRank1ThrowsClearly) {
   }
 }
 
+// ─── outer_product_wrapper / simple_outer_product / inner_product_wrapper ──
+// (Phase 1.1, the index-bearing product family.)
+
+TEST(TensorCodeEmit, OuterProductWrapperEmitsTemplateForm) {
+  // a ⊗ b with placement (1,2) and (3,4) — i.e. the standard `otimes`.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  auto B = cas::make_expression<cas::tensor>("B", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  ctx.register_symbol_tensor(B, "B");
+
+  emit.apply(cas::make_expression<cas::outer_product_wrapper>(
+      A, cas::sequence{1, 2}, B, cas::sequence{3, 4}));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find(
+                "tmech::outer_product<tmech::sequence<1, 2>, "
+                "tmech::sequence<3, 4>>(A, B)"),
+            std::string::npos)
+      << "got: " << rendered;
+}
+
+TEST(TensorCodeEmit, OuterProductWrapperPreservesNon1234Indices) {
+  // Non-canonical placement — index sequence must round-trip 1-based to
+  // tmech, not get accidentally re-sorted or zero-based.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  auto B = cas::make_expression<cas::tensor>("B", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  ctx.register_symbol_tensor(B, "B");
+
+  // a_{ik} b_{jl} — the `otimesu` placement pattern.
+  emit.apply(cas::make_expression<cas::outer_product_wrapper>(
+      A, cas::sequence{1, 3}, B, cas::sequence{2, 4}));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::sequence<1, 3>"), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find("tmech::sequence<2, 4>"), std::string::npos)
+      << "got: " << rendered;
+}
+
+TEST(TensorCodeEmit, SimpleOuterProductTwoChildrenChains) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  auto B = cas::make_expression<cas::tensor>("B", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  ctx.register_symbol_tensor(B, "B");
+
+  cas::simple_outer_product sop(3, 4);
+  sop.push_back(A);
+  sop.push_back(B);
+  emit.apply(cas::make_expression<cas::simple_outer_product>(std::move(sop)));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::outer_product<tmech::sequence<1, 2>, "
+                          "tmech::sequence<3, 4>>(A, B)"),
+            std::string::npos)
+      << "got: " << rendered;
+}
+
+TEST(TensorCodeEmit, SimpleOuterProductThreeChildrenNests) {
+  // Three rank-2 children → rank-6 result. The accumulator picks up indices
+  // 1..2, then 1..4, then 1..6 for the third child's placement at <5,6>.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  auto B = cas::make_expression<cas::tensor>("B", 3, 2);
+  auto C = cas::make_expression<cas::tensor>("C", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  ctx.register_symbol_tensor(B, "B");
+  ctx.register_symbol_tensor(C, "C");
+
+  cas::simple_outer_product sop(3, 6);
+  sop.push_back(A);
+  sop.push_back(B);
+  sop.push_back(C);
+  emit.apply(cas::make_expression<cas::simple_outer_product>(std::move(sop)));
+  auto rendered = ctx.render_statements();
+  // Final outer carries the (1..4, 5..6) split, with the inner (A,B) form
+  // nested inside.
+  EXPECT_NE(rendered.find("tmech::sequence<1, 2, 3, 4>"), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find("tmech::sequence<5, 6>"), std::string::npos)
+      << "got: " << rendered;
+}
+
+TEST(TensorCodeEmit, InnerProductWrapperEmitsTemplateForm) {
+  // Generic double contraction C : ε for C rank-4, ε rank-2.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto C = cas::make_expression<cas::tensor>("C", 3, 4);
+  auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
+  ctx.register_symbol_tensor(C, "C");
+  ctx.register_symbol_tensor(eps, "eps");
+
+  emit.apply(cas::make_expression<cas::inner_product_wrapper>(
+      C, cas::sequence{3, 4}, eps, cas::sequence{1, 2}));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find(
+                "tmech::inner_product<tmech::sequence<3, 4>, "
+                "tmech::sequence<1, 2>>(C, eps)"),
+            std::string::npos)
+      << "got: " << rendered;
+}
+
+// Projector short-circuits — confirm `P : A` emits the unary tmech op rather
+// than materialising the rank-4 projector.
+
+TEST(TensorCodeEmit, InnerProductWithPSymEmitsTmechSym) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
+  ctx.register_symbol_tensor(eps, "eps");
+
+  emit.apply(cas::make_expression<cas::inner_product_wrapper>(
+      cas::P_sym(3), cas::sequence{3, 4}, eps, cas::sequence{1, 2}));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::sym(eps)"), std::string::npos)
+      << "got: " << rendered;
+  // And no projector tensor was materialised.
+  EXPECT_EQ(rendered.find("tmech::otimesu"), std::string::npos)
+      << "P_sym should have been short-circuited, not materialised. got: "
+      << rendered;
+}
+
+TEST(TensorCodeEmit, InnerProductWithPSkewEmitsTmechSkew) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
+  ctx.register_symbol_tensor(eps, "eps");
+
+  emit.apply(cas::make_expression<cas::inner_product_wrapper>(
+      cas::P_skew(3), cas::sequence{3, 4}, eps, cas::sequence{1, 2}));
+  EXPECT_NE(ctx.render_statements().find("tmech::skew(eps)"), std::string::npos);
+}
+
+TEST(TensorCodeEmit, InnerProductWithPVolEmitsTmechVol) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
+  ctx.register_symbol_tensor(eps, "eps");
+
+  emit.apply(cas::make_expression<cas::inner_product_wrapper>(
+      cas::P_vol(3), cas::sequence{3, 4}, eps, cas::sequence{1, 2}));
+  EXPECT_NE(ctx.render_statements().find("tmech::vol(eps)"), std::string::npos);
+}
+
+TEST(TensorCodeEmit, InnerProductWithPDevEmitsTmechDev) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
+  ctx.register_symbol_tensor(eps, "eps");
+
+  emit.apply(cas::make_expression<cas::inner_product_wrapper>(
+      cas::P_devi(3), cas::sequence{3, 4}, eps, cas::sequence{1, 2}));
+  EXPECT_NE(ctx.render_statements().find("tmech::dev(eps)"), std::string::npos);
+}
+
+TEST(TensorCodeEmit, InnerProductGenericFormUsedWhenLhsIsntKnownProjector) {
+  // A rank-4 LHS that ISN'T a projector should fall through to the generic
+  // tmech::inner_product form, not be misclassified.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto C = cas::make_expression<cas::tensor>("C", 3, 4);
+  auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
+  ctx.register_symbol_tensor(C, "C");
+  ctx.register_symbol_tensor(eps, "eps");
+
+  emit.apply(cas::make_expression<cas::inner_product_wrapper>(
+      C, cas::sequence{3, 4}, eps, cas::sequence{1, 2}));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::inner_product<"), std::string::npos)
+      << "got: " << rendered;
+  // And we did NOT mistakenly emit a unary projector op.
+  EXPECT_EQ(rendered.find("tmech::sym("), std::string::npos) << rendered;
+  EXPECT_EQ(rendered.find("tmech::dev("), std::string::npos) << rendered;
+}
+
+TEST(TensorCodeEmit, InnerProductProjectorOnRank4RhsFallsThrough) {
+  // Same projector LHS but rank-4 RHS — short-circuit must NOT trigger
+  // (it's only defined for the rank-2 application). Falls back to the
+  // generic inner_product emit.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto X = cas::make_expression<cas::tensor>("X", 3, 4);
+  ctx.register_symbol_tensor(X, "X");
+
+  emit.apply(cas::make_expression<cas::inner_product_wrapper>(
+      cas::P_sym(3), cas::sequence{3, 4}, X, cas::sequence{1, 2}));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::inner_product<"), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_EQ(rendered.find("tmech::sym("), std::string::npos) << rendered;
+}
+
 } // namespace numsim::codegen
