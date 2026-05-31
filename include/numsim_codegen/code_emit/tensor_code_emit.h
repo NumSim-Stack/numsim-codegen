@@ -148,12 +148,83 @@ public:
   NUMSIM_CODEGEN_TENSOR_STUB(permute_indices_wrapper)
   NUMSIM_CODEGEN_TENSOR_STUB(outer_product_wrapper)
   NUMSIM_CODEGEN_TENSOR_STUB(simple_outer_product)
-  NUMSIM_CODEGEN_TENSOR_STUB(tensor_projector)
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_to_scalar_with_tensor_mul)
 
 #undef NUMSIM_CODEGEN_TENSOR_STUB
 
   // ─── Implemented unary nodes ─────────────────────────────────────
+
+  // tensor_projector → rank-4 constant projector built from tmech primitives.
+  //
+  // Scope: `acts_on_rank == 2` (rank-4 projectors on rank-2 tensors). This is
+  // the case used by every Phase-A elasticity/plasticity recipe and matches
+  // the only presets currently exposed by numsim-cas (P_sym/P_skew/P_vol/
+  // P_dev/P_harm).
+  //
+  // We materialise the projector as a constant tensor rather than emitting
+  // `tmech::sym(A)` etc. Reason: the cas IR can hand us a bare
+  // `tensor_projector` not adjacent to an inner_product (e.g. as the LHS of
+  // an outer product, or as the argument to a differentiation). The
+  // applied-form short-circuit (`P_sym : A → sym(A)`) belongs in the
+  // `inner_product_wrapper` emit when that lands — same place numsim-cas's
+  // tensor_evaluator does it (tensor_evaluator.h:110).
+  //
+  // Component formulas (δ is the Kronecker delta, d = dim):
+  //   P_sym_{ijkl}  = ½(δ_ik δ_jl + δ_il δ_jk)  = ½(otimesu(I,I) + otimesl(I,I))
+  //   P_skew_{ijkl} = ½(δ_ik δ_jl − δ_il δ_jk)  = ½(otimesu(I,I) − otimesl(I,I))
+  //   P_vol_{ijkl}  = (1/d) δ_ij δ_kl           = (1/d) otimes(I,I)
+  //   P_dev_{ijkl}  = P_sym − P_vol
+  void operator()(cas::tensor_projector const &v) override {
+    const auto r = v.acts_on_rank();
+    if (r != 2) {
+      throw std::runtime_error(
+          "TensorCodeEmit: tensor_projector with acts_on_rank=" +
+          std::to_string(r) +
+          " is not yet supported. Only acts_on_rank=2 (rank-4 projectors on "
+          "rank-2 tensors) ships now; higher-rank projector emit lands once "
+          "we have a recipe that needs it.");
+    }
+    const auto d_str = std::to_string(v.dim());
+    const std::string eye = "tmech::eye<double, " + d_str + ", 2>()";
+    const std::string ou = "tmech::otimesu(" + eye + ", " + eye + ")";
+    const std::string ol = "tmech::otimesl(" + eye + ", " + eye + ")";
+    const std::string oo = "tmech::otimes(" + eye + ", " + eye + ")";
+    // (1.0 / d) keeps the literal a double; integer d in the denominator
+    // would silently floor for non-trivial d.
+    const std::string inv_d = "(1.0 / " + d_str + ".0)";
+
+    auto const &sp = v.space();
+    auto const &perm = sp.perm;
+    auto const &trace = sp.trace;
+
+    if (std::holds_alternative<cas::Symmetric>(perm) &&
+        std::holds_alternative<cas::AnyTraceTag>(trace)) {
+      m_result = register_temp(&v, "0.5 * (" + ou + " + " + ol + ")");
+      return;
+    }
+    if (std::holds_alternative<cas::Skew>(perm) &&
+        std::holds_alternative<cas::AnyTraceTag>(trace)) {
+      m_result = register_temp(&v, "0.5 * (" + ou + " - " + ol + ")");
+      return;
+    }
+    if (std::holds_alternative<cas::Symmetric>(perm) &&
+        std::holds_alternative<cas::VolumetricTag>(trace)) {
+      m_result = register_temp(&v, inv_d + " * " + oo);
+      return;
+    }
+    if (std::holds_alternative<cas::Symmetric>(perm) &&
+        std::holds_alternative<cas::DeviatoricTag>(trace)) {
+      m_result = register_temp(
+          &v, "0.5 * (" + ou + " + " + ol + ") - " + inv_d + " * " + oo);
+      return;
+    }
+    throw std::runtime_error(
+        "TensorCodeEmit: tensor_projector with this (perm, trace) "
+        "combination is not yet supported. Supported presets at "
+        "acts_on_rank=2: P_sym {Symmetric, AnyTrace}, "
+        "P_skew {Skew, AnyTrace}, P_vol {Symmetric, Volumetric}, "
+        "P_dev {Symmetric, Deviatoric}.");
+  }
 
   // tensor_inv → tmech::inv(...). Rank-2 only in this phase.
   //

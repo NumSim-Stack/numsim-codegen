@@ -9,6 +9,7 @@
 
 #include <numsim_cas/tensor/identity_tensor.h>
 #include <numsim_cas/tensor/levi_civita_tensor.h>
+#include <numsim_cas/tensor/projection_tensor.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_operators.h>
 #include <numsim_cas/tensor/wrappers/tensor_inv.h>
@@ -125,6 +126,161 @@ TEST(TensorCodeEmit, TensorInvRank4ThrowsClearly) {
     std::string msg(e.what());
     EXPECT_NE(msg.find("rank 4"), std::string::npos) << "msg: " << msg;
     EXPECT_NE(msg.find("numsim-cas#248"), std::string::npos)
+        << "msg: " << msg;
+  }
+}
+
+// ─── tensor_projector (Phase 1.1) ────────────────────────────────────
+//
+// Cover the four presets that ship today (P_sym, P_skew, P_vol, P_dev at
+// acts_on_rank=2 → rank-4 projector). For each, assert the tmech building
+// blocks appear in the rendered source. Numerical correctness of the
+// emitted formulas is exercised end-to-end by the compile-check driver
+// when a recipe that uses these projectors lands.
+
+TEST(TensorCodeEmit, ProjectorSymEmitsSymmetricBuildup) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  emit.apply(cas::P_sym(3));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::otimesu(tmech::eye<double, 3, 2>()"),
+            std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find("tmech::otimesl(tmech::eye<double, 3, 2>()"),
+            std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find(" + "), std::string::npos) << "got: " << rendered;
+  // Sym projector must NOT contain the trace term (otimes(I,I)).
+  EXPECT_EQ(rendered.find("tmech::otimes(tmech::eye"), std::string::npos)
+      << "P_sym leaked a trace term. got: " << rendered;
+}
+
+TEST(TensorCodeEmit, ProjectorSkewEmitsSkewBuildup) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  emit.apply(cas::P_skew(3));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::otimesu"), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find("tmech::otimesl"), std::string::npos)
+      << "got: " << rendered;
+  // The distinguishing feature is the minus sign between otimesu and otimesl.
+  EXPECT_NE(rendered.find(" - "), std::string::npos) << "got: " << rendered;
+}
+
+TEST(TensorCodeEmit, ProjectorVolEmitsTraceProjector) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  emit.apply(cas::P_vol(3));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("(1.0 / 3.0)"), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find("tmech::otimes(tmech::eye<double, 3, 2>()"),
+            std::string::npos)
+      << "got: " << rendered;
+  // Pure vol must not carry the sym buildup (otimesu/otimesl).
+  EXPECT_EQ(rendered.find("tmech::otimesu"), std::string::npos)
+      << "P_vol leaked a sym term. got: " << rendered;
+}
+
+TEST(TensorCodeEmit, ProjectorDevEmitsSymMinusVol) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  emit.apply(cas::P_devi(3));
+  auto rendered = ctx.render_statements();
+  // P_dev = P_sym - P_vol → must include all three of otimesu, otimesl,
+  // otimes plus the (1/d) coefficient.
+  EXPECT_NE(rendered.find("tmech::otimesu"), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find("tmech::otimesl"), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find("tmech::otimes(tmech::eye"), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find("(1.0 / 3.0)"), std::string::npos)
+      << "got: " << rendered;
+}
+
+TEST(TensorCodeEmit, ProjectorDim2UsesCorrectDim) {
+  // Catches the typo of hardcoding dim=3 in the emit.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  emit.apply(cas::P_vol(2));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("(1.0 / 2.0)"), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find("tmech::eye<double, 2, 2>()"), std::string::npos)
+      << "got: " << rendered;
+}
+
+TEST(TensorCodeEmit, ProjectorCSEReusesTemp) {
+  // P_sym used twice in a single expression should share a single temp.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto Psym = cas::P_sym(3);
+  emit.apply(Psym);
+  emit.apply(Psym);
+
+  // Count how many times the sym build-up appears in the rendered source.
+  auto rendered = ctx.render_statements();
+  std::size_t count = 0;
+  for (std::size_t pos = 0;
+       (pos = rendered.find("tmech::otimesu", pos)) != std::string::npos;
+       ++pos) {
+    ++count;
+  }
+  EXPECT_EQ(count, 1u) << "Expected CSE to emit P_sym once. got:\n"
+                       << rendered;
+}
+
+TEST(TensorCodeEmit, ProjectorHarmonicThrowsClearly) {
+  // P_harm is one of the cas presets but not implemented in this phase.
+  // The harmonic projector for rank-2 is the trace-free sym projector,
+  // which is just P_dev for d=3. Codegen doesn't auto-fold this — the
+  // recipe author should write P_devi() explicitly. We assert the error
+  // points at the supported alternatives so the failure is actionable.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  try {
+    emit.apply(cas::P_harm(3, 2));
+    FAIL() << "expected std::runtime_error for P_harm";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("perm, trace"), std::string::npos) << "msg: " << msg;
+    EXPECT_NE(msg.find("P_dev"), std::string::npos) << "msg: " << msg;
+  }
+}
+
+TEST(TensorCodeEmit, ProjectorActsOnRank1ThrowsClearly) {
+  // acts_on_rank=1 → rank-2 projector. Not yet emitted; assert the throw
+  // is actionable.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  // Build directly via make_projector — the cas P_sym preset hardcodes
+  // acts_on_rank=2, so we'd have no way to construct an acts_on_rank=1
+  // projector through the high-level API.
+  auto proj = cas::make_projector(3, 1, cas::Symmetric{}, cas::AnyTraceTag{});
+  try {
+    emit.apply(proj);
+    FAIL() << "expected std::runtime_error for acts_on_rank=1";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("acts_on_rank=1"), std::string::npos)
         << "msg: " << msg;
   }
 }
