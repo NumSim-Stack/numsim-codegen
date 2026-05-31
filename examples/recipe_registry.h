@@ -124,6 +124,10 @@ inline auto build_strain_based_damage()
   ConstitutiveModel m("StrainBasedDamage");
   auto mu = m.add_parameter("mu", 0.5, "Undamaged shear modulus");
 
+  // is_driving=true: in this formulation D is supplied externally and
+  // *drives* the constitutive response (analogous to a coupled field).
+  // For a model where D is internal state, drop is_driving and add
+  // is_stateful=true; that's the Phase B variant.
   auto D = m.add_scalar_input("D",
       Role{.name = "damage",
            .is_driving = true,
@@ -134,9 +138,16 @@ inline auto build_strain_based_damage()
   return m;
 }
 
-// J2 plasticity — trial stress only.
+// J2 plasticity — trial shear stress only.
 //
 //   σ_trial = 2G · (ε − ε_p_old)
+//
+// This is the **shear part** of the trial stress, not "trial deviatoric
+// stress" (which means σ_trial with its trace explicitly removed — a
+// different quantity used inside the radial-return step). The full
+// trial stress σ = K · tr(ε_elastic) · I + 2G · dev(ε_elastic) needs
+// the same missing `t2s × I` operator + deviator that LinearElasticityKG
+// flags. Don't confuse the two.
 //
 // PHASE A LIMITATION: full J2 plasticity needs (a) stateful old/new
 // plastic-strain handling (tracked in #15) and (b) a return-mapping
@@ -144,7 +155,7 @@ inline auto build_strain_based_damage()
 // Neither is emittable from the symbolic recipe — the return mapping
 // is an imperative algorithm, not a closed-form symbolic expression.
 //
-// This recipe emits the trial deviatoric stress (the *input* to the
+// This recipe emits the shear part of σ_trial (the *input* to the
 // return mapping). The consuming framework runs the return mapping
 // outside the generated function: takes σ_trial, performs the radial
 // return, updates ε_p, and stores the new state.
@@ -164,10 +175,9 @@ inline auto build_j2_plasticity_trial()
   auto eps       = m.add_tensor_input("eps", 3, 2, roles::Strain);
   auto eps_p_old = m.add_tensor_input("eps_p_old", 3, 2,
       Role{.name = "plastic_strain_old",
+           .is_symmetric = true,
            .expected_rank = 2});
 
-  // Trial deviatoric-shear stress; the volumetric part needs the same
-  // missing t2s × I operator that LinearElasticityKG flags.
   auto sigma_trial = 2 * G * (eps - eps_p_old);
   m.add_output("stress_trial", sigma_trial, roles::Stress);
   return m;

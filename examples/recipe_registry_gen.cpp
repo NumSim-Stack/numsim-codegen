@@ -20,14 +20,37 @@ namespace fs = std::filesystem;
 
 namespace {
 
-void write_file(fs::path const &out_dir,
-                numsim::codegen::EmittedFile const &f) {
+// Write an emitted file to disk. Returns true on success; on failure
+// (directory-create error, file-open error, or write error) prints the
+// path + error to stderr and returns false. The caller should propagate
+// a non-zero exit code so a missing recipe doesn't go silently to /dev/null.
+[[nodiscard]] bool write_file(fs::path const &out_dir,
+                              numsim::codegen::EmittedFile const &f) {
   auto path = out_dir;
   if (!f.install_subdir.empty()) path /= f.install_subdir;
   path /= f.filename;
-  fs::create_directories(path.parent_path());
-  std::ofstream(path) << f.contents;
+
+  std::error_code ec;
+  fs::create_directories(path.parent_path(), ec);
+  if (ec) {
+    std::cerr << "create_directories failed for " << path.parent_path()
+              << ": " << ec.message() << "\n";
+    return false;
+  }
+
+  std::ofstream os(path);
+  if (!os) {
+    std::cerr << "open failed: " << path << "\n";
+    return false;
+  }
+  os << f.contents;
+  if (!os) {
+    std::cerr << "write failed: " << path << "\n";
+    return false;
+  }
+
   std::cout << "  wrote " << path << "\n";
+  return true;
 }
 
 auto make_target(std::string const &kind)
@@ -55,12 +78,15 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  int exit_code = 0;
   for (auto const &entry : numsim::examples::registry()) {
     std::cout << entry.name << " -> " << target->target_name() << "\n";
     auto model = entry.build();
     for (auto const &file : target->emit(model)) {
-      write_file(out_dir, file);
+      if (!write_file(out_dir, file)) {
+        exit_code = 2;
+      }
     }
   }
-  return 0;
+  return exit_code;
 }

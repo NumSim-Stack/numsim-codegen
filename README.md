@@ -86,6 +86,24 @@ that backends interpret to wire the recipe to framework-specific inputs and outp
 The same recipe works across MOOSE, Abaqus, ANSYS without modification — only the
 target choice changes.
 
+## Multi-recipe generator
+
+For projects that ship several constitutive models, `examples/recipe_registry.h`
+shows the pattern: each recipe is a factory function returning a
+`ConstitutiveModel`; a `registry()` vector maps human-readable names to
+factories; one generator binary iterates the catalogue and emits source
+files for every recipe through a chosen target.
+
+```bash
+./build/examples/recipe_registry_gen <out-dir> <target: standalone|moose>
+```
+
+Six worked recipes are shipped (linear-elastic shear, thermo-elastic shear,
+phase-coupled shear, K/G elasticity, strain-based damage, J2 trial). Each
+includes a comment block describing its Phase A limitations and the
+upstream change needed to lift them. Add a new recipe by appending a
+factory + a registry entry — no other code changes required.
+
 ## Build
 
 CMake 3.20+, C++23, GCC 14 or Clang 18 or MSVC 19.30+.
