@@ -10,7 +10,9 @@
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_visitor_typedef.h>
 #include <numsim_cas/tensor/wrappers/tensor_inv.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_expression.h>
 
+#include <functional>
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
@@ -143,10 +145,7 @@ public:
         " not yet implemented. See numsim-codegen Phase A roadmap.");          \
   }
 
-  NUMSIM_CODEGEN_TENSOR_STUB(tensor_mul)
-  NUMSIM_CODEGEN_TENSOR_STUB(tensor_pow)
-  NUMSIM_CODEGEN_TENSOR_STUB(permute_indices_wrapper)
-  NUMSIM_CODEGEN_TENSOR_STUB(tensor_to_scalar_with_tensor_mul)
+  // All Phase 1.1 stubs landed — keep the macro for the next batch.
 
 #undef NUMSIM_CODEGEN_TENSOR_STUB
 
@@ -296,6 +295,111 @@ public:
     m_result = register_temp(&v, os.str());
   }
 
+  // tensor_mul → chained single-contraction (matrix-product-style).
+  //
+  // Cas semantics (per tensor_evaluator.h:196): n-ary, accumulates
+  // left-to-right by contracting the last index of the accumulator with the
+  // first index of the next child. Result rank = Σranks − 2·(nchildren−1).
+  // We mirror that with `tmech::inner_product<sequence<r_acc>, sequence<1>>`.
+  //
+  // The cas node also carries an optional `coeff()` that the evaluator
+  // applies as an element-wise product on the flattened buffer. That's an
+  // unusual semantic for `tensor_mul` and no shipping recipe uses it; we
+  // throw with a clear pointer rather than guess at the emit shape.
+  void operator()(cas::tensor_mul const &v) override {
+    if (v.coeff().is_valid()) {
+      throw std::runtime_error(
+          "TensorCodeEmit: tensor_mul with a coeff() (element-wise product on "
+          "the flattened buffer) has no clean tmech analogue. If you hit this, "
+          "open an issue with the recipe so we can pin down the intended "
+          "semantics.");
+    }
+    auto const &children = v.data();
+    if (children.empty()) {
+      std::ostringstream zero;
+      zero << "tmech::tensor<double, " << v.dim() << ", " << v.rank() << ">{}";
+      m_result = register_temp(&v, zero.str());
+      return;
+    }
+    if (children.size() == 1) {
+      m_result = apply(children.front());
+      return;
+    }
+    std::string acc = apply(children.front());
+    std::size_t acc_rank = children.front().get().rank();
+    for (std::size_t i = 1; i < children.size(); ++i) {
+      auto rhs_name = apply(children[i]);
+      const std::size_t rhs_rank = children[i].get().rank();
+      std::ostringstream os;
+      os << "tmech::inner_product<tmech::sequence<" << acc_rank
+         << ">, tmech::sequence<1>>(" << acc << ", " << rhs_name << ")";
+      acc = os.str();
+      acc_rank = acc_rank + rhs_rank - 2;
+    }
+    m_result = register_temp(&v, std::move(acc));
+  }
+
+  // tensor_pow → tmech::pow for rank-2 bases. tmech's pow is documented
+  // only for second-order tensors; higher-rank bases would need explicit
+  // unrolling of `inner_product<sequence<r>, sequence<1>>` repeated N times,
+  // which requires a compile-time-known integer exponent. We defer that
+  // until a recipe needs it.
+  void operator()(cas::tensor_pow const &v) override {
+    if (v.rank() != 2) {
+      throw std::runtime_error(
+          "TensorCodeEmit: tensor_pow of rank " + std::to_string(v.rank()) +
+          " is not yet supported. tmech::pow ships rank-2 only; higher-rank "
+          "bases require static-exponent unrolling — not implemented in this "
+          "phase.");
+    }
+    auto base = apply(v.expr_lhs());
+    auto exp = m_scalar.apply(v.expr_rhs());
+    m_result = register_temp(&v, "tmech::pow(" + base + ", " + exp + ")");
+  }
+
+  // permute_indices_wrapper → tmech::basis_change<sequence<...>>(A).
+  //
+  // The classic special case is transpose (`indices == {2, 1}` for rank-2),
+  // but arbitrary permutations of any rank are supported by both sides.
+  // cas stores indices 0-based; tmech::basis_change expects 1-based.
+  void operator()(cas::permute_indices_wrapper const &v) override {
+    auto inner = apply(v.expr());
+    m_result = register_temp(&v, "tmech::basis_change<" +
+                                     tmech_sequence_str(v.indices()) + ">(" +
+                                     inner + ")");
+  }
+
+  // tensor_to_scalar_with_tensor_mul → scalar · tensor.
+  //
+  // LHS is a tensor; RHS is a tensor_to_scalar (a scalar-valued tensor
+  // reduction like trace/det/norm or a composite thereof). The result is a
+  // tensor of LHS's shape with every entry multiplied by the scalar.
+  //
+  // Because t2s emit lives in a separate visitor that includes this header,
+  // we accept a callback at construction-site rather than including the t2s
+  // header here (which would create a cycle). The recipe entry-point wires
+  // it via `set_t2s_apply()`.
+  void operator()(cas::tensor_to_scalar_with_tensor_mul const &v) override {
+    if (!m_t2s_apply) {
+      throw std::runtime_error(
+          "TensorCodeEmit: tensor_to_scalar_with_tensor_mul requires a "
+          "tensor_to_scalar callback. Call set_t2s_apply() with the t2s "
+          "emitter's apply method; the high-level recipe entry-point does "
+          "this automatically.");
+    }
+    auto lhs = apply(v.expr_lhs());
+    auto rhs = m_t2s_apply(v.expr_rhs());
+    m_result = register_temp(
+        &v, wrap_if_compound(rhs) + " * " + wrap_if_compound(lhs));
+  }
+
+  // ─── External wiring ─────────────────────────────────────────────
+
+  using T2sApply = std::function<std::string(
+      cas::expression_holder<cas::tensor_to_scalar_expression> const &)>;
+
+  void set_t2s_apply(T2sApply fn) { m_t2s_apply = std::move(fn); }
+
   // tensor_inv → tmech::inv(...). Rank-2 only in this phase.
   //
   // For rank ≠ 2 the inverse is well-defined algebraically but tmech's
@@ -406,6 +510,7 @@ private:
 
   CodeGenContext &m_ctx;
   ScalarCodeEmit &m_scalar;
+  T2sApply m_t2s_apply; // optional — set by recipe entry-point.
   std::string m_result;
 };
 

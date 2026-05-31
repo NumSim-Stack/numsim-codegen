@@ -251,6 +251,10 @@ public:
     ScalarCodeEmit scalar_emit(ctx);
     TensorCodeEmit tensor_emit(ctx, scalar_emit);
     TensorToScalarCodeEmit t2s_emit(ctx, scalar_emit, tensor_emit);
+    // Close the loop so tensor-domain nodes that carry a t2s subterm
+    // (currently tensor_to_scalar_with_tensor_mul) can emit them.
+    tensor_emit.set_t2s_apply(
+        [&t2s_emit](auto const &e) { return t2s_emit.apply(e); });
 
     for (auto const &[name, expr] : m_scalar_symbols) {
       ctx.register_symbol_scalar(expr, name);

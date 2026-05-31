@@ -6,6 +6,7 @@
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_code_emit.h>
+#include <numsim_codegen/code_emit/tensor_to_scalar_code_emit.h>
 
 #include <numsim_cas/tensor/identity_tensor.h>
 #include <numsim_cas/tensor/levi_civita_tensor.h>
@@ -501,6 +502,186 @@ TEST(TensorCodeEmit, InnerProductProjectorOnRank4RhsFallsThrough) {
   EXPECT_NE(rendered.find("tmech::inner_product<"), std::string::npos)
       << "got: " << rendered;
   EXPECT_EQ(rendered.find("tmech::sym("), std::string::npos) << rendered;
+}
+
+// ─── tensor_mul ──────────────────────────────────────────────────────
+
+TEST(TensorCodeEmit, TensorMulTwoChildrenSingleContraction) {
+  // A · B for two rank-2 tensors → rank-2 result via single contraction
+  // of last(A) with first(B). tmech form is inner_product<seq<2>, seq<1>>.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  auto B = cas::make_expression<cas::tensor>("B", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  ctx.register_symbol_tensor(B, "B");
+
+  cas::tensor_mul m(3, 2);
+  m.push_back(A);
+  m.push_back(B);
+  emit.apply(cas::make_expression<cas::tensor_mul>(std::move(m)));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::inner_product<tmech::sequence<2>, "
+                          "tmech::sequence<1>>(A, B)"),
+            std::string::npos)
+      << "got: " << rendered;
+}
+
+TEST(TensorCodeEmit, TensorMulThreeChildrenChains) {
+  // A · B · C — accumulator rank stays 2 throughout (2+2-2 = 2).
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  auto B = cas::make_expression<cas::tensor>("B", 3, 2);
+  auto C = cas::make_expression<cas::tensor>("C", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  ctx.register_symbol_tensor(B, "B");
+  ctx.register_symbol_tensor(C, "C");
+
+  cas::tensor_mul m(3, 2);
+  m.push_back(A);
+  m.push_back(B);
+  m.push_back(C);
+  emit.apply(cas::make_expression<cas::tensor_mul>(std::move(m)));
+  auto rendered = ctx.render_statements();
+  // Should see two nested inner_products (since accumulator stays rank-2,
+  // both levels use sequence<2>/sequence<1>).
+  std::size_t count = 0;
+  for (std::size_t pos = 0;
+       (pos = rendered.find("tmech::inner_product", pos)) != std::string::npos;
+       ++pos) {
+    ++count;
+  }
+  EXPECT_EQ(count, 2u) << "Expected two nested inner_products. got:\n"
+                       << rendered;
+  EXPECT_NE(rendered.find("C"), std::string::npos) << rendered;
+}
+
+// ─── tensor_pow ──────────────────────────────────────────────────────
+
+TEST(TensorCodeEmit, TensorPowRank2EmitsTmechPow) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  auto two = cas::make_expression<cas::scalar_constant>(2.0);
+
+  emit.apply(cas::make_expression<cas::tensor_pow>(A, two));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::pow(A,"), std::string::npos)
+      << "got: " << rendered;
+}
+
+TEST(TensorCodeEmit, TensorPowRank4ThrowsClearly) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto C = cas::make_expression<cas::tensor>("C", 3, 4);
+  ctx.register_symbol_tensor(C, "C");
+  auto two = cas::make_expression<cas::scalar_constant>(2.0);
+
+  try {
+    emit.apply(cas::make_expression<cas::tensor_pow>(C, two));
+    FAIL() << "expected std::runtime_error for rank-4 tensor_pow";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("rank 4"), std::string::npos) << "msg: " << msg;
+  }
+}
+
+// ─── permute_indices_wrapper ─────────────────────────────────────────
+
+TEST(TensorCodeEmit, PermuteIndicesEmitsBasisChange) {
+  // The classic transpose pattern: rank-2 with permutation {2, 1}.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+
+  emit.apply(cas::make_expression<cas::permute_indices_wrapper>(
+      A, cas::sequence{2, 1}));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::basis_change<tmech::sequence<2, 1>>(A)"),
+            std::string::npos)
+      << "got: " << rendered;
+}
+
+TEST(TensorCodeEmit, PermuteIndicesPreservesArbitraryRank4Permutation) {
+  // {3,4,1,2} on a rank-4 tensor — minor-major swap pattern from elasticity.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto C = cas::make_expression<cas::tensor>("C", 3, 4);
+  ctx.register_symbol_tensor(C, "C");
+
+  emit.apply(cas::make_expression<cas::permute_indices_wrapper>(
+      C, cas::sequence{3, 4, 1, 2}));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::basis_change<tmech::sequence<3, 4, 1, 2>>(C)"),
+            std::string::npos)
+      << "got: " << rendered;
+}
+
+// ─── tensor_to_scalar_with_tensor_mul ────────────────────────────────
+
+TEST(TensorCodeEmit, T2sWithTensorMulMultipliesScalarByTensor) {
+  // trace(A) * B — t2s on the rhs, tensor on the lhs. Expect the t2s
+  // callback to fire and the emit to read `<trace_emit> * <tensor>`.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit tensor_emit(ctx, scalar_emit);
+  TensorToScalarCodeEmit t2s_emit(ctx, scalar_emit, tensor_emit);
+  tensor_emit.set_t2s_apply(
+      [&t2s_emit](auto const &e) { return t2s_emit.apply(e); });
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  auto B = cas::make_expression<cas::tensor>("B", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  ctx.register_symbol_tensor(B, "B");
+
+  auto tr_A =
+      cas::make_expression<cas::tensor_trace>(A);
+  tensor_emit.apply(
+      cas::make_expression<cas::tensor_to_scalar_with_tensor_mul>(B, tr_A));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("tmech::trace(A)"), std::string::npos)
+      << "got: " << rendered;
+  // The final temp should multiply the trace by B.
+  EXPECT_NE(rendered.find(" * B"), std::string::npos) << rendered;
+}
+
+TEST(TensorCodeEmit, T2sWithTensorMulThrowsWhenCallbackUnset) {
+  // The header-cycle workaround relies on the caller installing the t2s
+  // callback. Without it, the emit must fail with a clear message rather
+  // than silently producing nothing.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit tensor_emit(ctx, scalar_emit); // intentionally no set_t2s_apply
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  auto B = cas::make_expression<cas::tensor>("B", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  ctx.register_symbol_tensor(B, "B");
+
+  auto tr_A = cas::make_expression<cas::tensor_trace>(A);
+  try {
+    tensor_emit.apply(
+        cas::make_expression<cas::tensor_to_scalar_with_tensor_mul>(B, tr_A));
+    FAIL() << "expected std::runtime_error when t2s callback unset";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("set_t2s_apply"), std::string::npos) << "msg: " << msg;
+  }
 }
 
 } // namespace numsim::codegen
