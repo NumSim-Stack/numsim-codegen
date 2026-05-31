@@ -63,3 +63,24 @@ target_link_libraries(compile_check_driver
     PRIVATE numsim::codegen GTest::gtest GTest::gtest_main)
 
 gtest_discover_tests(compile_check_driver)
+
+# ─── Header-purity guard ───────────────────────────────────────────────────
+#
+# Public headers under include/ must never #include heavy template libraries
+# that should stay PRIVATE to the STATIC backend implementations. This is
+# the structural invariant that lets the inja + nlohmann/json adoption in
+# #20 happen without exploding consuming-TU compile times. Adding new
+# disallowed names here is cheaper than a separate CI workflow and runs in
+# every matrix configuration via `ctest`.
+add_test(
+    NAME HeaderPurity
+    COMMAND ${CMAKE_COMMAND}
+        "-DSEARCH_ROOT=${CMAKE_SOURCE_DIR}/include"
+        "-DDISALLOWED_PATTERN=inja|nlohmann/json"
+        -P ${CMAKE_SOURCE_DIR}/cmake/check_header_purity.cmake
+)
+# The script exits non-zero on violation via message(FATAL_ERROR) — that's
+# what fails the test. The FAIL_REGULAR_EXPRESSION below is belt-and-braces
+# so even a future non-fatal `message(WARNING ...)` still trips ctest.
+set_tests_properties(HeaderPurity PROPERTIES
+    FAIL_REGULAR_EXPRESSION "HeaderPurity violation")
