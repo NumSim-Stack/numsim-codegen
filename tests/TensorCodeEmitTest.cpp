@@ -95,4 +95,25 @@ TEST(TensorCodeEmit, TensorInvOnCompoundInputReusesTemp) {
       << "got: " << rendered;
 }
 
+TEST(TensorCodeEmit, TensorInvRank4ThrowsClearly) {
+  // Rank-4 inverse needs the contraction-index pair from numsim-cas;
+  // current emit refuses to guess and throws with an actionable message.
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit);
+
+  auto C = cas::make_expression<cas::tensor>("C", 3, 4);
+  ctx.register_symbol_tensor(C, "C");
+
+  try {
+    emit.apply(cas::make_expression<cas::tensor_inv>(C));
+    FAIL() << "expected std::runtime_error for rank-4 tensor_inv";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("rank 4"), std::string::npos) << "msg: " << msg;
+    EXPECT_NE(msg.find("contraction-index"), std::string::npos)
+        << "msg: " << msg;
+  }
+}
+
 } // namespace numsim::codegen

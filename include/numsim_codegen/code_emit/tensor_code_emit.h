@@ -155,13 +155,27 @@ public:
 
   // ─── Implemented unary nodes ─────────────────────────────────────
 
-  // tensor_inv → tmech::inv(...). tmech's variadic signature
-  // `inv(_Tensor &&, _Sequences ...)` accepts the default form for any
-  // supported rank (rank-2 matrix inverse and the natural rank-4 inverse
-  // via internal 6×6 / 9×9 flatten). When the algorithmic-tangent pass
-  // (D7 / #35) needs a specific contraction-index pair for rank-4, swap
-  // in the explicit-sequence form here.
+  // tensor_inv → tmech::inv(...). Rank-2 only in this phase.
+  //
+  // For rank ≠ 2 the inverse is well-defined algebraically but tmech's
+  // `inv` needs explicit contraction-index sequences (e.g.
+  // `tmech::inv<tmech::sequence<1,2>, tmech::sequence<3,4>>(A)` for the
+  // natural rank-4 inverse). That index pair is a property of the
+  // tensor's algebraic structure and should be carried on the
+  // `cas::tensor_inv` node itself, not chosen by the codegen. Tracked
+  // as an upstream extension to numsim-cas (carry an
+  // `inv_contraction_pair()` accessor; codegen plumbs it into the
+  // emitted template-arg list). Until then, rank ≠ 2 throws with a
+  // pointer at this comment.
   void operator()(cas::tensor_inv const &v) override {
+    if (v.rank() != 2) {
+      throw std::runtime_error(
+          "TensorCodeEmit: tensor_inv of rank " + std::to_string(v.rank()) +
+          " needs the contraction-index sequence pair from numsim-cas. "
+          "Rank-2 is supported now; rank-4 emit lands once numsim-cas "
+          "exposes the inv-contraction pair on the tensor_inv node "
+          "(tracked upstream).");
+    }
     auto inner = apply(v.expr());
     m_result = register_temp(&v, "tmech::inv(" + inner + ")");
   }
