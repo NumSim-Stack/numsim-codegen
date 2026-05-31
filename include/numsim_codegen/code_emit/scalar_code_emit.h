@@ -6,6 +6,7 @@
 #include <numsim_cas/scalar/scalar_all.h>
 #include <numsim_cas/scalar/scalar_visitor_typedef.h>
 
+#include <algorithm>
 #include <complex>
 #include <ranges>
 #include <sstream>
@@ -212,6 +213,53 @@ public:
   void operator()(cas::scalar_named_expression const &v) override {
     // Inline the body — named-expression is a documentation wrapper.
     m_result = apply(v.expr());
+  }
+
+  // ─── Comparisons — emit C++ operator, cast to indicator double ───
+  //
+  // numsim-cas comparison nodes evaluate to 1.0 / 0.0 (per scalar_ne.h);
+  // emit `static_cast<double>(lhs OP rhs)` to preserve that semantics.
+
+#define NUMSIM_CODEGEN_SCALAR_CMP(T, OP)                                       \
+  void operator()(cas::T const &v) override {                                  \
+    auto lhs = apply(v.expr_lhs());                                            \
+    auto rhs = apply(v.expr_rhs());                                            \
+    m_result = register_temp(&v, "static_cast<double>(" +                      \
+                                     wrap_if_compound(lhs) + " " #OP " " +     \
+                                     wrap_if_compound(rhs) + ")");             \
+  }
+
+  NUMSIM_CODEGEN_SCALAR_CMP(scalar_lt, <)
+  NUMSIM_CODEGEN_SCALAR_CMP(scalar_gt, >)
+  NUMSIM_CODEGEN_SCALAR_CMP(scalar_le, <=)
+  NUMSIM_CODEGEN_SCALAR_CMP(scalar_ge, >=)
+  NUMSIM_CODEGEN_SCALAR_CMP(scalar_eq, ==)
+  NUMSIM_CODEGEN_SCALAR_CMP(scalar_ne, !=)
+
+#undef NUMSIM_CODEGEN_SCALAR_CMP
+
+  // ─── Piecewise nodes ─────────────────────────────────────────────
+
+  void operator()(cas::scalar_max const &v) override {
+    auto lhs = apply(v.expr_lhs());
+    auto rhs = apply(v.expr_rhs());
+    m_result = register_temp(&v, "std::max(" + lhs + ", " + rhs + ")");
+  }
+
+  void operator()(cas::scalar_min const &v) override {
+    auto lhs = apply(v.expr_lhs());
+    auto rhs = apply(v.expr_rhs());
+    m_result = register_temp(&v, "std::min(" + lhs + ", " + rhs + ")");
+  }
+
+  void operator()(cas::scalar_if_then_else const &v) override {
+    auto cond = apply(v.expr_cond());
+    auto then_branch = apply(v.expr_then());
+    auto else_branch = apply(v.expr_else());
+    m_result = register_temp(
+        &v, "(" + wrap_if_compound(cond) + " != 0.0 ? " +
+                wrap_if_compound(then_branch) + " : " +
+                wrap_if_compound(else_branch) + ")");
   }
 
 private:

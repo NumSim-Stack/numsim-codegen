@@ -105,4 +105,115 @@ TEST(ScalarCodeEmit, ConstantEmitsAsDoubleLiteral) {
   EXPECT_TRUE(result == "5" || result == "5.0") << "got: " << result;
 }
 
+// ─── Comparison nodes ─────────────────────────────────────────────────
+//
+// Each emits `static_cast<double>(lhs OP rhs)` to preserve numsim-cas's
+// indicator-double semantics (1.0 / 0.0).
+
+namespace {
+auto make_two_scalars(CodeGenContext &ctx)
+    -> std::pair<cas::expression_holder<cas::scalar_expression>,
+                 cas::expression_holder<cas::scalar_expression>> {
+  auto x = cas::make_expression<cas::scalar>("x");
+  auto y = cas::make_expression<cas::scalar>("y");
+  ctx.register_symbol_scalar(x, "x");
+  ctx.register_symbol_scalar(y, "y");
+  return {x, y};
+}
+} // namespace
+
+TEST(ScalarCodeEmit, LessThanEmitsStaticCastDouble) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto [x, y] = make_two_scalars(ctx);
+  emit.apply(cas::lt(x, y));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("static_cast<double>"), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find(" < "), std::string::npos) << "got: " << rendered;
+}
+
+TEST(ScalarCodeEmit, GreaterThanEmitsStaticCastDouble) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto [x, y] = make_two_scalars(ctx);
+  emit.apply(cas::gt(x, y));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find(" > "), std::string::npos) << "got: " << rendered;
+}
+
+TEST(ScalarCodeEmit, LessEqualEmitsStaticCastDouble) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto [x, y] = make_two_scalars(ctx);
+  emit.apply(cas::le(x, y));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find(" <= "), std::string::npos) << "got: " << rendered;
+}
+
+TEST(ScalarCodeEmit, GreaterEqualEmitsStaticCastDouble) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto [x, y] = make_two_scalars(ctx);
+  emit.apply(cas::ge(x, y));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find(" >= "), std::string::npos) << "got: " << rendered;
+}
+
+TEST(ScalarCodeEmit, EqualEmitsStaticCastDouble) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto [x, y] = make_two_scalars(ctx);
+  emit.apply(cas::eq(x, y));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find(" == "), std::string::npos) << "got: " << rendered;
+}
+
+TEST(ScalarCodeEmit, NotEqualEmitsStaticCastDouble) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto [x, y] = make_two_scalars(ctx);
+  emit.apply(cas::ne(x, y));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find(" != "), std::string::npos) << "got: " << rendered;
+}
+
+// ─── Piecewise nodes ──────────────────────────────────────────────────
+
+TEST(ScalarCodeEmit, MaxEmitsStdMax) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto [x, y] = make_two_scalars(ctx);
+  emit.apply(cas::max(x, y));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("std::max"), std::string::npos) << "got: " << rendered;
+}
+
+TEST(ScalarCodeEmit, MinEmitsStdMin) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto [x, y] = make_two_scalars(ctx);
+  emit.apply(cas::min(x, y));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find("std::min"), std::string::npos) << "got: " << rendered;
+}
+
+TEST(ScalarCodeEmit, IfThenElseEmitsTernary) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto x = cas::make_expression<cas::scalar>("x");
+  auto a = cas::make_expression<cas::scalar>("a");
+  auto b = cas::make_expression<cas::scalar>("b");
+  ctx.register_symbol_scalar(x, "x");
+  ctx.register_symbol_scalar(a, "a");
+  ctx.register_symbol_scalar(b, "b");
+
+  // if_then_else(x, a, b) — the condition is a scalar that's compared != 0.
+  emit.apply(cas::if_then_else(cas::lt(x, cas::get_scalar_zero()), a, b));
+  auto rendered = ctx.render_statements();
+  EXPECT_NE(rendered.find(" != 0.0 ? "), std::string::npos)
+      << "got: " << rendered;
+  EXPECT_NE(rendered.find(" : "), std::string::npos) << "got: " << rendered;
+}
+
 } // namespace numsim::codegen

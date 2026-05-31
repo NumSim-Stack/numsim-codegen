@@ -57,12 +57,6 @@ public:
     m_result = register_temp(&v, os.str());
   }
 
-  void operator()(cas::kronecker_delta const &v) override {
-    std::ostringstream os;
-    os << "tmech::eye<double, " << v.dim() << ", " << v.rank() << ">()";
-    m_result = register_temp(&v, os.str());
-  }
-
   void operator()(cas::identity_tensor const &v) override {
     if (v.rank() == 2) {
       std::ostringstream os;
@@ -80,6 +74,14 @@ public:
     throw std::runtime_error(
         "TensorCodeEmit: identity_tensor of rank " +
         std::to_string(v.rank()) + " not supported in Phase A MVP");
+  }
+
+  void operator()(cas::levi_civita_tensor const &v) override {
+    // tmech::levi_civita<T, Dim> is a leaf; rank == dim. Supported for
+    // dim ∈ {2, 3, 4}, matching numsim-cas's construction-time validation.
+    std::ostringstream os;
+    os << "tmech::levi_civita<double, " << v.dim() << ">{}";
+    m_result = register_temp(&v, os.str());
   }
 
   // ─── Algebraic nodes ─────────────────────────────────────────────
@@ -140,9 +142,7 @@ public:
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_mul)
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_pow)
   NUMSIM_CODEGEN_TENSOR_STUB(inner_product_wrapper)
-  // Note: this name is `basis_change_imp` on main; rename to
-  // `permute_indices_wrapper` lands when numsim-cas PR #121 merges.
-  NUMSIM_CODEGEN_TENSOR_STUB(basis_change_imp)
+  NUMSIM_CODEGEN_TENSOR_STUB(permute_indices_wrapper)
   NUMSIM_CODEGEN_TENSOR_STUB(outer_product_wrapper)
   NUMSIM_CODEGEN_TENSOR_STUB(simple_outer_product)
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_inv)
