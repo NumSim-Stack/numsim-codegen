@@ -10,6 +10,7 @@
 #include <numsim_codegen/passes/pass.h>
 #include <numsim_codegen/passes/pass_manager.h>
 #include <numsim_codegen/passes/symbol_validation_pass.h>
+#include <numsim_codegen/passes/tensor_space_consistency_pass.h>
 #include <numsim_codegen/recipe_render.h>
 
 #include <numsim_cas/scalar/scalar_all.h>
@@ -219,6 +220,7 @@ public:
     PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
+    pm.emplace<TensorSpaceConsistencyPass>();
     pm.run(pctx);
   }
 
@@ -232,6 +234,7 @@ public:
     PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
+    pm.emplace<TensorSpaceConsistencyPass>();
     pm.emplace<CodeEmitPass>();
     pm.run(pctx);
     if (!pctx.compute_function_source) {
@@ -563,6 +566,65 @@ inline void SymbolValidationPass::run(PassContext &pctx) {
   }
 }
 
+inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
+  auto const &model = pctx.model;
+
+  // For each declared tensor symbol (input or parameter, though
+  // parameters are scalars in this catalogue), cross-check Role
+  // attributes against the cas tensor's space() annotation.
+  //
+  // Two conflict patterns checked today:
+  //   role.is_symmetric == true + space().perm is Skew → contradiction
+  //   role.expected_rank set    + tensor.rank() != expected_rank → mismatch
+  //
+  // Phase 2 will replace the body with expression-level inference
+  // (walk output expressions, propagate space() through operators,
+  // validate end-to-end). The current shallow check exists primarily
+  // to validate the framework with a second non-trivial pass before
+  // Phase 2 wires expression rewriters into the same PassContext.
+  for (auto const &[name, expr] : model.tensor_symbol_map()) {
+    // Find the matching SymbolDecl to learn its Role.
+    Role const *role_ptr = nullptr;
+    for (auto const &s : model.symbols()) {
+      if (s.name == name && s.kind == SymbolDecl::Kind::Tensor) {
+        role_ptr = &s.role;
+        break;
+      }
+    }
+    if (role_ptr == nullptr)
+      continue; // Should not happen — SymbolValidationPass would have caught.
+
+    auto const &t = expr.get();
+    auto const &space_opt = t.space();
+    if (space_opt.has_value() && role_ptr->is_symmetric) {
+      if (std::holds_alternative<cas::Skew>(space_opt->perm)) {
+        throw std::runtime_error(
+            "ConstitutiveModel '" + model.name() + "': tensor symbol '" +
+            name + "' is declared with role '" + role_ptr->name +
+            "' (is_symmetric=true) but its tensor_space annotation has Skew "
+            "perm — a skew-symmetric tensor cannot satisfy a symmetric role. "
+            "Fix one of: (a) remove the cas-side `assume_skew()` annotation "
+            "on this symbol; (b) re-declare with a Role whose "
+            "`is_symmetric=false` (construct a custom `Role{...}`, or pick "
+            "from the `roles::` catalogue in recipe.h).");
+      }
+    }
+
+    if (role_ptr->expected_rank.has_value() &&
+        t.rank() != *role_ptr->expected_rank) {
+      throw std::runtime_error(
+          "ConstitutiveModel '" + model.name() + "': tensor symbol '" + name +
+          "' has rank " + std::to_string(t.rank()) + " but role '" +
+          role_ptr->name + "' expects rank " +
+          std::to_string(*role_ptr->expected_rank) +
+          ". Fix one of: (a) adjust the `rank` argument in your "
+          "`add_tensor_input(name, dim, rank, ...)` call to match the role; "
+          "(b) re-declare with a different Role (see the `roles::` catalogue "
+          "in recipe.h for their `expected_rank` values).");
+    }
+  }
+}
+
 inline void CodeEmitPass::run(PassContext &pctx) {
   auto const &model = pctx.model;
   auto &ctx = pctx.ctx;
@@ -583,8 +645,8 @@ inline void CodeEmitPass::run(PassContext &pctx) {
       });
   t2s_emit_storage = std::make_unique<TensorToScalarCodeEmit>(
       ctx, scalar_emit, tensor_emit);
-  TensorToScalarCodeEmit &t2s_emit = *t2s_emit_storage;
-  (void) t2s_emit; // currently unused at this scope — kept named for clarity.
+  // (no named reference — the lambda captures t2s_emit_storage directly;
+  //  a named alias would invite future direct-call bypass.)
 
   for (auto const &[name, expr] : model.scalar_symbol_map()) {
     ctx.register_symbol_scalar(expr, name);

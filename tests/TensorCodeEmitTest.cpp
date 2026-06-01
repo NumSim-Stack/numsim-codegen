@@ -29,6 +29,12 @@ namespace {
 // pass this throwing stub — if a future change accidentally routes a
 // t2s subterm through a stubbed test, the throw makes it loud rather
 // than silent.
+//
+// If you're authoring a test that constructs a
+// `tensor_to_scalar_with_tensor_mul` node (or any future cross-domain
+// tensor node carrying a t2s subterm), DO NOT use this stub — use the
+// `std::unique_ptr<TensorToScalarCodeEmit>` cycle-break pattern instead
+// (see `T2sWithTensorMulMultipliesScalarByTensor` for the template).
 inline auto throwing_t2s_apply() -> TensorCodeEmit::T2sApply {
   return [](auto const &) -> std::string {
     throw std::logic_error(
