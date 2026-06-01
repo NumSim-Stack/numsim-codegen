@@ -36,7 +36,11 @@ public:
   }
   [[nodiscard]] auto preconditions() const
       -> std::vector<std::string_view> override {
-    return {"symbols-declared"};
+    // Declares both tags that SymbolValidationPass advertises. PassManager
+    // satisfies them transitively today, but stating the full dependency
+    // up front keeps the precondition graph self-documenting for future
+    // passes that may want to insert between the two validators.
+    return {"symbols-declared", "identifiers-valid"};
   }
   [[nodiscard]] auto postconditions() const
       -> std::vector<std::string_view> override {

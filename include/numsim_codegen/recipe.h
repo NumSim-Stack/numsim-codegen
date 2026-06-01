@@ -602,7 +602,11 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
             "ConstitutiveModel '" + model.name() + "': tensor symbol '" +
             name + "' is declared with role '" + role_ptr->name +
             "' (is_symmetric=true) but its tensor_space annotation has Skew "
-            "perm. A skew-symmetric tensor cannot satisfy a symmetric role.");
+            "perm — a skew-symmetric tensor cannot satisfy a symmetric role. "
+            "Fix one of: (a) remove the cas-side `assume_skew()` annotation "
+            "on this symbol; (b) re-declare with a Role whose "
+            "`is_symmetric=false` (construct a custom `Role{...}`, or pick "
+            "from the `roles::` catalogue in recipe.h).");
       }
     }
 
@@ -610,9 +614,13 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
         t.rank() != *role_ptr->expected_rank) {
       throw std::runtime_error(
           "ConstitutiveModel '" + model.name() + "': tensor symbol '" + name +
-          "' has rank " + std::to_string(t.rank()) +
-          " but role '" + role_ptr->name + "' expects rank " +
-          std::to_string(*role_ptr->expected_rank) + ".");
+          "' has rank " + std::to_string(t.rank()) + " but role '" +
+          role_ptr->name + "' expects rank " +
+          std::to_string(*role_ptr->expected_rank) +
+          ". Fix one of: (a) adjust the `rank` argument in your "
+          "`add_tensor_input(name, dim, rank, ...)` call to match the role; "
+          "(b) re-declare with a different Role (see the `roles::` catalogue "
+          "in recipe.h for their `expected_rank` values).");
     }
   }
 }
@@ -637,8 +645,8 @@ inline void CodeEmitPass::run(PassContext &pctx) {
       });
   t2s_emit_storage = std::make_unique<TensorToScalarCodeEmit>(
       ctx, scalar_emit, tensor_emit);
-  TensorToScalarCodeEmit &t2s_emit = *t2s_emit_storage;
-  (void) t2s_emit; // currently unused at this scope — kept named for clarity.
+  // (no named reference — the lambda captures t2s_emit_storage directly;
+  //  a named alias would invite future direct-call bypass.)
 
   for (auto const &[name, expr] : model.scalar_symbol_map()) {
     ctx.register_symbol_scalar(expr, name);

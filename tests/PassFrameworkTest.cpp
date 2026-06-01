@@ -299,12 +299,11 @@ TEST(TensorSpaceConsistencyPass, ThrowsOnSymmetricRoleWithSkewSpace) {
   auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
 
   // Mutate the underlying tensor's space to introduce the contradiction.
-  // const_cast is intentional: cas's tensor_expression exposes set_space()
-  // on a mutable instance, but expression_holder's get() returns const.
-  // In production code this annotation flows from an assume_*() helper
-  // or constructive operator; the const_cast here is test-only.
-  const_cast<cas::tensor_expression &>(eps.get<cas::tensor_expression>())
-      .set_space(cas::tensor_space{cas::Skew{}, cas::AnyTraceTag{}});
+  // `eps` is a non-const expression_holder, so get<T>() resolves to the
+  // non-const overload and returns T&. In production code this annotation
+  // flows from a cas `assume_*()` helper or a constructive operator.
+  eps.get<cas::tensor_expression>().set_space(
+      cas::tensor_space{cas::Skew{}, cas::AnyTraceTag{}});
 
   try {
     model.validate();
@@ -314,6 +313,28 @@ TEST(TensorSpaceConsistencyPass, ThrowsOnSymmetricRoleWithSkewSpace) {
     EXPECT_NE(msg.find("eps"), std::string::npos) << msg;
     EXPECT_NE(msg.find("Skew"), std::string::npos) << msg;
     EXPECT_NE(msg.find("symmetric"), std::string::npos) << msg;
+  }
+}
+
+TEST(TensorSpaceConsistencyPass, ThrowsOnRankMismatchVsExpectedRank) {
+  // The second throw branch: a tensor symbol whose actual rank doesn't
+  // match its Role's `expected_rank`. Strain has expected_rank=2, so
+  // declaring it as rank-4 must throw with both rank values mentioned.
+  ConstitutiveModel model("M");
+  model.add_tensor_input("eps", 3, /*rank=*/4, roles::Strain);
+
+  try {
+    model.validate();
+    FAIL() << "expected runtime_error for rank mismatch";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("eps"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("rank 4"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("expects rank 2"), std::string::npos) << msg;
+    // Actionable: should name the add_tensor_input call site or the
+    // roles:: catalogue.
+    EXPECT_NE(msg.find("roles::"), std::string::npos)
+        << "expected message to point at the roles:: catalogue: " << msg;
   }
 }
 
