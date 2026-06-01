@@ -59,6 +59,31 @@ auto make_empty_model() -> ConstitutiveModel { return ConstitutiveModel("M"); }
 
 } // namespace
 
+// ─── RecipeView (M4) ─────────────────────────────────────────────────
+
+TEST(RecipeView, DelegatesNameSymbolsOutputs) {
+  ConstitutiveModel model("LinearElasticShear");
+  auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
+  auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
+  model.add_output("stress", 2 * mu * eps, roles::Stress);
+
+  RecipeView view(model);
+  EXPECT_EQ(view.name(), "LinearElasticShear");
+  EXPECT_EQ(view.symbols().size(), 2u); // mu (parameter) + eps (input)
+  EXPECT_EQ(view.outputs().size(), 1u); // stress
+  EXPECT_EQ(view.scalar_symbol_map().size(), 1u); // mu
+  EXPECT_EQ(view.tensor_symbol_map().size(), 1u); // eps
+}
+
+TEST(RecipeView, RawModelEscapeHatchExposesFullRecipe) {
+  // Until RecipeView's surface widens, callers needing parameters()/
+  // inputs()/find_*_by_role go through raw_model(). Verify the hatch
+  // returns the same ConstitutiveModel we constructed it with.
+  ConstitutiveModel model("M");
+  RecipeView view(model);
+  EXPECT_EQ(&view.raw_model(), &model);
+}
+
 // ─── PassManager ─────────────────────────────────────────────────────
 
 TEST(PassManager, RunsPassesInRegistrationOrder) {
@@ -72,7 +97,7 @@ TEST(PassManager, RunsPassesInRegistrationOrder) {
                         std::vector<std::string_view>{});
 
   auto model = make_empty_model();
-  PassContext pctx{model, CodeGenContext{}, std::nullopt};
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt};
   pm.run(pctx);
 
   ASSERT_EQ(trace.size(), 3u);
@@ -91,7 +116,7 @@ TEST(PassManager, EnforcesPrecondition) {
                         std::vector<std::string_view>{});
 
   auto model = make_empty_model();
-  PassContext pctx{model, CodeGenContext{}, std::nullopt};
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt};
   try {
     pm.run(pctx);
     FAIL() << "expected runtime_error for unmet precondition";
@@ -114,7 +139,7 @@ TEST(PassManager, SatisfiedPreconditionAllowsRun) {
                         std::vector<std::string_view>{});
 
   auto model = make_empty_model();
-  PassContext pctx{model, CodeGenContext{}, std::nullopt};
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt};
   pm.run(pctx);
 
   ASSERT_EQ(trace.size(), 2u);
@@ -271,7 +296,7 @@ TEST(CodeEmitPass, RefusesToRunWithoutValidationPredecessor) {
   // should fail loudly — CodeEmitPass advertises preconditions that are
   // unmet.
   ConstitutiveModel model("M");
-  PassContext pctx{model, CodeGenContext{}, std::nullopt};
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt};
   PassManager pm;
   pm.emplace<CodeEmitPass>();
 

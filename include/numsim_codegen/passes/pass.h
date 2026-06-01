@@ -2,6 +2,7 @@
 #define NUMSIM_CODEGEN_PASS_H
 
 #include <numsim_codegen/code_emit/codegen_context.h>
+#include <numsim_codegen/passes/recipe_view.h>
 
 #include <optional>
 #include <string>
@@ -10,15 +11,15 @@
 
 namespace numsim::codegen {
 
-class ConstitutiveModel;
-
 // Shared state for a single PassManager invocation. Passes read the
-// (read-only) recipe, mutate the codegen context, and deposit their final
-// products into the output slots below. Phase 1.2 only needs one output
-// slot (the rendered compute function); Phase 2/3 will add more (tangent
-// source, state-variable wiring, etc.).
+// recipe via `model` (a RecipeView — const-only today, will gain a
+// mutable surface in Phase 2 without breaking pass signatures; see M4
+// in issue #48 for the rationale), mutate the codegen context, and
+// deposit their final products into the output slots below. Phase 1.2
+// only needs one output slot (the rendered compute function); Phase
+// 2/3 will add more (tangent source, state-variable wiring, etc.).
 struct PassContext {
-  ConstitutiveModel const &model;
+  RecipeView model;
   CodeGenContext ctx;
   std::optional<std::string> compute_function_source;
 };
