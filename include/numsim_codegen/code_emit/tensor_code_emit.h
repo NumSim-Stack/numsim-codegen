@@ -27,8 +27,18 @@ namespace numsim::codegen {
 // inner_product, basis_change, outer_product, tensor_inv, etc.
 class TensorCodeEmit final : public cas::tensor_visitor_const_t {
 public:
-  TensorCodeEmit(CodeGenContext &ctx, ScalarCodeEmit &scalar)
-      : m_ctx(ctx), m_scalar(scalar) {}
+  // Callback bridging into the tensor_to_scalar emitter. Required because
+  // the tensor and t2s visitors form a cycle (t2s emit holds a TensorCodeEmit&
+  // for sub-tensor expressions; some tensor nodes — namely
+  // `tensor_to_scalar_with_tensor_mul` — embed a t2s subterm). Taking the
+  // callback at construction time means a TensorCodeEmit cannot be built
+  // without it, so the "callback unset" case is a compile error rather
+  // than a runtime throw (M3 in issue #48).
+  using T2sApply = std::function<std::string(
+      cas::expression_holder<cas::tensor_to_scalar_expression> const &)>;
+
+  TensorCodeEmit(CodeGenContext &ctx, ScalarCodeEmit &scalar, T2sApply t2s)
+      : m_ctx(ctx), m_scalar(scalar), m_t2s_apply(std::move(t2s)) {}
 
   auto apply(cas::expression_holder<cas::tensor_expression> const &expr)
       -> std::string {
@@ -372,33 +382,19 @@ public:
   // tensor_to_scalar_with_tensor_mul → scalar · tensor.
   //
   // LHS is a tensor; RHS is a tensor_to_scalar (a scalar-valued tensor
-  // reduction like trace/det/norm or a composite thereof). The result is a
-  // tensor of LHS's shape with every entry multiplied by the scalar.
+  // reduction like trace/det/norm or a composite thereof). The result is
+  // a tensor of LHS's shape with every entry multiplied by the scalar.
   //
-  // Because t2s emit lives in a separate visitor that includes this header,
-  // we accept a callback at construction-site rather than including the t2s
-  // header here (which would create a cycle). The recipe entry-point wires
-  // it via `set_t2s_apply()`.
+  // The t2s emitter lives in a separate visitor that already includes this
+  // header. We accept the t2s callback at construction time to break the
+  // include cycle without leaving room for a runtime "callback unset"
+  // case — the constructor signature guarantees the bridge is wired.
   void operator()(cas::tensor_to_scalar_with_tensor_mul const &v) override {
-    if (!m_t2s_apply) {
-      throw std::runtime_error(
-          "TensorCodeEmit: tensor_to_scalar_with_tensor_mul requires a "
-          "tensor_to_scalar callback. Call set_t2s_apply() with the t2s "
-          "emitter's apply method; the high-level recipe entry-point does "
-          "this automatically.");
-    }
     auto lhs = apply(v.expr_lhs());
     auto rhs = m_t2s_apply(v.expr_rhs());
     m_result = register_temp(
         &v, wrap_if_compound(rhs) + " * " + wrap_if_compound(lhs));
   }
-
-  // ─── External wiring ─────────────────────────────────────────────
-
-  using T2sApply = std::function<std::string(
-      cas::expression_holder<cas::tensor_to_scalar_expression> const &)>;
-
-  void set_t2s_apply(T2sApply fn) { m_t2s_apply = std::move(fn); }
 
   // tensor_inv → tmech::inv(...). Rank-2 only in this phase.
   //
@@ -510,7 +506,7 @@ private:
 
   CodeGenContext &m_ctx;
   ScalarCodeEmit &m_scalar;
-  T2sApply m_t2s_apply; // optional — set by recipe entry-point.
+  T2sApply m_t2s_apply; // required at construction (M3) — never empty.
   std::string m_result;
 };
 

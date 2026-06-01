@@ -17,12 +17,33 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
+#include <stdexcept>
+
 namespace numsim::codegen {
+
+namespace {
+
+// M3: TensorCodeEmit constructor now requires a T2sApply. Tests below
+// that don't exercise the tensor_to_scalar_with_tensor_mul codepath
+// pass this throwing stub — if a future change accidentally routes a
+// t2s subterm through a stubbed test, the throw makes it loud rather
+// than silent.
+inline auto throwing_t2s_apply() -> TensorCodeEmit::T2sApply {
+  return [](auto const &) -> std::string {
+    throw std::logic_error(
+        "throwing_t2s_apply invoked: this test was not wired with a real "
+        "t2s callback. Either wire one with the unique_ptr indirection or "
+        "move the test off the t2s codepath.");
+  };
+}
+
+} // namespace
 
 TEST(TensorCodeEmit, LeviCivitaEmitsTmechLeviCivita) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   // dim ∈ {2, 3, 4} is supported by numsim-cas.
   auto eps3 = cas::make_expression<cas::levi_civita_tensor>(3);
@@ -37,7 +58,7 @@ TEST(TensorCodeEmit, LeviCivitaEmitsTmechLeviCivita) {
 TEST(TensorCodeEmit, LeviCivitaDim2) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto eps2 = cas::make_expression<cas::levi_civita_tensor>(2);
   emit.apply(eps2);
@@ -50,7 +71,7 @@ TEST(TensorCodeEmit, IdentityTensorRank2EmitsTmechEye) {
   // kronecker_delta node. Ensure the rank-2 emit still produces tmech::eye.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto I = cas::make_expression<cas::identity_tensor>(3, 2);
   emit.apply(I);
@@ -63,7 +84,7 @@ TEST(TensorCodeEmit, IdentityTensorRank2EmitsTmechEye) {
 TEST(TensorCodeEmit, TensorInvEmitsTmechInv) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   ctx.register_symbol_tensor(A, "A");
@@ -86,7 +107,7 @@ TEST(TensorCodeEmit, TensorInvOnCompoundInputReusesTemp) {
   // test fixture ever shares a context).
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   auto B = cas::make_expression<cas::tensor>("B", 3, 2);
@@ -115,7 +136,7 @@ TEST(TensorCodeEmit, TensorInvRank4ThrowsClearly) {
   // (e.g. serialisation round-trip without factory validation).
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto C = cas::make_expression<cas::tensor>("C", 3, 4);
   ctx.register_symbol_tensor(C, "C");
@@ -142,7 +163,7 @@ TEST(TensorCodeEmit, TensorInvRank4ThrowsClearly) {
 TEST(TensorCodeEmit, ProjectorSymEmitsSymmetricBuildup) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   emit.apply(cas::P_sym(3));
   auto rendered = ctx.render_statements();
@@ -161,7 +182,7 @@ TEST(TensorCodeEmit, ProjectorSymEmitsSymmetricBuildup) {
 TEST(TensorCodeEmit, ProjectorSkewEmitsSkewBuildup) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   emit.apply(cas::P_skew(3));
   auto rendered = ctx.render_statements();
@@ -176,7 +197,7 @@ TEST(TensorCodeEmit, ProjectorSkewEmitsSkewBuildup) {
 TEST(TensorCodeEmit, ProjectorVolEmitsTraceProjector) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   emit.apply(cas::P_vol(3));
   auto rendered = ctx.render_statements();
@@ -193,7 +214,7 @@ TEST(TensorCodeEmit, ProjectorVolEmitsTraceProjector) {
 TEST(TensorCodeEmit, ProjectorDevEmitsSymMinusVol) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   emit.apply(cas::P_devi(3));
   auto rendered = ctx.render_statements();
@@ -213,7 +234,7 @@ TEST(TensorCodeEmit, ProjectorDim2UsesCorrectDim) {
   // Catches the typo of hardcoding dim=3 in the emit.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   emit.apply(cas::P_vol(2));
   auto rendered = ctx.render_statements();
@@ -227,7 +248,7 @@ TEST(TensorCodeEmit, ProjectorCSEReusesTemp) {
   // P_sym used twice in a single expression should share a single temp.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto Psym = cas::P_sym(3);
   emit.apply(Psym);
@@ -253,7 +274,7 @@ TEST(TensorCodeEmit, ProjectorHarmonicThrowsClearly) {
   // points at the supported alternatives so the failure is actionable.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   try {
     emit.apply(cas::P_harm(3, 2));
@@ -270,7 +291,7 @@ TEST(TensorCodeEmit, ProjectorActsOnRank1ThrowsClearly) {
   // is actionable.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   // Build directly via make_projector — the cas P_sym preset hardcodes
   // acts_on_rank=2, so we'd have no way to construct an acts_on_rank=1
@@ -293,7 +314,7 @@ TEST(TensorCodeEmit, OuterProductWrapperEmitsTemplateForm) {
   // a ⊗ b with placement (1,2) and (3,4) — i.e. the standard `otimes`.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   auto B = cas::make_expression<cas::tensor>("B", 3, 2);
@@ -315,7 +336,7 @@ TEST(TensorCodeEmit, OuterProductWrapperPreservesNon1234Indices) {
   // tmech, not get accidentally re-sorted or zero-based.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   auto B = cas::make_expression<cas::tensor>("B", 3, 2);
@@ -335,7 +356,7 @@ TEST(TensorCodeEmit, OuterProductWrapperPreservesNon1234Indices) {
 TEST(TensorCodeEmit, SimpleOuterProductTwoChildrenChains) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   auto B = cas::make_expression<cas::tensor>("B", 3, 2);
@@ -358,7 +379,7 @@ TEST(TensorCodeEmit, SimpleOuterProductThreeChildrenNests) {
   // 1..2, then 1..4, then 1..6 for the third child's placement at <5,6>.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   auto B = cas::make_expression<cas::tensor>("B", 3, 2);
@@ -385,7 +406,7 @@ TEST(TensorCodeEmit, InnerProductWrapperEmitsTemplateForm) {
   // Generic double contraction C : ε for C rank-4, ε rank-2.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto C = cas::make_expression<cas::tensor>("C", 3, 4);
   auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
@@ -408,7 +429,7 @@ TEST(TensorCodeEmit, InnerProductWrapperEmitsTemplateForm) {
 TEST(TensorCodeEmit, InnerProductWithPSymEmitsTmechSym) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
   ctx.register_symbol_tensor(eps, "eps");
@@ -427,7 +448,7 @@ TEST(TensorCodeEmit, InnerProductWithPSymEmitsTmechSym) {
 TEST(TensorCodeEmit, InnerProductWithPSkewEmitsTmechSkew) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
   ctx.register_symbol_tensor(eps, "eps");
@@ -440,7 +461,7 @@ TEST(TensorCodeEmit, InnerProductWithPSkewEmitsTmechSkew) {
 TEST(TensorCodeEmit, InnerProductWithPVolEmitsTmechVol) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
   ctx.register_symbol_tensor(eps, "eps");
@@ -453,7 +474,7 @@ TEST(TensorCodeEmit, InnerProductWithPVolEmitsTmechVol) {
 TEST(TensorCodeEmit, InnerProductWithPDevEmitsTmechDev) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
   ctx.register_symbol_tensor(eps, "eps");
@@ -468,7 +489,7 @@ TEST(TensorCodeEmit, InnerProductGenericFormUsedWhenLhsIsntKnownProjector) {
   // tmech::inner_product form, not be misclassified.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto C = cas::make_expression<cas::tensor>("C", 3, 4);
   auto eps = cas::make_expression<cas::tensor>("eps", 3, 2);
@@ -491,7 +512,7 @@ TEST(TensorCodeEmit, InnerProductProjectorOnRank4RhsFallsThrough) {
   // generic inner_product emit.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto X = cas::make_expression<cas::tensor>("X", 3, 4);
   ctx.register_symbol_tensor(X, "X");
@@ -511,7 +532,7 @@ TEST(TensorCodeEmit, TensorMulTwoChildrenSingleContraction) {
   // of last(A) with first(B). tmech form is inner_product<seq<2>, seq<1>>.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   auto B = cas::make_expression<cas::tensor>("B", 3, 2);
@@ -533,7 +554,7 @@ TEST(TensorCodeEmit, TensorMulThreeChildrenChains) {
   // A · B · C — accumulator rank stays 2 throughout (2+2-2 = 2).
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   auto B = cas::make_expression<cas::tensor>("B", 3, 2);
@@ -566,7 +587,7 @@ TEST(TensorCodeEmit, TensorMulThreeChildrenChains) {
 TEST(TensorCodeEmit, TensorPowRank2EmitsTmechPow) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   ctx.register_symbol_tensor(A, "A");
@@ -581,7 +602,7 @@ TEST(TensorCodeEmit, TensorPowRank2EmitsTmechPow) {
 TEST(TensorCodeEmit, TensorPowRank4ThrowsClearly) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto C = cas::make_expression<cas::tensor>("C", 3, 4);
   ctx.register_symbol_tensor(C, "C");
@@ -602,7 +623,7 @@ TEST(TensorCodeEmit, PermuteIndicesEmitsBasisChange) {
   // The classic transpose pattern: rank-2 with permutation {2, 1}.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   ctx.register_symbol_tensor(A, "A");
@@ -619,7 +640,7 @@ TEST(TensorCodeEmit, PermuteIndicesPreservesArbitraryRank4Permutation) {
   // {3,4,1,2} on a rank-4 tensor — minor-major swap pattern from elasticity.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit emit(ctx, scalar_emit);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
 
   auto C = cas::make_expression<cas::tensor>("C", 3, 4);
   ctx.register_symbol_tensor(C, "C");
@@ -637,20 +658,27 @@ TEST(TensorCodeEmit, PermuteIndicesPreservesArbitraryRank4Permutation) {
 TEST(TensorCodeEmit, T2sWithTensorMulMultipliesScalarByTensor) {
   // trace(A) * B — t2s on the rhs, tensor on the lhs. Expect the t2s
   // callback to fire and the emit to read `<trace_emit> * <tensor>`.
+  //
+  // M3: the cycle (tensor_emit needs t2s callback; t2s_emit holds
+  // tensor_emit&) is broken via unique_ptr indirection — see the same
+  // pattern in CodeEmitPass::run.
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit tensor_emit(ctx, scalar_emit);
-  TensorToScalarCodeEmit t2s_emit(ctx, scalar_emit, tensor_emit);
-  tensor_emit.set_t2s_apply(
-      [&t2s_emit](auto const &e) { return t2s_emit.apply(e); });
+
+  auto t2s_emit_storage = std::unique_ptr<TensorToScalarCodeEmit>{};
+  TensorCodeEmit tensor_emit(ctx, scalar_emit,
+      [&t2s_emit_storage](auto const &e) {
+        return t2s_emit_storage->apply(e);
+      });
+  t2s_emit_storage = std::make_unique<TensorToScalarCodeEmit>(
+      ctx, scalar_emit, tensor_emit);
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   auto B = cas::make_expression<cas::tensor>("B", 3, 2);
   ctx.register_symbol_tensor(A, "A");
   ctx.register_symbol_tensor(B, "B");
 
-  auto tr_A =
-      cas::make_expression<cas::tensor_trace>(A);
+  auto tr_A = cas::make_expression<cas::tensor_trace>(A);
   tensor_emit.apply(
       cas::make_expression<cas::tensor_to_scalar_with_tensor_mul>(B, tr_A));
   auto rendered = ctx.render_statements();
@@ -660,28 +688,10 @@ TEST(TensorCodeEmit, T2sWithTensorMulMultipliesScalarByTensor) {
   EXPECT_NE(rendered.find(" * B"), std::string::npos) << rendered;
 }
 
-TEST(TensorCodeEmit, T2sWithTensorMulThrowsWhenCallbackUnset) {
-  // The header-cycle workaround relies on the caller installing the t2s
-  // callback. Without it, the emit must fail with a clear message rather
-  // than silently producing nothing.
-  CodeGenContext ctx;
-  ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit tensor_emit(ctx, scalar_emit); // intentionally no set_t2s_apply
-
-  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
-  auto B = cas::make_expression<cas::tensor>("B", 3, 2);
-  ctx.register_symbol_tensor(A, "A");
-  ctx.register_symbol_tensor(B, "B");
-
-  auto tr_A = cas::make_expression<cas::tensor_trace>(A);
-  try {
-    tensor_emit.apply(
-        cas::make_expression<cas::tensor_to_scalar_with_tensor_mul>(B, tr_A));
-    FAIL() << "expected std::runtime_error when t2s callback unset";
-  } catch (std::runtime_error const &e) {
-    std::string msg(e.what());
-    EXPECT_NE(msg.find("set_t2s_apply"), std::string::npos) << "msg: " << msg;
-  }
-}
+// M3: `T2sWithTensorMulThrowsWhenCallbackUnset` was deleted with this
+// change. The "callback unset" case is no longer reachable — the
+// constructor requires the callback at construction time, so the
+// "forgot to wire" failure mode is now a compile error rather than a
+// runtime throw. See M3 in issue #48 for the rationale.
 
 } // namespace numsim::codegen
