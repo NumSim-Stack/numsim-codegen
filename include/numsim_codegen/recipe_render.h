@@ -23,6 +23,7 @@
 // pattern for callers.
 
 #include <numsim_codegen/code_emit/codegen_context.h>
+#include <numsim_codegen/passes/recipe_view.h>
 
 #include <cstddef>
 #include <sstream>
@@ -31,16 +32,16 @@
 
 namespace numsim::codegen {
 
-class ConstitutiveModel;
-struct SymbolDecl;
-struct OutputDecl;
-
-// Forward declarations of public accessors used by the render bodies. The
-// real bodies live in recipe.h; we declare here only what the free
-// function definitions below need.
-
+// Render the function-frame source (signature + body + output writes)
+// from a populated CodeGenContext and the model view. Bodies are inline
+// at the bottom of recipe.h (where ConstitutiveModel is complete and
+// RecipeView's delegates are defined).
+//
+// Takes a RecipeView rather than ConstitutiveModel const & so any emit
+// pass can call it from a PassContext directly (M4: passes hold views,
+// not raw recipe refs).
 [[nodiscard]] auto render_compute_function(
-    ConstitutiveModel const &model, CodeGenContext const &ctx,
+    RecipeView model, CodeGenContext const &ctx,
     std::vector<std::string> const &output_rhs) -> std::string;
 
 } // namespace numsim::codegen

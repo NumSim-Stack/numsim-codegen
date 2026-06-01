@@ -206,8 +206,16 @@ public:
   // Called automatically from emit_compute_function() but exposed for
   // explicit pre-flight checks. Backed by SymbolValidationPass under the
   // Phase 1.2 pass framework.
+  //
+  // NOTE on context isolation (issue #48 / M4): this constructs its own
+  // independent PassContext. State written to pctx.ctx here is NOT shared
+  // with a subsequent emit_compute_function() call (which builds another
+  // fresh context). Today this is harmless because SymbolValidationPass
+  // does not touch pctx.ctx. A future pass that wants to cache validation
+  // artifacts for the emit pipeline must run inside the same
+  // emit_compute_function() invocation, not a separate validate() call.
   void validate() const {
-    PassContext pctx{*this, CodeGenContext{}, std::nullopt};
+    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
     pm.run(pctx);
@@ -220,7 +228,7 @@ public:
   // Future phases (TimeIntegrationPass, AlgorithmicTangentPass, …) plug
   // additional passes into this same pipeline.
   [[nodiscard]] auto emit_compute_function() const -> std::string {
-    PassContext pctx{*this, CodeGenContext{}, std::nullopt};
+    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
     pm.emplace<CodeEmitPass>();
@@ -332,6 +340,31 @@ private:
       m_tensor_symbols;
 };
 
+// ─── RecipeView delegate bodies ──────────────────────────────────────
+//
+// Declared in passes/recipe_view.h; defined here because ConstitutiveModel
+// must be complete to instantiate the delegations.
+
+inline auto RecipeView::name() const -> std::string const & {
+  return m_model->name();
+}
+
+inline auto RecipeView::symbols() const -> std::vector<SymbolDecl> const & {
+  return m_model->symbols();
+}
+
+inline auto RecipeView::outputs() const -> std::vector<OutputDecl> const & {
+  return m_model->outputs();
+}
+
+inline auto RecipeView::scalar_symbol_map() const -> ScalarSymbolMap const & {
+  return m_model->scalar_symbol_map();
+}
+
+inline auto RecipeView::tensor_symbol_map() const -> TensorSymbolMap const & {
+  return m_model->tensor_symbol_map();
+}
+
 // ─── Function-frame rendering (free functions) ───────────────────────
 //
 // These render the surrounding function frame after the body statements
@@ -369,7 +402,7 @@ inline auto output_decl(OutputDecl const &o, int &tmpl_counter) -> std::string {
 }
 
 // Count how many tensor parameters / outputs need template params.
-inline auto tensor_arg_count(ConstitutiveModel const &model) -> int {
+inline auto tensor_arg_count(RecipeView model) -> int {
   int n = 0;
   for (auto const &s : model.symbols()) {
     if (s.kind == SymbolDecl::Kind::Tensor)
@@ -385,7 +418,7 @@ inline auto tensor_arg_count(ConstitutiveModel const &model) -> int {
 } // namespace detail
 
 inline auto render_compute_function(
-    ConstitutiveModel const &model, CodeGenContext const &ctx,
+    RecipeView model, CodeGenContext const &ctx,
     std::vector<std::string> const &output_rhs) -> std::string {
   std::ostringstream os;
 
