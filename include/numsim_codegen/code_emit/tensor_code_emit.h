@@ -8,6 +8,7 @@
 #include <numsim_cas/tensor/levi_civita_tensor.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_visitor_typedef.h>
+#include <numsim_cas/tensor/wrappers/tensor_inv.h>
 
 #include <ranges>
 #include <sstream>
@@ -147,11 +148,39 @@ public:
   NUMSIM_CODEGEN_TENSOR_STUB(permute_indices_wrapper)
   NUMSIM_CODEGEN_TENSOR_STUB(outer_product_wrapper)
   NUMSIM_CODEGEN_TENSOR_STUB(simple_outer_product)
-  NUMSIM_CODEGEN_TENSOR_STUB(tensor_inv)
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_projector)
   NUMSIM_CODEGEN_TENSOR_STUB(tensor_to_scalar_with_tensor_mul)
 
 #undef NUMSIM_CODEGEN_TENSOR_STUB
+
+  // ─── Implemented unary nodes ─────────────────────────────────────
+
+  // tensor_inv → tmech::inv(...). Rank-2 only in this phase.
+  //
+  // For rank ≠ 2 the inverse is well-defined algebraically but tmech's
+  // `inv` needs explicit contraction-index sequences (e.g.
+  // `tmech::inv<tmech::sequence<1,2>, tmech::sequence<3,4>>(A)` for the
+  // natural rank-4 inverse). That index pair is a property of the
+  // tensor's algebraic structure and is being added to `cas::tensor_inv`
+  // upstream — see NumSim-Stack/numsim-cas#248 (decision: Option A,
+  // landing in a future numsim-cas release). Once the accessor is
+  // available, this emit case reads it and produces the templated
+  // `tmech::inv<sequence<...>, sequence<...>>(...)` form; the rank-2
+  // path below is unchanged. Local follow-up: #43.
+  void operator()(cas::tensor_inv const &v) override {
+    if (v.rank() != 2) {
+      throw std::runtime_error(
+          "TensorCodeEmit: tensor_inv of rank " + std::to_string(v.rank()) +
+          " is not yet supported. Use rank-2 tensors, or track "
+          "NumSim-Stack/numsim-cas#248 for rank-4 support landing upstream.");
+    }
+    auto inner = apply(v.expr());
+    // wrap_if_compound: today `inner` is always a single token (named symbol
+    // or temp from a prior register_temp), so this is a no-op. The wrap
+    // future-proofs against any node that starts returning a compound
+    // `m_result` (cf. the same pattern in tensor_scalar_mul).
+    m_result = register_temp(&v, "tmech::inv(" + wrap_if_compound(inner) + ")");
+  }
 
 private:
   auto register_temp(void const *ptr, std::string rhs) -> std::string {
