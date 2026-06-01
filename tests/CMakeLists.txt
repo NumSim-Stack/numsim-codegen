@@ -22,6 +22,7 @@ add_executable(numsim_codegen_tests
     RecipeTest.cpp
     MooseTargetTest.cpp
     RoleFlexibilityTest.cpp
+    RecipeRegistrySmokeTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests
@@ -29,6 +30,9 @@ target_link_libraries(numsim_codegen_tests
         numsim::codegen
         GTest::gtest
 )
+# The registry smoke test consumes examples/recipe_registry.h directly.
+target_include_directories(numsim_codegen_tests
+    PRIVATE ${CMAKE_SOURCE_DIR}/examples)
 
 include(GoogleTest)
 gtest_discover_tests(numsim_codegen_tests)

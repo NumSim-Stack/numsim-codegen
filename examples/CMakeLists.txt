@@ -3,3 +3,6 @@ target_link_libraries(linear_elasticity PRIVATE numsim::codegen)
 
 add_executable(moose_linear_elastic moose_linear_elastic.cpp)
 target_link_libraries(moose_linear_elastic PRIVATE numsim::codegen)
+
+add_executable(recipe_registry_gen recipe_registry_gen.cpp)
+target_link_libraries(recipe_registry_gen PRIVATE numsim::codegen)
