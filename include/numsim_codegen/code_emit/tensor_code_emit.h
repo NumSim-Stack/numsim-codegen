@@ -161,6 +161,31 @@ public:
 
   // ─── Implemented unary nodes ─────────────────────────────────────
 
+  // Recognised rank-4 projector presets at acts_on_rank=2. The
+  // (perm, trace) → kind mapping is the single source of truth for both
+  // the standalone materialisation (`tensor_projector` emit) and the
+  // applied-form short-circuit in `inner_product_wrapper`. M2 (#48).
+  enum class ProjectorKind { Unknown, Sym, Skew, Vol, Dev };
+
+  // Classify the (perm, trace) pair of a cas tensor_space against the
+  // four currently-supported projector presets.
+  static auto classify_projector(cas::tensor_space const &sp) noexcept
+      -> ProjectorKind {
+    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
+        std::holds_alternative<cas::AnyTraceTag>(sp.trace))
+      return ProjectorKind::Sym;
+    if (std::holds_alternative<cas::Skew>(sp.perm) &&
+        std::holds_alternative<cas::AnyTraceTag>(sp.trace))
+      return ProjectorKind::Skew;
+    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
+        std::holds_alternative<cas::VolumetricTag>(sp.trace))
+      return ProjectorKind::Vol;
+    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
+        std::holds_alternative<cas::DeviatoricTag>(sp.trace))
+      return ProjectorKind::Dev;
+    return ProjectorKind::Unknown;
+  }
+
   // tensor_projector → rank-4 constant projector built from tmech primitives.
   //
   // Scope: `acts_on_rank == 2` (rank-4 projectors on rank-2 tensors). This is
@@ -200,30 +225,22 @@ public:
     // would silently floor for non-trivial d.
     const std::string inv_d = "(1.0 / " + d_str + ".0)";
 
-    auto const &sp = v.space();
-    auto const &perm = sp.perm;
-    auto const &trace = sp.trace;
-
-    if (std::holds_alternative<cas::Symmetric>(perm) &&
-        std::holds_alternative<cas::AnyTraceTag>(trace)) {
+    switch (classify_projector(v.space())) {
+    case ProjectorKind::Sym:
       m_result = register_temp(&v, "0.5 * (" + ou + " + " + ol + ")");
       return;
-    }
-    if (std::holds_alternative<cas::Skew>(perm) &&
-        std::holds_alternative<cas::AnyTraceTag>(trace)) {
+    case ProjectorKind::Skew:
       m_result = register_temp(&v, "0.5 * (" + ou + " - " + ol + ")");
       return;
-    }
-    if (std::holds_alternative<cas::Symmetric>(perm) &&
-        std::holds_alternative<cas::VolumetricTag>(trace)) {
+    case ProjectorKind::Vol:
       m_result = register_temp(&v, inv_d + " * " + oo);
       return;
-    }
-    if (std::holds_alternative<cas::Symmetric>(perm) &&
-        std::holds_alternative<cas::DeviatoricTag>(trace)) {
+    case ProjectorKind::Dev:
       m_result = register_temp(
           &v, "0.5 * (" + ou + " + " + ol + ") - " + inv_d + " * " + oo);
       return;
+    case ProjectorKind::Unknown:
+      break;
     }
     throw std::runtime_error(
         "TensorCodeEmit: tensor_projector with this (perm, trace) "
@@ -472,6 +489,9 @@ private:
   // If `v` is `P : A` for a known rank-4 projector preset applied to a
   // rank-2 tensor (`{3,4} × {1,2}` contraction), return the tmech unary
   // function name. Otherwise return nullptr.
+  //
+  // M2 (#48): the (perm, trace) → kind mapping lives in
+  // `classify_projector`; we just map the kind to a unary op name here.
   static auto projector_short_circuit_fn(cas::inner_product_wrapper const &v)
       -> const char * {
     if (v.indices_lhs() != cas::sequence{3, 4} ||
@@ -488,20 +508,14 @@ private:
     if (proj.acts_on_rank() != 2) {
       return nullptr;
     }
-    auto const &sp = proj.space();
-    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
-        std::holds_alternative<cas::AnyTraceTag>(sp.trace))
-      return "sym";
-    if (std::holds_alternative<cas::Skew>(sp.perm) &&
-        std::holds_alternative<cas::AnyTraceTag>(sp.trace))
-      return "skew";
-    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
-        std::holds_alternative<cas::VolumetricTag>(sp.trace))
-      return "vol";
-    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
-        std::holds_alternative<cas::DeviatoricTag>(sp.trace))
-      return "dev";
-    return nullptr;
+    switch (classify_projector(proj.space())) {
+    case ProjectorKind::Sym:  return "sym";
+    case ProjectorKind::Skew: return "skew";
+    case ProjectorKind::Vol:  return "vol";
+    case ProjectorKind::Dev:  return "dev";
+    case ProjectorKind::Unknown: return nullptr;
+    }
+    return nullptr; // unreachable but quiets non-exhaustive-switch warnings.
   }
 
   CodeGenContext &m_ctx;
