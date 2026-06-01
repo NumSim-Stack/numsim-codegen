@@ -81,6 +81,28 @@ private:
       m_p.collect_scalar(v.expr_lhs());
       m_p.collect_scalar(v.expr_rhs());
     }
+
+#define NCG_BINARY_S(T)                                                        \
+  void operator()(cas::T const &v) override {                                  \
+    m_p.collect_scalar(v.expr_lhs());                                          \
+    m_p.collect_scalar(v.expr_rhs());                                          \
+  }
+    NCG_BINARY_S(scalar_lt)
+    NCG_BINARY_S(scalar_gt)
+    NCG_BINARY_S(scalar_le)
+    NCG_BINARY_S(scalar_ge)
+    NCG_BINARY_S(scalar_eq)
+    NCG_BINARY_S(scalar_ne)
+    NCG_BINARY_S(scalar_max)
+    NCG_BINARY_S(scalar_min)
+#undef NCG_BINARY_S
+
+    void operator()(cas::scalar_if_then_else const &v) override {
+      m_p.collect_scalar(v.expr_cond());
+      m_p.collect_scalar(v.expr_then());
+      m_p.collect_scalar(v.expr_else());
+    }
+
 #define NCG_UNARY_S(T)                                                         \
   void operator()(cas::T const &v) override { m_p.collect_scalar(v.expr()); }
     NCG_UNARY_S(scalar_negative)
@@ -109,8 +131,8 @@ private:
       m_p.m_tensor_names.insert(v.name());
     }
     void operator()(cas::tensor_zero const &) override {}
-    void operator()(cas::kronecker_delta const &) override {}
     void operator()(cas::identity_tensor const &) override {}
+    void operator()(cas::levi_civita_tensor const &) override {}
     void operator()(cas::tensor_projector const &) override {}
     void operator()(cas::tensor_negative const &v) override {
       m_p.collect_tensor(v.expr());
@@ -133,8 +155,7 @@ private:
       m_p.collect_tensor(v.expr_lhs());
       m_p.collect_tensor(v.expr_rhs());
     }
-    // Note: basis_change_imp on main; permute_indices_wrapper after #121.
-    void operator()(cas::basis_change_imp const &v) override {
+    void operator()(cas::permute_indices_wrapper const &v) override {
       m_p.collect_tensor(v.expr());
     }
     void operator()(cas::outer_product_wrapper const &v) override {

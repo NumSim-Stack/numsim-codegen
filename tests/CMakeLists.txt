@@ -18,6 +18,7 @@ add_executable(numsim_codegen_tests
     main.cpp
     CodegenContextTest.cpp
     ScalarCodeEmitTest.cpp
+    TensorCodeEmitTest.cpp
     RecipeTest.cpp
     MooseTargetTest.cpp
     RoleFlexibilityTest.cpp
