@@ -4,12 +4,15 @@
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
 
+#include <numsim_cas/basic_functions.h>
 #include <numsim_cas/tensor/identity_tensor.h>
 #include <numsim_cas/tensor/levi_civita_tensor.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_visitor_typedef.h>
 #include <numsim_cas/tensor/wrappers/tensor_inv.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_expression.h>
 
+#include <functional>
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
@@ -142,18 +145,260 @@ public:
         " not yet implemented. See numsim-codegen Phase A roadmap.");          \
   }
 
-  NUMSIM_CODEGEN_TENSOR_STUB(tensor_mul)
-  NUMSIM_CODEGEN_TENSOR_STUB(tensor_pow)
-  NUMSIM_CODEGEN_TENSOR_STUB(inner_product_wrapper)
-  NUMSIM_CODEGEN_TENSOR_STUB(permute_indices_wrapper)
-  NUMSIM_CODEGEN_TENSOR_STUB(outer_product_wrapper)
-  NUMSIM_CODEGEN_TENSOR_STUB(simple_outer_product)
-  NUMSIM_CODEGEN_TENSOR_STUB(tensor_projector)
-  NUMSIM_CODEGEN_TENSOR_STUB(tensor_to_scalar_with_tensor_mul)
+  // All Phase 1.1 stubs landed — keep the macro for the next batch.
 
 #undef NUMSIM_CODEGEN_TENSOR_STUB
 
   // ─── Implemented unary nodes ─────────────────────────────────────
+
+  // tensor_projector → rank-4 constant projector built from tmech primitives.
+  //
+  // Scope: `acts_on_rank == 2` (rank-4 projectors on rank-2 tensors). This is
+  // the case used by every Phase-A elasticity/plasticity recipe and matches
+  // the only presets currently exposed by numsim-cas (P_sym/P_skew/P_vol/
+  // P_dev/P_harm).
+  //
+  // We materialise the projector as a constant tensor rather than emitting
+  // `tmech::sym(A)` etc. Reason: the cas IR can hand us a bare
+  // `tensor_projector` not adjacent to an inner_product (e.g. as the LHS of
+  // an outer product, or as the argument to a differentiation). The
+  // applied-form short-circuit (`P_sym : A → sym(A)`) belongs in the
+  // `inner_product_wrapper` emit when that lands — same place numsim-cas's
+  // tensor_evaluator does it (tensor_evaluator.h:110).
+  //
+  // Component formulas (δ is the Kronecker delta, d = dim):
+  //   P_sym_{ijkl}  = ½(δ_ik δ_jl + δ_il δ_jk)  = ½(otimesu(I,I) + otimesl(I,I))
+  //   P_skew_{ijkl} = ½(δ_ik δ_jl − δ_il δ_jk)  = ½(otimesu(I,I) − otimesl(I,I))
+  //   P_vol_{ijkl}  = (1/d) δ_ij δ_kl           = (1/d) otimes(I,I)
+  //   P_dev_{ijkl}  = P_sym − P_vol
+  void operator()(cas::tensor_projector const &v) override {
+    const auto r = v.acts_on_rank();
+    if (r != 2) {
+      throw std::runtime_error(
+          "TensorCodeEmit: tensor_projector with acts_on_rank=" +
+          std::to_string(r) +
+          " is not yet supported. Only acts_on_rank=2 (rank-4 projectors on "
+          "rank-2 tensors) ships now; higher-rank projector emit lands once "
+          "we have a recipe that needs it.");
+    }
+    const auto d_str = std::to_string(v.dim());
+    const std::string eye = "tmech::eye<double, " + d_str + ", 2>()";
+    const std::string ou = "tmech::otimesu(" + eye + ", " + eye + ")";
+    const std::string ol = "tmech::otimesl(" + eye + ", " + eye + ")";
+    const std::string oo = "tmech::otimes(" + eye + ", " + eye + ")";
+    // (1.0 / d) keeps the literal a double; integer d in the denominator
+    // would silently floor for non-trivial d.
+    const std::string inv_d = "(1.0 / " + d_str + ".0)";
+
+    auto const &sp = v.space();
+    auto const &perm = sp.perm;
+    auto const &trace = sp.trace;
+
+    if (std::holds_alternative<cas::Symmetric>(perm) &&
+        std::holds_alternative<cas::AnyTraceTag>(trace)) {
+      m_result = register_temp(&v, "0.5 * (" + ou + " + " + ol + ")");
+      return;
+    }
+    if (std::holds_alternative<cas::Skew>(perm) &&
+        std::holds_alternative<cas::AnyTraceTag>(trace)) {
+      m_result = register_temp(&v, "0.5 * (" + ou + " - " + ol + ")");
+      return;
+    }
+    if (std::holds_alternative<cas::Symmetric>(perm) &&
+        std::holds_alternative<cas::VolumetricTag>(trace)) {
+      m_result = register_temp(&v, inv_d + " * " + oo);
+      return;
+    }
+    if (std::holds_alternative<cas::Symmetric>(perm) &&
+        std::holds_alternative<cas::DeviatoricTag>(trace)) {
+      m_result = register_temp(
+          &v, "0.5 * (" + ou + " + " + ol + ") - " + inv_d + " * " + oo);
+      return;
+    }
+    throw std::runtime_error(
+        "TensorCodeEmit: tensor_projector with this (perm, trace) "
+        "combination is not yet supported. Supported presets at "
+        "acts_on_rank=2: P_sym {Symmetric, AnyTrace}, "
+        "P_skew {Skew, AnyTrace}, P_vol {Symmetric, Volumetric}, "
+        "P_dev {Symmetric, Deviatoric}.");
+  }
+
+  // outer_product_wrapper → tmech::outer_product<sequence<...>, sequence<...>>.
+  //
+  // numsim-cas stores contraction/placement sequences 0-based; tmech's
+  // template sequence is 1-based, hence the +1 in `tmech_sequence_str`.
+  void operator()(cas::outer_product_wrapper const &v) override {
+    auto lhs = apply(v.expr_lhs());
+    auto rhs = apply(v.expr_rhs());
+    std::ostringstream os;
+    os << "tmech::outer_product<" << tmech_sequence_str(v.indices_lhs()) << ", "
+       << tmech_sequence_str(v.indices_rhs()) << ">(" << lhs << ", " << rhs
+       << ")";
+    m_result = register_temp(&v, os.str());
+  }
+
+  // simple_outer_product → chained tmech::outer_product calls.
+  //
+  // The cas node is n-ary with no per-child index control: indices of the
+  // result are children's indices concatenated left-to-right. We accumulate
+  // left-to-right with rank-based 1-based sequences `<1..r_acc>` × `<r_acc+1
+  // ..r_acc+r_child>`. Inlining the nested calls keeps a single `auto tN =
+  // …;` line — the compiler's expression-template machinery sees through it.
+  void operator()(cas::simple_outer_product const &v) override {
+    auto const &children = v.data();
+    if (children.empty()) {
+      // Defensive fallback — simplifier normally collapses an empty product.
+      std::ostringstream zero;
+      zero << "tmech::tensor<double, " << v.dim() << ", " << v.rank() << ">{}";
+      m_result = register_temp(&v, zero.str());
+      return;
+    }
+    if (children.size() == 1) {
+      m_result = apply(children.front());
+      return;
+    }
+    std::string acc = apply(children.front());
+    std::size_t acc_rank = children.front().get().rank();
+    for (std::size_t i = 1; i < children.size(); ++i) {
+      auto rhs_name = apply(children[i]);
+      const std::size_t rhs_rank = children[i].get().rank();
+      std::ostringstream os;
+      os << "tmech::outer_product<" << contiguous_sequence_str(1, acc_rank)
+         << ", " << contiguous_sequence_str(acc_rank + 1, acc_rank + rhs_rank)
+         << ">(" << acc << ", " << rhs_name << ")";
+      acc = os.str();
+      acc_rank += rhs_rank;
+    }
+    m_result = register_temp(&v, std::move(acc));
+  }
+
+  // inner_product_wrapper → tmech::inner_product<sequence<...>, sequence<...>>.
+  //
+  // Short-circuit: if LHS is a rank-4 P_{sym|skew|vol|dev} projector and the
+  // contraction matches the rank-2 application pattern `{3,4} × {1,2}`, emit
+  // the equivalent unary tmech op directly. This is the same optimisation
+  // numsim-cas's tensor_evaluator applies (tensor_evaluator.h:110) — keeps
+  // generated code readable and avoids materialising the projector tensor.
+  void operator()(cas::inner_product_wrapper const &v) override {
+    if (auto fn = projector_short_circuit_fn(v)) {
+      auto rhs = apply(v.expr_rhs());
+      m_result = register_temp(&v, std::string{"tmech::"} + fn + "(" + rhs +
+                                       ")");
+      return;
+    }
+    auto lhs = apply(v.expr_lhs());
+    auto rhs = apply(v.expr_rhs());
+    std::ostringstream os;
+    os << "tmech::inner_product<" << tmech_sequence_str(v.indices_lhs()) << ", "
+       << tmech_sequence_str(v.indices_rhs()) << ">(" << lhs << ", " << rhs
+       << ")";
+    m_result = register_temp(&v, os.str());
+  }
+
+  // tensor_mul → chained single-contraction (matrix-product-style).
+  //
+  // Cas semantics (per tensor_evaluator.h:196): n-ary, accumulates
+  // left-to-right by contracting the last index of the accumulator with the
+  // first index of the next child. Result rank = Σranks − 2·(nchildren−1).
+  // We mirror that with `tmech::inner_product<sequence<r_acc>, sequence<1>>`.
+  //
+  // The cas node also carries an optional `coeff()` that the evaluator
+  // applies as an element-wise product on the flattened buffer. That's an
+  // unusual semantic for `tensor_mul` and no shipping recipe uses it; we
+  // throw with a clear pointer rather than guess at the emit shape.
+  void operator()(cas::tensor_mul const &v) override {
+    if (v.coeff().is_valid()) {
+      throw std::runtime_error(
+          "TensorCodeEmit: tensor_mul with a coeff() (element-wise product on "
+          "the flattened buffer) has no clean tmech analogue. If you hit this, "
+          "open an issue with the recipe so we can pin down the intended "
+          "semantics.");
+    }
+    auto const &children = v.data();
+    if (children.empty()) {
+      std::ostringstream zero;
+      zero << "tmech::tensor<double, " << v.dim() << ", " << v.rank() << ">{}";
+      m_result = register_temp(&v, zero.str());
+      return;
+    }
+    if (children.size() == 1) {
+      m_result = apply(children.front());
+      return;
+    }
+    std::string acc = apply(children.front());
+    std::size_t acc_rank = children.front().get().rank();
+    for (std::size_t i = 1; i < children.size(); ++i) {
+      auto rhs_name = apply(children[i]);
+      const std::size_t rhs_rank = children[i].get().rank();
+      std::ostringstream os;
+      os << "tmech::inner_product<tmech::sequence<" << acc_rank
+         << ">, tmech::sequence<1>>(" << acc << ", " << rhs_name << ")";
+      acc = os.str();
+      acc_rank = acc_rank + rhs_rank - 2;
+    }
+    m_result = register_temp(&v, std::move(acc));
+  }
+
+  // tensor_pow → tmech::pow for rank-2 bases. tmech's pow is documented
+  // only for second-order tensors; higher-rank bases would need explicit
+  // unrolling of `inner_product<sequence<r>, sequence<1>>` repeated N times,
+  // which requires a compile-time-known integer exponent. We defer that
+  // until a recipe needs it.
+  void operator()(cas::tensor_pow const &v) override {
+    if (v.rank() != 2) {
+      throw std::runtime_error(
+          "TensorCodeEmit: tensor_pow of rank " + std::to_string(v.rank()) +
+          " is not yet supported. tmech::pow ships rank-2 only; higher-rank "
+          "bases require static-exponent unrolling — not implemented in this "
+          "phase.");
+    }
+    auto base = apply(v.expr_lhs());
+    auto exp = m_scalar.apply(v.expr_rhs());
+    m_result = register_temp(&v, "tmech::pow(" + base + ", " + exp + ")");
+  }
+
+  // permute_indices_wrapper → tmech::basis_change<sequence<...>>(A).
+  //
+  // The classic special case is transpose (`indices == {2, 1}` for rank-2),
+  // but arbitrary permutations of any rank are supported by both sides.
+  // cas stores indices 0-based; tmech::basis_change expects 1-based.
+  void operator()(cas::permute_indices_wrapper const &v) override {
+    auto inner = apply(v.expr());
+    m_result = register_temp(&v, "tmech::basis_change<" +
+                                     tmech_sequence_str(v.indices()) + ">(" +
+                                     inner + ")");
+  }
+
+  // tensor_to_scalar_with_tensor_mul → scalar · tensor.
+  //
+  // LHS is a tensor; RHS is a tensor_to_scalar (a scalar-valued tensor
+  // reduction like trace/det/norm or a composite thereof). The result is a
+  // tensor of LHS's shape with every entry multiplied by the scalar.
+  //
+  // Because t2s emit lives in a separate visitor that includes this header,
+  // we accept a callback at construction-site rather than including the t2s
+  // header here (which would create a cycle). The recipe entry-point wires
+  // it via `set_t2s_apply()`.
+  void operator()(cas::tensor_to_scalar_with_tensor_mul const &v) override {
+    if (!m_t2s_apply) {
+      throw std::runtime_error(
+          "TensorCodeEmit: tensor_to_scalar_with_tensor_mul requires a "
+          "tensor_to_scalar callback. Call set_t2s_apply() with the t2s "
+          "emitter's apply method; the high-level recipe entry-point does "
+          "this automatically.");
+    }
+    auto lhs = apply(v.expr_lhs());
+    auto rhs = m_t2s_apply(v.expr_rhs());
+    m_result = register_temp(
+        &v, wrap_if_compound(rhs) + " * " + wrap_if_compound(lhs));
+  }
+
+  // ─── External wiring ─────────────────────────────────────────────
+
+  using T2sApply = std::function<std::string(
+      cas::expression_holder<cas::tensor_to_scalar_expression> const &)>;
+
+  void set_t2s_apply(T2sApply fn) { m_t2s_apply = std::move(fn); }
 
   // tensor_inv → tmech::inv(...). Rank-2 only in this phase.
   //
@@ -199,8 +444,73 @@ private:
     return is_single_token(s) ? s : "(" + s + ")";
   }
 
+  // Render a cas::sequence (0-based) as a 1-based tmech::sequence<...>.
+  static auto tmech_sequence_str(cas::sequence const &s) -> std::string {
+    std::ostringstream os;
+    os << "tmech::sequence<";
+    bool first = true;
+    for (auto i : s.indices()) {
+      if (!first)
+        os << ", ";
+      os << (i + 1); // cas stores 0-based; tmech uses 1-based.
+      first = false;
+    }
+    os << ">";
+    return os.str();
+  }
+
+  // Render `tmech::sequence<lo, lo+1, ..., hi>` (1-based, inclusive).
+  static auto contiguous_sequence_str(std::size_t lo, std::size_t hi)
+      -> std::string {
+    std::ostringstream os;
+    os << "tmech::sequence<";
+    for (std::size_t k = lo; k <= hi; ++k) {
+      if (k != lo)
+        os << ", ";
+      os << k;
+    }
+    os << ">";
+    return os.str();
+  }
+
+  // If `v` is `P : A` for a known rank-4 projector preset applied to a
+  // rank-2 tensor (`{3,4} × {1,2}` contraction), return the tmech unary
+  // function name. Otherwise return nullptr.
+  static auto projector_short_circuit_fn(cas::inner_product_wrapper const &v)
+      -> const char * {
+    if (v.indices_lhs() != cas::sequence{3, 4} ||
+        v.indices_rhs() != cas::sequence{1, 2}) {
+      return nullptr;
+    }
+    if (v.expr_rhs().get().rank() != 2) {
+      return nullptr;
+    }
+    if (!cas::is_same<cas::tensor_projector>(v.expr_lhs())) {
+      return nullptr;
+    }
+    auto const &proj = v.expr_lhs().template get<cas::tensor_projector>();
+    if (proj.acts_on_rank() != 2) {
+      return nullptr;
+    }
+    auto const &sp = proj.space();
+    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
+        std::holds_alternative<cas::AnyTraceTag>(sp.trace))
+      return "sym";
+    if (std::holds_alternative<cas::Skew>(sp.perm) &&
+        std::holds_alternative<cas::AnyTraceTag>(sp.trace))
+      return "skew";
+    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
+        std::holds_alternative<cas::VolumetricTag>(sp.trace))
+      return "vol";
+    if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
+        std::holds_alternative<cas::DeviatoricTag>(sp.trace))
+      return "dev";
+    return nullptr;
+  }
+
   CodeGenContext &m_ctx;
   ScalarCodeEmit &m_scalar;
+  T2sApply m_t2s_apply; // optional — set by recipe entry-point.
   std::string m_result;
 };
 

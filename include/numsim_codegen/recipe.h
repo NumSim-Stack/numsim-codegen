@@ -6,6 +6,10 @@
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_to_scalar_code_emit.h>
+#include <numsim_codegen/passes/code_emit_pass.h>
+#include <numsim_codegen/passes/pass.h>
+#include <numsim_codegen/passes/pass_manager.h>
+#include <numsim_codegen/passes/symbol_validation_pass.h>
 
 #include <numsim_cas/scalar/scalar_all.h>
 #include <numsim_cas/scalar/scalar_operators.h>
@@ -197,86 +201,35 @@ public:
 
   // Verify that every leaf symbol referenced by any output expression has
   // been declared (via add_*_input or add_parameter). Throws
-  // std::runtime_error listing the missing symbols. Called automatically
-  // from emit_compute_function() but exposed for explicit pre-flight checks.
+  // std::runtime_error listing the missing symbols or invalid identifiers.
+  // Called automatically from emit_compute_function() but exposed for
+  // explicit pre-flight checks. Backed by SymbolValidationPass under the
+  // Phase 1.2 pass framework.
   void validate() const {
-    LeafCollector lc;
-    for (auto const &o : m_outputs) {
-      std::visit(
-          [&](auto const &e) {
-            using T = std::decay_t<decltype(e)>;
-            if constexpr (std::is_same_v<
-                              T,
-                              cas::expression_holder<cas::scalar_expression>>) {
-              lc.collect_scalar(e);
-            } else {
-              lc.collect_tensor(e);
-            }
-          },
-          o.expr);
-    }
-
-    std::set<std::string> declared_scalar;
-    std::set<std::string> declared_tensor;
-    for (auto const &[name, _] : m_scalar_symbols) declared_scalar.insert(name);
-    for (auto const &[name, _] : m_tensor_symbols) declared_tensor.insert(name);
-
-    std::vector<std::string> missing;
-    for (auto const &name : lc.scalar_names()) {
-      if (!declared_scalar.contains(name)) {
-        missing.push_back("scalar input/parameter '" + name + "'");
-      }
-    }
-    for (auto const &name : lc.tensor_names()) {
-      if (!declared_tensor.contains(name)) {
-        missing.push_back("tensor input '" + name + "'");
-      }
-    }
-
-    if (!missing.empty()) {
-      std::string msg = "ConstitutiveModel '" + m_name +
-                        "': outputs reference undeclared symbol(s):";
-      for (auto const &m : missing) msg += "\n  - " + m;
-      msg += "\nCall add_scalar_input / add_tensor_input / add_parameter "
-             "before referencing a symbol in an output expression.";
-      throw std::runtime_error(msg);
-    }
+    PassContext pctx{*this, CodeGenContext{}, std::nullopt};
+    PassManager pm;
+    pm.emplace<SymbolValidationPass>();
+    pm.run(pctx);
   }
 
   // Emit the generic compute function. Does not emit #include directives;
   // backends own the file-level framing (includes, namespacing, registration).
+  //
+  // Runs the Phase 1.2 pass pipeline: SymbolValidationPass → CodeEmitPass.
+  // Future phases (TimeIntegrationPass, AlgorithmicTangentPass, …) plug
+  // additional passes into this same pipeline.
   [[nodiscard]] auto emit_compute_function() const -> std::string {
-    validate();
-    CodeGenContext ctx;
-    ScalarCodeEmit scalar_emit(ctx);
-    TensorCodeEmit tensor_emit(ctx, scalar_emit);
-    TensorToScalarCodeEmit t2s_emit(ctx, scalar_emit, tensor_emit);
-
-    for (auto const &[name, expr] : m_scalar_symbols) {
-      ctx.register_symbol_scalar(expr, name);
+    PassContext pctx{*this, CodeGenContext{}, std::nullopt};
+    PassManager pm;
+    pm.emplace<SymbolValidationPass>();
+    pm.emplace<CodeEmitPass>();
+    pm.run(pctx);
+    if (!pctx.compute_function_source) {
+      throw std::runtime_error(
+          "ConstitutiveModel::emit_compute_function: pass pipeline finished "
+          "without populating compute_function_source. Did CodeEmitPass run?");
     }
-    for (auto const &[name, expr] : m_tensor_symbols) {
-      ctx.register_symbol_tensor(expr, name);
-    }
-
-    std::vector<std::string> output_rhs;
-    output_rhs.reserve(m_outputs.size());
-    for (auto const &out : m_outputs) {
-      output_rhs.push_back(std::visit(
-          [&](auto const &e) -> std::string {
-            using T = std::decay_t<decltype(e)>;
-            if constexpr (std::is_same_v<
-                              T,
-                              cas::expression_holder<cas::scalar_expression>>) {
-              return scalar_emit.apply(e);
-            } else {
-              return tensor_emit.apply(e);
-            }
-          },
-          out.expr));
-    }
-
-    return render_compute_function(ctx, output_rhs);
+    return std::move(*pctx.compute_function_source);
   }
 
   // ─── Read-only accessors for backends ───────────────────────────
@@ -321,6 +274,23 @@ public:
   [[nodiscard]] auto inputs() const -> std::vector<SymbolDecl> const & {
     return m_inputs_cache;
   }
+
+  // Symbol → expression maps. Exposed for the Phase 1.2 pass framework so
+  // a CodeEmitPass can register them with a CodeGenContext without having
+  // to re-derive them from `symbols()` (which loses the expression handle).
+  [[nodiscard]] auto scalar_symbol_map() const noexcept -> auto const & {
+    return m_scalar_symbols;
+  }
+
+  [[nodiscard]] auto tensor_symbol_map() const noexcept -> auto const & {
+    return m_tensor_symbols;
+  }
+
+  // CodeEmitPass needs to access render_compute_function (Phase 1.2). It
+  // is the only consumer outside the recipe itself; we friend rather than
+  // promote-to-public because the rendering ABI is the pass framework's
+  // contract, not the user's.
+  friend class CodeEmitPass;
 
 private:
   // Reject a user-defined Role that shares a name with a `roles::` catalogue
@@ -455,6 +425,137 @@ private:
       std::pair<std::string, cas::expression_holder<cas::tensor_expression>>>
       m_tensor_symbols;
 };
+
+// ─── Pass run() definitions ──────────────────────────────────────────
+//
+// These live after the ConstitutiveModel class so that the pass bodies can
+// see its full definition (they call methods like `outputs()`,
+// `scalar_symbol_map()`, `render_compute_function()`). They're inline so
+// the existing header-mostly layout stays intact; the static library only
+// houses the per-target wrappers in src/targets/.
+
+inline void SymbolValidationPass::run(PassContext &pctx) {
+  auto const &model = pctx.model;
+
+  // (1) C++ identifier validity on declared symbol names. We check
+  // *declared* names (not user-typed reference strings) — the cas
+  // expression layer accepts anything for tensor("foo-bar", ...), so the
+  // bad-character codepath only manifests once codegen tries to splice
+  // the name into generated source.
+  for (auto const &[name, _] : model.scalar_symbol_map()) {
+    if (!SymbolValidationPass::is_valid_cxx_identifier(name)) {
+      throw std::runtime_error(
+          "ConstitutiveModel '" + model.name() + "': scalar symbol '" + name +
+          "' is not a usable C++ identifier (bad syntax or reserved keyword). "
+          "Generated code would not compile. Use a [A-Za-z_][A-Za-z0-9_]* "
+          "name that is not a C++ keyword.");
+    }
+  }
+  for (auto const &[name, _] : model.tensor_symbol_map()) {
+    if (!SymbolValidationPass::is_valid_cxx_identifier(name)) {
+      throw std::runtime_error(
+          "ConstitutiveModel '" + model.name() + "': tensor symbol '" + name +
+          "' is not a usable C++ identifier (bad syntax or reserved keyword). "
+          "Generated code would not compile. Use a [A-Za-z_][A-Za-z0-9_]* "
+          "name that is not a C++ keyword.");
+    }
+  }
+  for (auto const &out : model.outputs()) {
+    if (!SymbolValidationPass::is_valid_cxx_identifier(out.name)) {
+      throw std::runtime_error(
+          "ConstitutiveModel '" + model.name() + "': output '" + out.name +
+          "' is not a usable C++ identifier (bad syntax or reserved keyword). "
+          "Generated code would not compile. Use a [A-Za-z_][A-Za-z0-9_]* "
+          "name that is not a C++ keyword.");
+    }
+  }
+
+  // (2) Output-expression-references-declared-symbols (pre-1.2 validate()
+  // body — preserved verbatim).
+  LeafCollector lc;
+  for (auto const &o : model.outputs()) {
+    std::visit(
+        [&](auto const &e) {
+          using T = std::decay_t<decltype(e)>;
+          if constexpr (std::is_same_v<
+                            T,
+                            cas::expression_holder<cas::scalar_expression>>) {
+            lc.collect_scalar(e);
+          } else {
+            lc.collect_tensor(e);
+          }
+        },
+        o.expr);
+  }
+
+  std::set<std::string> declared_scalar;
+  std::set<std::string> declared_tensor;
+  for (auto const &[name, _] : model.scalar_symbol_map())
+    declared_scalar.insert(name);
+  for (auto const &[name, _] : model.tensor_symbol_map())
+    declared_tensor.insert(name);
+
+  std::vector<std::string> missing;
+  for (auto const &name : lc.scalar_names()) {
+    if (!declared_scalar.contains(name)) {
+      missing.push_back("scalar input/parameter '" + name + "'");
+    }
+  }
+  for (auto const &name : lc.tensor_names()) {
+    if (!declared_tensor.contains(name)) {
+      missing.push_back("tensor input '" + name + "'");
+    }
+  }
+
+  if (!missing.empty()) {
+    std::string msg = "ConstitutiveModel '" + model.name() +
+                      "': outputs reference undeclared symbol(s):";
+    for (auto const &m : missing)
+      msg += "\n  - " + m;
+    msg += "\nCall add_scalar_input / add_tensor_input / add_parameter "
+           "before referencing a symbol in an output expression.";
+    throw std::runtime_error(msg);
+  }
+}
+
+inline void CodeEmitPass::run(PassContext &pctx) {
+  auto const &model = pctx.model;
+  auto &ctx = pctx.ctx;
+
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit tensor_emit(ctx, scalar_emit);
+  TensorToScalarCodeEmit t2s_emit(ctx, scalar_emit, tensor_emit);
+  // Close the loop so tensor-domain nodes that carry a t2s subterm
+  // (currently tensor_to_scalar_with_tensor_mul) can emit them.
+  tensor_emit.set_t2s_apply(
+      [&t2s_emit](auto const &e) { return t2s_emit.apply(e); });
+
+  for (auto const &[name, expr] : model.scalar_symbol_map()) {
+    ctx.register_symbol_scalar(expr, name);
+  }
+  for (auto const &[name, expr] : model.tensor_symbol_map()) {
+    ctx.register_symbol_tensor(expr, name);
+  }
+
+  std::vector<std::string> output_rhs;
+  output_rhs.reserve(model.outputs().size());
+  for (auto const &out : model.outputs()) {
+    output_rhs.push_back(std::visit(
+        [&](auto const &e) -> std::string {
+          using T = std::decay_t<decltype(e)>;
+          if constexpr (std::is_same_v<
+                            T,
+                            cas::expression_holder<cas::scalar_expression>>) {
+            return scalar_emit.apply(e);
+          } else {
+            return tensor_emit.apply(e);
+          }
+        },
+        out.expr));
+  }
+
+  pctx.compute_function_source = model.render_compute_function(ctx, output_rhs);
+}
 
 } // namespace numsim::codegen
 
