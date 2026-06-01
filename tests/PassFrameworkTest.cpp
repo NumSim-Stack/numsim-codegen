@@ -85,6 +85,37 @@ TEST(RecipeView, RawModelEscapeHatchExposesFullRecipe) {
   EXPECT_EQ(&view.raw_model(), &model);
 }
 
+TEST(RecipeView, ConstConstructorGivesNoMutableAccess) {
+  // P1: a view constructed from `ConstitutiveModel const &` reports no
+  // mutable model. Phase 2 passes that need mutation throw on this
+  // rather than silently proceeding through a const path.
+  ConstitutiveModel model("M");
+  ConstitutiveModel const &cref = model;
+  RecipeView view(cref);
+  EXPECT_EQ(view.try_mutable_model(), nullptr);
+  // const surface still works.
+  EXPECT_EQ(view.name(), "M");
+}
+
+TEST(RecipeView, MutableConstructorGivesMutableAccess) {
+  // P1: a view constructed from `ConstitutiveModel &` exposes the
+  // original mutable pointer for Phase 2 mutating passes.
+  ConstitutiveModel model("M");
+  RecipeView view(model);
+  EXPECT_EQ(view.try_mutable_model(), &model);
+  // const surface still works.
+  EXPECT_EQ(view.name(), "M");
+}
+
+TEST(RecipeView, BothCtorPathsAgreeOnRawModel) {
+  // Sanity: regardless of how the view was constructed, raw_model()
+  // returns the same underlying recipe.
+  ConstitutiveModel model("M");
+  RecipeView mut_view(model);
+  RecipeView const_view(static_cast<ConstitutiveModel const &>(model));
+  EXPECT_EQ(&mut_view.raw_model(), &const_view.raw_model());
+}
+
 // ─── PassManager ─────────────────────────────────────────────────────
 
 TEST(PassManager, RunsPassesInRegistrationOrder) {
@@ -261,6 +292,33 @@ TEST(SymbolValidationPass, RejectsRecipeWithInvalidTensorName) {
   }
 }
 
+TEST(SymbolValidationPass, PopulatesPassContextSymbolLookup) {
+  // P4: SymbolValidationPass builds pctx.symbol_lookup so downstream
+  // passes can resolve name → SymbolDecl in O(1) instead of an O(N)
+  // scan. Verify the map contains every declared symbol after the pass
+  // runs.
+  ConstitutiveModel model("LinearElasticShear");
+  auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
+  auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
+  model.add_output("stress", 2 * mu * eps, roles::Stress);
+
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt, {}};
+  SymbolValidationPass pass;
+  pass.run(pctx);
+
+  ASSERT_EQ(pctx.symbol_lookup.size(), 2u); // mu + eps
+  auto mu_it = pctx.symbol_lookup.find("mu");
+  ASSERT_NE(mu_it, pctx.symbol_lookup.end());
+  EXPECT_EQ(mu_it->second->kind, SymbolDecl::Kind::Scalar);
+  EXPECT_EQ(mu_it->second->category, SymbolDecl::Category::Parameter);
+
+  auto eps_it = pctx.symbol_lookup.find("eps");
+  ASSERT_NE(eps_it, pctx.symbol_lookup.end());
+  EXPECT_EQ(eps_it->second->kind, SymbolDecl::Kind::Tensor);
+  EXPECT_EQ(eps_it->second->category, SymbolDecl::Category::Input);
+  EXPECT_EQ(eps_it->second->role.name, "strain");
+}
+
 TEST(SymbolValidationPass, PreservesMissingSymbolDiagnostic) {
   // Pre-1.2 validate() threw on outputs referencing undeclared symbols.
   // The pass framework must preserve that behaviour.
@@ -379,13 +437,14 @@ TEST(CodeEmitPass, RefusesToRunWithoutValidationPredecessor) {
     std::string msg(e.what());
     EXPECT_NE(msg.find("CodeEmit"), std::string::npos) << msg;
     // Any of CodeEmitPass's three preconditions can show up first.
-    // "symbols-declared" / "identifiers-valid" come from
-    // SymbolValidationPass; "tensor-space-validated" from
-    // TensorSpaceConsistencyPass.
+    // P3: tags are now typed string_view constants in pass_tags::; the
+    // PassManager error message embeds them verbatim, so we look for the
+    // same strings the constants resolve to.
     bool mentions_pre =
-        msg.find("symbols-declared") != std::string::npos ||
-        msg.find("identifiers-valid") != std::string::npos ||
-        msg.find("tensor-space-validated") != std::string::npos;
+        msg.find(pass_tags::symbols_declared) != std::string::npos ||
+        msg.find(pass_tags::identifiers_valid) != std::string::npos ||
+        msg.find(pass_tags::tensor_space_declarations_checked) !=
+            std::string::npos;
     EXPECT_TRUE(mentions_pre) << msg;
   }
 }

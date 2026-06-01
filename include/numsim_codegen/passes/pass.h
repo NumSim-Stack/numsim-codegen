@@ -7,9 +7,12 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace numsim::codegen {
+
+struct SymbolDecl;
 
 // Shared state for a single PassManager invocation. Passes read the
 // recipe via `model` (a RecipeView — const-only today, will gain a
@@ -18,10 +21,17 @@ namespace numsim::codegen {
 // deposit their final products into the output slots below. Phase 1.2
 // only needs one output slot (the rendered compute function); Phase
 // 2/3 will add more (tangent source, state-variable wiring, etc.).
+//
+// `symbol_lookup` (P4 in issue #56) is populated by SymbolValidationPass
+// during validation and consumed by downstream passes (e.g.
+// TensorSpaceConsistencyPass) that need to resolve a symbol name to its
+// SymbolDecl. Empty until SymbolValidationPass runs; populating it is
+// part of that pass's contract.
 struct PassContext {
   RecipeView model;
   CodeGenContext ctx;
   std::optional<std::string> compute_function_source;
+  std::unordered_map<std::string, SymbolDecl const *> symbol_lookup;
 };
 
 // Abstract base for a single codegen pass.
