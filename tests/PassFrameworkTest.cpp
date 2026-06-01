@@ -137,6 +137,58 @@ TEST(SymbolValidationPass, AcceptsValidIdentifiers) {
   EXPECT_TRUE(SymbolValidationPass::is_valid_cxx_identifier("CamelCase"));
 }
 
+TEST(SymbolValidationPass, RejectsCxxKeywords) {
+  // The pre-fix check accepted these — they look like valid identifiers
+  // per the [A-Za-z_][A-Za-z0-9_]* regex but the compiler refuses them
+  // as variable names. We catch them at validate() time instead.
+  for (auto const *kw : {"class", "if", "for", "auto", "return", "template",
+                         "void", "int", "do", "co_await"}) {
+    EXPECT_FALSE(SymbolValidationPass::is_valid_cxx_identifier(kw))
+        << "should reject keyword '" << kw << "'";
+    EXPECT_TRUE(SymbolValidationPass::is_cxx_keyword(kw))
+        << "should classify '" << kw << "' as keyword";
+  }
+}
+
+TEST(SymbolValidationPass, NonKeywordPrefixesAreNotKeywords) {
+  // Spot-check that the binary-search bounds are right — `classroom`
+  // shares a prefix with `class` but isn't itself a keyword.
+  EXPECT_FALSE(SymbolValidationPass::is_cxx_keyword("classroom"));
+  EXPECT_FALSE(SymbolValidationPass::is_cxx_keyword("ifelse"));
+  EXPECT_FALSE(SymbolValidationPass::is_cxx_keyword(""));
+  EXPECT_FALSE(SymbolValidationPass::is_cxx_keyword("eps_p"));
+}
+
+TEST(SymbolValidationPass, IdentifierCheckIsLocaleImmune) {
+  // The pre-fix check used std::isalpha which is locale-sensitive — a
+  // Turkish locale would reject 'I', and locales that classify accented
+  // chars as alpha would accept non-ASCII inputs. The post-fix uses
+  // explicit ASCII ranges. Verify non-ASCII strings get rejected.
+  EXPECT_FALSE(SymbolValidationPass::is_valid_cxx_identifier("\xc3\xa9psilon"))
+      << "é-prefixed identifier (UTF-8)";
+  // Split hex escape from following alpha chars — `\xb1bc` would
+  // otherwise be parsed as one 4-digit hex value > 0xFF.
+  EXPECT_FALSE(SymbolValidationPass::is_valid_cxx_identifier("\xce\xb1" "bc"))
+      << "α-prefixed identifier (UTF-8)";
+}
+
+TEST(SymbolValidationPass, RejectsRecipeWithKeywordName) {
+  // End-to-end through validate() — the keyword check must fire from
+  // the pass pipeline, not just the static helper.
+  ConstitutiveModel model("M");
+  model.add_parameter("class", 1.0, "keyword on purpose");
+
+  try {
+    model.validate();
+    FAIL() << "expected runtime_error for keyword parameter name";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("class"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("keyword"), std::string::npos)
+        << "throw message should mention keyword: " << msg;
+  }
+}
+
 TEST(SymbolValidationPass, RejectsInvalidIdentifiers) {
   EXPECT_FALSE(SymbolValidationPass::is_valid_cxx_identifier(""));
   EXPECT_FALSE(SymbolValidationPass::is_valid_cxx_identifier("1var"))
@@ -165,7 +217,7 @@ TEST(SymbolValidationPass, RejectsRecipeWithInvalidScalarName) {
   } catch (std::runtime_error const &e) {
     std::string msg(e.what());
     EXPECT_NE(msg.find("my-param"), std::string::npos) << msg;
-    EXPECT_NE(msg.find("not a valid C++ identifier"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("not a usable C++ identifier"), std::string::npos) << msg;
   }
 }
 
@@ -179,7 +231,7 @@ TEST(SymbolValidationPass, RejectsRecipeWithInvalidTensorName) {
   } catch (std::runtime_error const &e) {
     std::string msg(e.what());
     EXPECT_NE(msg.find("eps.bad"), std::string::npos) << msg;
-    EXPECT_NE(msg.find("not a valid C++ identifier"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("not a usable C++ identifier"), std::string::npos) << msg;
   }
 }
 

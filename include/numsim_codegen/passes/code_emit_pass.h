@@ -2,6 +2,9 @@
 #define NUMSIM_CODEGEN_CODE_EMIT_PASS_H
 
 #include <numsim_codegen/passes/pass.h>
+// NOTE: `run()` is defined in recipe.h after ConstitutiveModel is complete.
+// Any TU instantiating this pass must include recipe.h; in practice
+// recipe.h is the only constructor site.
 
 namespace numsim::codegen {
 

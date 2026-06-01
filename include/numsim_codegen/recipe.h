@@ -446,24 +446,27 @@ inline void SymbolValidationPass::run(PassContext &pctx) {
     if (!SymbolValidationPass::is_valid_cxx_identifier(name)) {
       throw std::runtime_error(
           "ConstitutiveModel '" + model.name() + "': scalar symbol '" + name +
-          "' is not a valid C++ identifier. Generated code would not compile. "
-          "Use [A-Za-z_][A-Za-z0-9_]* only.");
+          "' is not a usable C++ identifier (bad syntax or reserved keyword). "
+          "Generated code would not compile. Use a [A-Za-z_][A-Za-z0-9_]* "
+          "name that is not a C++ keyword.");
     }
   }
   for (auto const &[name, _] : model.tensor_symbol_map()) {
     if (!SymbolValidationPass::is_valid_cxx_identifier(name)) {
       throw std::runtime_error(
           "ConstitutiveModel '" + model.name() + "': tensor symbol '" + name +
-          "' is not a valid C++ identifier. Generated code would not compile. "
-          "Use [A-Za-z_][A-Za-z0-9_]* only.");
+          "' is not a usable C++ identifier (bad syntax or reserved keyword). "
+          "Generated code would not compile. Use a [A-Za-z_][A-Za-z0-9_]* "
+          "name that is not a C++ keyword.");
     }
   }
   for (auto const &out : model.outputs()) {
     if (!SymbolValidationPass::is_valid_cxx_identifier(out.name)) {
       throw std::runtime_error(
           "ConstitutiveModel '" + model.name() + "': output '" + out.name +
-          "' is not a valid C++ identifier. Generated code would not compile. "
-          "Use [A-Za-z_][A-Za-z0-9_]* only.");
+          "' is not a usable C++ identifier (bad syntax or reserved keyword). "
+          "Generated code would not compile. Use a [A-Za-z_][A-Za-z0-9_]* "
+          "name that is not a C++ keyword.");
     }
   }
 
