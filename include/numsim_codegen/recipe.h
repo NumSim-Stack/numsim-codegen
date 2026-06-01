@@ -17,6 +17,7 @@
 #include <numsim_cas/tensor/tensor_definitions.h>
 
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -567,12 +568,23 @@ inline void CodeEmitPass::run(PassContext &pctx) {
   auto &ctx = pctx.ctx;
 
   ScalarCodeEmit scalar_emit(ctx);
-  TensorCodeEmit tensor_emit(ctx, scalar_emit);
-  TensorToScalarCodeEmit t2s_emit(ctx, scalar_emit, tensor_emit);
-  // Close the loop so tensor-domain nodes that carry a t2s subterm
-  // (currently tensor_to_scalar_with_tensor_mul) can emit them.
-  tensor_emit.set_t2s_apply(
-      [&t2s_emit](auto const &e) { return t2s_emit.apply(e); });
+
+  // M3: TensorCodeEmit now requires a T2sApply at construction. The
+  // tensor↔t2s visitor cycle is broken via a unique_ptr indirection:
+  // tensor_emit gets a callback that dispatches through `t2s_emit_storage`
+  // (empty at this point). We then populate the storage with the real
+  // TensorToScalarCodeEmit (which itself takes tensor_emit by reference).
+  // The callback is only invoked DURING apply() below, well after the
+  // storage has been emplaced — no UB.
+  auto t2s_emit_storage = std::unique_ptr<TensorToScalarCodeEmit>{};
+  TensorCodeEmit tensor_emit(ctx, scalar_emit,
+      [&t2s_emit_storage](auto const &e) {
+        return t2s_emit_storage->apply(e);
+      });
+  t2s_emit_storage = std::make_unique<TensorToScalarCodeEmit>(
+      ctx, scalar_emit, tensor_emit);
+  TensorToScalarCodeEmit &t2s_emit = *t2s_emit_storage;
+  (void) t2s_emit; // currently unused at this scope — kept named for clarity.
 
   for (auto const &[name, expr] : model.scalar_symbol_map()) {
     ctx.register_symbol_scalar(expr, name);
