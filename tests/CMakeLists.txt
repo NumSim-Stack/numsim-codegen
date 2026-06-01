@@ -22,6 +22,7 @@ add_executable(numsim_codegen_tests
     RecipeTest.cpp
     MooseTargetTest.cpp
     RoleFlexibilityTest.cpp
+    PassFrameworkTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests
