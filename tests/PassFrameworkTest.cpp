@@ -9,6 +9,7 @@
 #include <numsim_codegen/passes/pass.h>
 #include <numsim_codegen/passes/pass_manager.h>
 #include <numsim_codegen/passes/symbol_validation_pass.h>
+#include <numsim_codegen/passes/tensor_space_consistency_pass.h>
 #include <numsim_codegen/recipe.h>
 
 #include <numsim_cas/scalar/scalar_operators.h>
@@ -277,6 +278,56 @@ TEST(SymbolValidationPass, PreservesMissingSymbolDiagnostic) {
   }
 }
 
+// ─── TensorSpaceConsistencyPass (M6) ─────────────────────────────────
+
+TEST(TensorSpaceConsistencyPass, PassesWithoutSpaceAnnotations) {
+  // The default Phase 1.2 recipe declares tensors without any tensor_space
+  // annotation. The consistency pass must silently accept them — there's
+  // nothing to contradict.
+  ConstitutiveModel model("LinearElasticShear");
+  auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
+  auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
+  model.add_output("stress", 2 * mu * eps, roles::Stress);
+  EXPECT_NO_THROW(model.validate());
+}
+
+TEST(TensorSpaceConsistencyPass, ThrowsOnSymmetricRoleWithSkewSpace) {
+  // Construct a tensor symbol whose Role declares symmetric (roles::Strain)
+  // but whose cas tensor_space annotation declares Skew perm. The pass
+  // must catch the contradiction.
+  ConstitutiveModel model("M");
+  auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
+
+  // Mutate the underlying tensor's space to introduce the contradiction.
+  // const_cast is intentional: cas's tensor_expression exposes set_space()
+  // on a mutable instance, but expression_holder's get() returns const.
+  // In production code this annotation flows from an assume_*() helper
+  // or constructive operator; the const_cast here is test-only.
+  const_cast<cas::tensor_expression &>(eps.get<cas::tensor_expression>())
+      .set_space(cas::tensor_space{cas::Skew{}, cas::AnyTraceTag{}});
+
+  try {
+    model.validate();
+    FAIL() << "expected runtime_error for skew tensor with symmetric role";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("eps"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("Skew"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("symmetric"), std::string::npos) << msg;
+  }
+}
+
+TEST(TensorSpaceConsistencyPass, RegistersAsSecondValidator) {
+  // Smoke test: emit_compute_function runs SymbolValidationPass +
+  // TensorSpaceConsistencyPass + CodeEmitPass. Verifies the postcondition
+  // wiring works with two validators in series.
+  ConstitutiveModel model("LinearElasticShear");
+  auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
+  auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
+  model.add_output("stress", 2 * mu * eps, roles::Stress);
+  EXPECT_NO_THROW(model.emit_compute_function());
+}
+
 // ─── CodeEmitPass ────────────────────────────────────────────────────
 
 TEST(CodeEmitPass, ProducesNonEmptyComputeFunctionSource) {
@@ -306,11 +357,14 @@ TEST(CodeEmitPass, RefusesToRunWithoutValidationPredecessor) {
   } catch (std::runtime_error const &e) {
     std::string msg(e.what());
     EXPECT_NE(msg.find("CodeEmit"), std::string::npos) << msg;
-    // Either of CodeEmitPass's two preconditions can show up in the message —
-    // both are produced only by SymbolValidationPass.
+    // Any of CodeEmitPass's three preconditions can show up first.
+    // "symbols-declared" / "identifiers-valid" come from
+    // SymbolValidationPass; "tensor-space-validated" from
+    // TensorSpaceConsistencyPass.
     bool mentions_pre =
         msg.find("symbols-declared") != std::string::npos ||
-        msg.find("identifiers-valid") != std::string::npos;
+        msg.find("identifiers-valid") != std::string::npos ||
+        msg.find("tensor-space-validated") != std::string::npos;
     EXPECT_TRUE(mentions_pre) << msg;
   }
 }
