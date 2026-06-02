@@ -23,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -411,11 +412,13 @@ public:
 
   // ─── Read-only accessors for backends ───────────────────────────
 
-  [[nodiscard]] auto symbols() const -> std::vector<SymbolDecl> const & {
+  [[nodiscard]] auto symbols() const noexcept
+      -> std::span<SymbolDecl const> {
     return m_symbols;
   }
 
-  [[nodiscard]] auto outputs() const -> std::vector<OutputDecl> const & {
+  [[nodiscard]] auto outputs() const noexcept
+      -> std::span<OutputDecl const> {
     return m_outputs;
   }
 
@@ -443,12 +446,23 @@ public:
   // Cached views maintained incrementally by the add_* methods — avoids
   // an O(N) filter on every call. Backends typically call these multiple
   // times per emit.
-  [[nodiscard]] auto parameters() const
-      -> std::vector<SymbolDecl> const & {
+  //
+  // **Span invalidation warning:** these accessors return a non-owning
+  // span over `m_*_cache`, which is a `std::vector` that grows via
+  // `push_back` inside `add_*`. Any caller that stores a span across a
+  // subsequent `add_*` call risks the underlying vector reallocating —
+  // the span's pointer-plus-size capture is then stale. The hazard
+  // doesn't exist in Phase 1.2 passes (model construction is complete
+  // before passes run), but Phase 2 mutating passes that synthesise
+  // symbols mid-pipeline must re-acquire the span after every mutation.
+  // Don't store a long-lived span across mutations.
+  [[nodiscard]] auto parameters() const noexcept
+      -> std::span<SymbolDecl const> {
     return m_parameters_cache;
   }
 
-  [[nodiscard]] auto inputs() const -> std::vector<SymbolDecl> const & {
+  [[nodiscard]] auto inputs() const noexcept
+      -> std::span<SymbolDecl const> {
     return m_inputs_cache;
   }
 
@@ -457,8 +471,8 @@ public:
   // entries live in `m_symbols` (categories StateVariableCurrent /
   // StateVariableOld). Empty for recipes without internal state (e.g.
   // pure elasticity).
-  [[nodiscard]] auto state_variables() const
-      -> std::vector<StateVariable> const & {
+  [[nodiscard]] auto state_variables() const noexcept
+      -> std::span<StateVariable const> {
     return m_state_variables;
   }
 
@@ -568,16 +582,18 @@ inline auto RecipeView::name() const -> std::string const & {
   return detail::recipe_view_const_ptr(m_model)->name();
 }
 
-inline auto RecipeView::symbols() const -> std::vector<SymbolDecl> const & {
+inline auto RecipeView::symbols() const noexcept
+    -> std::span<SymbolDecl const> {
   return detail::recipe_view_const_ptr(m_model)->symbols();
 }
 
-inline auto RecipeView::outputs() const -> std::vector<OutputDecl> const & {
+inline auto RecipeView::outputs() const noexcept
+    -> std::span<OutputDecl const> {
   return detail::recipe_view_const_ptr(m_model)->outputs();
 }
 
-inline auto RecipeView::state_variables() const
-    -> std::vector<StateVariable> const & {
+inline auto RecipeView::state_variables() const noexcept
+    -> std::span<StateVariable const> {
   return detail::recipe_view_const_ptr(m_model)->state_variables();
 }
 
