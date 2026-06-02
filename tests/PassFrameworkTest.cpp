@@ -359,15 +359,21 @@ TEST(SymbolValidationPass, FindTensorSymbolResolvesByName) {
   PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt, {}};
   SymbolValidationPass{}.run(pctx);
 
-  auto const *eps = find_tensor_symbol(pctx, "eps");
-  ASSERT_NE(eps, nullptr);
-  EXPECT_EQ(eps->name, "eps");
-  EXPECT_EQ(eps->kind, SymbolDecl::Kind::Tensor);
+  auto eps = find_tensor_symbol(pctx, "eps");
+  ASSERT_TRUE(eps.has_value());
+  EXPECT_EQ((*eps)->name, "eps");
+  EXPECT_EQ((*eps)->kind, SymbolDecl::Kind::Tensor);
 
-  // Scalar parameter — helper returns nullptr because it's not a tensor.
-  EXPECT_EQ(find_tensor_symbol(pctx, "mu"), nullptr);
-  // Unknown name — also nullptr.
-  EXPECT_EQ(find_tensor_symbol(pctx, "nonexistent"), nullptr);
+  // Issue #62 item 1: the two failure modes are now distinguishable.
+  // Scalar parameter — exists but wrong kind.
+  auto mu = find_tensor_symbol(pctx, "mu");
+  ASSERT_FALSE(mu.has_value());
+  EXPECT_EQ(mu.error(), LookupError::WrongKind);
+
+  // Unknown name — not in the lookup at all.
+  auto missing = find_tensor_symbol(pctx, "nonexistent");
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ(missing.error(), LookupError::NotFound);
 }
 
 TEST(SymbolValidationPass, PreservesMissingSymbolDiagnostic) {

@@ -600,18 +600,21 @@ inline auto RecipeView::tensor_symbol_map() const -> TensorSymbolMap const & {
 
 [[nodiscard]] inline auto find_tensor_symbol(PassContext const &pctx,
                                              std::string const &name) noexcept
-    -> SymbolDecl const * {
+    -> std::expected<SymbolDecl const *, LookupError> {
   auto const it = pctx.symbol_lookup.find(name);
   if (it == pctx.symbol_lookup.end()) {
-    return nullptr;
+    return std::unexpected(LookupError::NotFound);
   }
   auto const &symbols = pctx.model.symbols();
   if (it->second >= symbols.size()) {
-    return nullptr; // Defensive: shouldn't happen if SVP populated correctly.
+    // Defensive: shouldn't happen if SymbolValidationPass populated
+    // the lookup correctly. Treat as NotFound — a stale index is
+    // semantically equivalent to "no longer findable."
+    return std::unexpected(LookupError::NotFound);
   }
   auto const &decl = symbols[it->second];
   if (decl.kind != SymbolDecl::Kind::Tensor) {
-    return nullptr;
+    return std::unexpected(LookupError::WrongKind);
   }
   return &decl;
 }
@@ -847,11 +850,14 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
   // Phase 2 validator. `find_tensor_symbol` is the single canonical
   // join.
   for (auto const &[name, expr] : model.tensor_symbol_map()) {
-    auto const *decl = find_tensor_symbol(pctx, name);
-    if (decl == nullptr) {
-      continue; // Should not happen — SymbolValidationPass guards it.
+    auto const result = find_tensor_symbol(pctx, name);
+    if (!result) {
+      // NotFound: SymbolValidationPass should have caught this earlier.
+      // WrongKind: shouldn't happen for a name we just read from
+      // tensor_symbol_map(). Either way, no work to do.
+      continue;
     }
-    Role const *role_ptr = &decl->role;
+    Role const *role_ptr = &(*result)->role;
 
     auto const &t = expr.get();
     auto const &space_opt = t.space();
