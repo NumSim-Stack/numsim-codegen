@@ -136,11 +136,15 @@ private:
   // `std::bad_variant_access` if the variant is `valueless_by_exception`.
   // We rely on the runtime invariant that `m_model` is constructed only
   // by the two `noexcept` constructors above, which assign a pointer and
-  // can never leave the variant valueless. These asserts lock that
-  // invariant into the type system: any future code path that introduces
-  // a potentially-throwing assignment to `m_model` will fail to compile,
-  // catching the regression where the `noexcept` delegates would
-  // otherwise silently `std::terminate`.
+  // can never leave the variant valueless. These asserts lock the
+  // *construction path* of that invariant into the type system: any
+  // future converting-constructor call to the variant that could throw
+  // (e.g. someone adds a third arm whose construction isn't `noexcept`)
+  // will fail to compile, preserving the `noexcept` delegates'
+  // soundness. Reassignment of `m_model` is not covered — `m_model` is
+  // private and never reassigned anywhere in the visible codebase, and
+  // both variant arms are trivially-copyable pointers so any future
+  // assignment would be noexcept by language rule anyway.
   static_assert(std::is_nothrow_constructible_v<
                 decltype(m_model), ConstitutiveModel const *>);
   static_assert(std::is_nothrow_constructible_v<
