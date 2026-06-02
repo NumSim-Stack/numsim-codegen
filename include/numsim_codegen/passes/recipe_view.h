@@ -62,9 +62,10 @@ public:
   // Read-only delegates to ConstitutiveModel's public accessors. Bodies
   // live at the bottom of recipe.h (where ConstitutiveModel is complete).
   [[nodiscard]] auto name() const -> std::string const &;
-  [[nodiscard]] auto symbols() const -> std::span<SymbolDecl const>;
-  [[nodiscard]] auto outputs() const -> std::span<OutputDecl const>;
-  [[nodiscard]] auto state_variables() const -> std::span<StateVariable const>;
+  [[nodiscard]] auto symbols() const noexcept -> std::span<SymbolDecl const>;
+  [[nodiscard]] auto outputs() const noexcept -> std::span<OutputDecl const>;
+  [[nodiscard]] auto state_variables() const noexcept
+      -> std::span<StateVariable const>;
   [[nodiscard]] auto scalar_symbol_map() const -> ScalarSymbolMap const &;
   [[nodiscard]] auto tensor_symbol_map() const -> TensorSymbolMap const &;
 
