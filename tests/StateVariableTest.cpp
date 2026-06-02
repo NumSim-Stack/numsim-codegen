@@ -174,6 +174,117 @@ TEST(StateVariable, FindTensorSymbolResolvesTensorStateVarBothHandles) {
   EXPECT_EQ(old->category, SymbolDecl::Category::StateVariableOld);
 }
 
+// ─── Name-collision protection (M1+M2 in REVIEW-pr-58.md) ───────────
+
+TEST(StateVariable, DuplicateScalarStateVarNameThrows) {
+  ConstitutiveModel model("M");
+  auto zero = cas::make_expression<cas::scalar_constant>(0.0);
+  model.add_scalar_state_variable("alpha", zero);
+
+  try {
+    model.add_scalar_state_variable("alpha", zero);
+    FAIL() << "expected runtime_error for duplicate state-var name";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("alpha"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("already declared"), std::string::npos) << msg;
+  }
+}
+
+TEST(StateVariable, InputThenStateVarWithOldCollisionThrows) {
+  // M2: user declared `alpha_old` as an input; then add_*_state_variable
+  // for `alpha` would auto-generate the same `alpha_old` symbol.
+  ConstitutiveModel model("M");
+  model.add_scalar_input("alpha_old");
+  auto zero = cas::make_expression<cas::scalar_constant>(0.0);
+
+  try {
+    model.add_scalar_state_variable("alpha", zero);
+    FAIL() << "expected runtime_error for _old name collision";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("alpha_old"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("already declared"), std::string::npos) << msg;
+  }
+}
+
+TEST(StateVariable, StateVarThenInputWithOldCollisionThrows) {
+  // Reverse order of the previous test: declare state var first,
+  // then try to add an input with the reserved `_old` suffix.
+  ConstitutiveModel model("M");
+  auto zero = cas::make_expression<cas::scalar_constant>(0.0);
+  model.add_scalar_state_variable("alpha", zero);
+
+  try {
+    model.add_scalar_input("alpha_old");
+    FAIL() << "expected runtime_error for input clashing with state-var _old";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("alpha_old"), std::string::npos) << msg;
+  }
+}
+
+TEST(StateVariable, DuplicateInputNameThrows) {
+  // Sibling to the state-var case — input-vs-input collision was also
+  // unprotected pre-fix.
+  ConstitutiveModel model("M");
+  model.add_scalar_input("x");
+  EXPECT_THROW(model.add_scalar_input("x"), std::runtime_error);
+}
+
+// ─── Edge cases (M4) ────────────────────────────────────────────────
+
+TEST(StateVariable, StateVarsOnlyNoOutputsRecipeBuilds) {
+  // A recipe with state variables but no outputs should still validate
+  // and emit (the compute function will be a no-op body with state-var
+  // arguments — fine until Phase 2.2's lowering populates the body).
+  ConstitutiveModel model("StateOnly");
+  auto zero = cas::make_expression<cas::scalar_constant>(0.0);
+  model.add_scalar_state_variable("alpha", zero);
+  EXPECT_NO_THROW(model.validate());
+  EXPECT_NO_THROW(model.emit_compute_function());
+}
+
+TEST(StateVariable, MixedInputAndStateVarInOutput) {
+  // The pre-fix coverage exercised parameter+state-var; this covers
+  // the input+state-var combination, which goes through a different
+  // SymbolDecl::Category and exercises both the StateVariableCurrent
+  // and Input paths through SymbolValidationPass.
+  ConstitutiveModel model("HardeningWithStrain");
+  auto eps = model.add_scalar_input("eps");
+  auto K = model.add_parameter("K", 1.0);
+  auto zero = cas::make_expression<cas::scalar_constant>(0.0);
+  auto alpha = model.add_scalar_state_variable("alpha", zero);
+
+  // sigma = K * (eps + alpha.current) — uses input + parameter +
+  // state-var current in one expression.
+  model.add_output("sigma", K * (eps + alpha.current));
+  EXPECT_NO_THROW(model.emit_compute_function());
+}
+
+// ─── StateVariable carries paired symbol indices (architect Q1) ─────
+
+TEST(StateVariable, StoresSymbolIndicesForLowering) {
+  // Architect Q1 stronger fix: StateVariable records `current_symbol_idx`
+  // and `old_symbol_idx`. Phase 2.2's TimeIntegrationPass uses these
+  // instead of re-deriving via `name + state_variable_old_suffix`.
+  ConstitutiveModel model("M");
+  auto zero = cas::make_expression<cas::scalar_constant>(0.0);
+  model.add_scalar_state_variable("alpha", zero);
+
+  ASSERT_EQ(model.state_variables().size(), 1u);
+  auto const &sv = model.state_variables()[0];
+  ASSERT_LT(sv.current_symbol_idx, model.symbols().size());
+  ASSERT_LT(sv.old_symbol_idx, model.symbols().size());
+
+  EXPECT_EQ(model.symbols()[sv.current_symbol_idx].name, "alpha");
+  EXPECT_EQ(model.symbols()[sv.current_symbol_idx].category,
+            SymbolDecl::Category::StateVariableCurrent);
+  EXPECT_EQ(model.symbols()[sv.old_symbol_idx].name, "alpha_old");
+  EXPECT_EQ(model.symbols()[sv.old_symbol_idx].category,
+            SymbolDecl::Category::StateVariableOld);
+}
+
 TEST(StateVariable, StateVarUsableInOutputExpression) {
   // End-to-end: build a recipe that uses a state variable in an output
   // expression. The compute function must emit successfully (no
@@ -187,7 +298,22 @@ TEST(StateVariable, StateVarUsableInOutputExpression) {
   auto sigma_y = K * alpha.current;
   model.add_output("sigma_y", sigma_y);
 
-  EXPECT_NO_THROW(model.emit_compute_function());
+  auto src = model.emit_compute_function();
+  EXPECT_NE(src.find("Hardening_compute"), std::string::npos) << src;
+  // M5 (REVIEW-pr-58.md): Phase 2.1 deliberately renders BOTH the
+  // current and the _old symbols as `const` value parameters. This is
+  // semantically wrong for `alpha` (it's what we solve for, should be
+  // an out-param) — Phase 2.2's TimeIntegrationPass + Phase 2.6's
+  // Newton lowering will rewire `StateVariableCurrent` to a
+  // declareProperty / out-arg form. Pin the current behaviour so the
+  // Phase-2.2 transition is a deliberate test rewrite, not a silent
+  // regression.
+  // TODO(phase-2.2): replace these assertions when render_compute_function
+  // gains a Category-aware branch for StateVariableCurrent.
+  EXPECT_NE(src.find("double const alpha"), std::string::npos)
+      << "current value still appears as const input param in Phase 2.1: " << src;
+  EXPECT_NE(src.find("double const alpha_old"), std::string::npos)
+      << "_old value appears as const input param: " << src;
 }
 
 } // namespace numsim::codegen

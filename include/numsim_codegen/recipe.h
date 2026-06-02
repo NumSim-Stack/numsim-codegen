@@ -128,6 +128,14 @@ struct SymbolDecl {
   Role role = roles::Other;  // semantic tag; Other for parameters
 };
 
+// Phase 2.1: suffix appended to a state variable's name to form the
+// paired "old"-value symbol. Lifted to a named constant (M3 in
+// REVIEW-pr-58.md) so Phase 2.2's TimeIntegrationPass and Phase 2.6's
+// MOOSE wiring reference the same string. Prior to this lift, eight
+// hardcoded `"_old"` literals lived across the two add methods —
+// brittle contract.
+inline constexpr std::string_view state_variable_old_suffix = "_old";
+
 // Phase 2.1: declaration of a state variable — a quantity whose value at
 // step n+1 the recipe writes (during Newton iteration on the local
 // constitutive system) and whose value at step n the framework supplies
@@ -146,10 +154,8 @@ struct SymbolDecl {
 // `initial_value` is the expression evaluated at simulation start (or
 // when state is reset). Backends emit a one-shot initialisation routine.
 struct StateVariable {
-  using Kind = SymbolDecl::Kind;
-
   std::string name;
-  Kind kind;
+  SymbolDecl::Kind kind;
   std::size_t dim = 0;   // tensor only
   std::size_t rank = 0;  // tensor only
   std::variant<
@@ -157,6 +163,14 @@ struct StateVariable {
       cas::expression_holder<cas::tensor_expression>>
       initial_value;
   std::string doc;
+
+  // Phase 2.1 stronger-fix (architect Q1, REVIEW-pr-58.md): explicit
+  // indices into `ConstitutiveModel::symbols()` for the paired
+  // SymbolDecl entries. Eliminates Phase 2.2+'s reliance on
+  // `name + state_variable_old_suffix` string concat to find the
+  // partner symbol — lowering passes just read these.
+  std::size_t current_symbol_idx = 0;
+  std::size_t old_symbol_idx = 0;
 };
 
 // Declaration of a computed output that the generated function emits.
@@ -189,6 +203,7 @@ public:
   auto add_scalar_input(std::string name, Role role = roles::Other)
       -> cas::expression_holder<cas::scalar_expression> {
     validate_role_attributes(role);
+    assert_symbol_name_available(name); // M1
     auto var = cas::make_expression<cas::scalar>(name);
     SymbolDecl decl{name, SymbolDecl::Category::Input,
                     SymbolDecl::Kind::Scalar};
@@ -203,6 +218,7 @@ public:
                         Role role = roles::Other)
       -> cas::expression_holder<cas::tensor_expression> {
     validate_role_attributes(role);
+    assert_symbol_name_available(name); // M1
     auto var = cas::make_expression<cas::tensor>(name, dim, rank);
     SymbolDecl decl{name, SymbolDecl::Category::Input,
                     SymbolDecl::Kind::Tensor, dim, rank};
@@ -218,6 +234,7 @@ public:
   auto add_parameter(std::string name, double default_value,
                      std::string doc = "")
       -> cas::expression_holder<cas::scalar_expression> {
+    assert_symbol_name_available(name); // M1
     auto var = cas::make_expression<cas::scalar>(name);
     SymbolDecl decl{name, SymbolDecl::Category::Parameter,
                     SymbolDecl::Kind::Scalar};
@@ -255,25 +272,32 @@ public:
       std::string name,
       cas::expression_holder<cas::scalar_expression> initial_value,
       std::string doc = "") -> ScalarStateVariableHandle {
+    auto old_name = name + std::string{state_variable_old_suffix};
+    assert_symbol_name_available(name);     // M1
+    assert_symbol_name_available(old_name); // M2
+
     auto current = cas::make_expression<cas::scalar>(name);
-    auto previous = cas::make_expression<cas::scalar>(name + "_old");
+    auto previous = cas::make_expression<cas::scalar>(old_name);
 
     SymbolDecl current_decl{name,
                             SymbolDecl::Category::StateVariableCurrent,
                             SymbolDecl::Kind::Scalar};
     current_decl.doc = doc;
-    m_symbols.push_back(current_decl);
+    std::size_t const current_idx = m_symbols.size();
+    m_symbols.push_back(std::move(current_decl));
     m_scalar_symbols.emplace_back(name, current);
 
-    SymbolDecl old_decl{name + "_old",
+    SymbolDecl old_decl{old_name,
                         SymbolDecl::Category::StateVariableOld,
                         SymbolDecl::Kind::Scalar};
     old_decl.doc = doc;
+    std::size_t const old_idx = m_symbols.size();
     m_symbols.push_back(std::move(old_decl));
-    m_scalar_symbols.emplace_back(name + "_old", previous);
+    m_scalar_symbols.emplace_back(std::move(old_name), previous);
 
-    StateVariable sv{name, SymbolDecl::Kind::Scalar, 0, 0,
-                     std::move(initial_value), std::move(doc)};
+    StateVariable sv{std::move(name), SymbolDecl::Kind::Scalar, 0, 0,
+                     std::move(initial_value), std::move(doc),
+                     current_idx, old_idx};
     m_state_variables.push_back(std::move(sv));
 
     return {current, previous};
@@ -283,25 +307,32 @@ public:
       std::string name, std::size_t dim, std::size_t rank,
       cas::expression_holder<cas::tensor_expression> initial_value,
       std::string doc = "") -> TensorStateVariableHandle {
+    auto old_name = name + std::string{state_variable_old_suffix};
+    assert_symbol_name_available(name);     // M1
+    assert_symbol_name_available(old_name); // M2
+
     auto current = cas::make_expression<cas::tensor>(name, dim, rank);
-    auto previous = cas::make_expression<cas::tensor>(name + "_old", dim, rank);
+    auto previous = cas::make_expression<cas::tensor>(old_name, dim, rank);
 
     SymbolDecl current_decl{name,
                             SymbolDecl::Category::StateVariableCurrent,
                             SymbolDecl::Kind::Tensor, dim, rank};
     current_decl.doc = doc;
-    m_symbols.push_back(current_decl);
+    std::size_t const current_idx = m_symbols.size();
+    m_symbols.push_back(std::move(current_decl));
     m_tensor_symbols.emplace_back(name, current);
 
-    SymbolDecl old_decl{name + "_old",
+    SymbolDecl old_decl{old_name,
                         SymbolDecl::Category::StateVariableOld,
                         SymbolDecl::Kind::Tensor, dim, rank};
     old_decl.doc = doc;
+    std::size_t const old_idx = m_symbols.size();
     m_symbols.push_back(std::move(old_decl));
-    m_tensor_symbols.emplace_back(name + "_old", previous);
+    m_tensor_symbols.emplace_back(std::move(old_name), previous);
 
-    StateVariable sv{name, SymbolDecl::Kind::Tensor, dim, rank,
-                     std::move(initial_value), std::move(doc)};
+    StateVariable sv{std::move(name), SymbolDecl::Kind::Tensor, dim, rank,
+                     std::move(initial_value), std::move(doc),
+                     current_idx, old_idx};
     m_state_variables.push_back(std::move(sv));
 
     return {current, previous};
@@ -442,6 +473,33 @@ public:
   }
 
 private:
+  // Phase 2.1 (M1+M2 in REVIEW-pr-58.md): reject a duplicate symbol
+  // name at add time, with a clear pipeline-misconfiguration message.
+  // Two collision modes this catches:
+  //   1. Calling `add_*("foo", ...)` twice (direct shadow).
+  //   2. Adding an input named `<name>_old` followed by adding a state
+  //      variable named `<name>` (the auto-generated `_old` symbol
+  //      collides with the prior input). Or the reverse order.
+  // Both produced silent corruption pre-fix: duplicate SymbolDecl
+  // entries that `unordered_map::emplace` masked in the lookup but
+  // survived in `m_symbols` and the symbol maps, leading to
+  // uncompilable generated code or wrong-decl resolution.
+  void assert_symbol_name_available(std::string_view name) const {
+    for (auto const &existing : m_symbols) {
+      if (existing.name == name) {
+        throw std::runtime_error(
+            "ConstitutiveModel '" + m_name + "': symbol name '" +
+            std::string{name} +
+            "' is already declared. Pick a unique name. (If you tried "
+            "to add a state variable, remember that the auto-generated "
+            "`<name>" +
+            std::string{state_variable_old_suffix} +
+            "` paired symbol is also reserved — do not separately "
+            "declare an input or parameter with that suffix.)");
+      }
+    }
+  }
+
   // Reject a user-defined Role that shares a name with a `roles::` catalogue
   // entry but carries different attribute values. Name-only equality means
   // such a mismatch would otherwise silently mis-route through
