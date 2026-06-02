@@ -26,6 +26,7 @@
 #include <numsim_cas/tensor/tensor_expression.h>
 
 #include <cassert>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <variant>
@@ -84,14 +85,37 @@ public:
   // P1: non-null `ConstitutiveModel *` if the view was constructed from
   // a non-const ref; `nullptr` if from a const ref. Phase 2 mutating
   // passes (TimeIntegrationPass, KuhnTuckerLoweringPass) call this and
-  // throw with a clear message if a const view reaches them — that's a
-  // pipeline-misconfiguration error, not silent corruption.
+  // check the nullptr — that's a pipeline-misconfiguration error, not
+  // silent corruption. For the common case (every mutating pass would
+  // otherwise write the same if/throw boilerplate), prefer
+  // `require_mutable_model()` below.
+  //
+  // The non-const constructor accepts `ConstitutiveModel &` only —
+  // rvalues bind to the const overload, so a temporary cannot produce a
+  // mutable view. Mutation requires a persistent lvalue.
   [[nodiscard]] auto try_mutable_model() noexcept -> ConstitutiveModel * {
     if (auto **p = std::get_if<ConstitutiveModel *>(&m_model)) {
       assert(*p != nullptr);
       return *p;
     }
     return nullptr;
+  }
+
+  // Convenience for Phase 2 mutating passes: returns a non-const reference
+  // or throws with a canonical pipeline-misconfiguration message.
+  // `pass_name` is interpolated into the message so the user sees which
+  // pass failed. m1 in REVIEW-pr-57.md.
+  [[nodiscard]] auto require_mutable_model(char const *pass_name)
+      -> ConstitutiveModel & {
+    if (auto *p = try_mutable_model()) {
+      return *p;
+    }
+    throw std::runtime_error(
+        std::string{"Pass '"} + pass_name +
+        "' requires a mutable RecipeView (constructed from "
+        "ConstitutiveModel&), but the PassContext holds a const view. "
+        "This is a pipeline-construction error — the pass shouldn't have "
+        "been registered in a const-only path (e.g. validate()).");
   }
 
 private:

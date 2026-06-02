@@ -218,7 +218,7 @@ public:
   // artifacts for the emit pipeline must run inside the same
   // emit_compute_function() invocation, not a separate validate() call.
   void validate() const {
-    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt};
+    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt, {}};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
     pm.emplace<TensorSpaceConsistencyPass>();
@@ -232,7 +232,7 @@ public:
   // Future phases (TimeIntegrationPass, AlgorithmicTangentPass, …) plug
   // additional passes into this same pipeline.
   [[nodiscard]] auto emit_compute_function() const -> std::string {
-    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt};
+    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt, {}};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
     pm.emplace<TensorSpaceConsistencyPass>();
@@ -385,6 +385,32 @@ inline auto RecipeView::tensor_symbol_map() const -> TensorSymbolMap const & {
   return detail::recipe_view_const_ptr(m_model)->tensor_symbol_map();
 }
 
+// ─── PassContext symbol-lookup helpers ───────────────────────────────
+//
+// Declared in passes/pass.h; defined here because SymbolDecl::Kind is
+// only complete after the ConstitutiveModel class body. The lookup
+// values are `std::size_t` indices into `model.symbols()` (post-C1
+// fixup — see REVIEW-pr-57.md); these helpers resolve the index
+// through the model and apply the kind discriminator in one place.
+
+[[nodiscard]] inline auto find_tensor_symbol(PassContext const &pctx,
+                                             std::string const &name) noexcept
+    -> SymbolDecl const * {
+  auto const it = pctx.symbol_lookup.find(name);
+  if (it == pctx.symbol_lookup.end()) {
+    return nullptr;
+  }
+  auto const &symbols = pctx.model.symbols();
+  if (it->second >= symbols.size()) {
+    return nullptr; // Defensive: shouldn't happen if SVP populated correctly.
+  }
+  auto const &decl = symbols[it->second];
+  if (decl.kind != SymbolDecl::Kind::Tensor) {
+    return nullptr;
+  }
+  return &decl;
+}
+
 // ─── Function-frame rendering (free functions) ───────────────────────
 //
 // These render the surrounding function frame after the body statements
@@ -501,14 +527,15 @@ inline auto render_compute_function(
 inline void SymbolValidationPass::run(PassContext &pctx) {
   auto const &model = pctx.model;
 
-  // P4: build the name → SymbolDecl* lookup once. Downstream passes
-  // (TensorSpaceConsistencyPass today; Phase 2 rewriters tomorrow)
-  // consume it instead of re-deriving the O(N·M) join. Capturing
-  // SymbolDecl const* keeps the lookup tied to the symbols() vector's
-  // lifetime — safe for the duration of one PassManager::run, which is
-  // the only scope where PassContext is alive.
-  for (auto const &s : model.symbols()) {
-    pctx.symbol_lookup.emplace(s.name, &s);
+  // P4 (post-fixup C1): build the name → index lookup once. Indices
+  // survive any future `m_symbols.push_back()` reallocation, whereas
+  // the original SymbolDecl pointers would silently dangle the first
+  // time a Phase 2 mutating pass synthesised a new symbol. Consumers
+  // resolve through `find_tensor_symbol` (one indirection per lookup;
+  // a fair trade for eliminating the dangling class).
+  auto const &symbols = model.symbols();
+  for (std::size_t i = 0; i < symbols.size(); ++i) {
+    pctx.symbol_lookup.emplace(symbols[i].name, i);
   }
 
   // (1) C++ identifier validity on declared symbol names. We check
@@ -608,19 +635,18 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
   // validate end-to-end). The current shallow check exists primarily
   // to validate the framework with a second non-trivial pass before
   // Phase 2 wires expression rewriters into the same PassContext.
-  // P4: O(N) walk; lookup is constant-time per symbol. The pre-P4 body
-  // did a linear scan over model.symbols() *inside* this loop, giving
-  // O(N·M) — fine for the dozen-symbol recipes we have today, but the
-  // structural smell scaled badly across Phase-2 passes that all needed
-  // the same join. Now SymbolValidationPass populates the lookup once
-  // and every downstream pass consumes it.
+  // P4 (post-fixup M3): one-shot lookup via the canonical helper. The
+  // pre-P4 body did a linear scan over model.symbols() inside this
+  // loop, giving O(N·M); the post-P4-pre-fixup body open-coded
+  // `find + kind == Tensor`, which would duplicate across every
+  // Phase 2 validator. `find_tensor_symbol` is the single canonical
+  // join.
   for (auto const &[name, expr] : model.tensor_symbol_map()) {
-    auto it = pctx.symbol_lookup.find(name);
-    if (it == pctx.symbol_lookup.end() ||
-        it->second->kind != SymbolDecl::Kind::Tensor) {
+    auto const *decl = find_tensor_symbol(pctx, name);
+    if (decl == nullptr) {
       continue; // Should not happen — SymbolValidationPass guards it.
     }
-    Role const *role_ptr = &it->second->role;
+    Role const *role_ptr = &decl->role;
 
     auto const &t = expr.get();
     auto const &space_opt = t.space();

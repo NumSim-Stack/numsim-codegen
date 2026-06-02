@@ -19,11 +19,12 @@ namespace numsim::codegen {
 //
 // Result lands in `pctx.compute_function_source`.
 //
-// Preconditions: "symbols-declared" + "identifiers-valid" +
-// "tensor-space-validated" (i.e. SymbolValidationPass +
-// TensorSpaceConsistencyPass must have run first). If you add a pass
-// that transforms expressions (e.g. a future TimeIntegrationPass),
-// register it AFTER the validators but BEFORE CodeEmitPass.
+// Preconditions: `pass_tags::symbols_declared` +
+// `pass_tags::identifiers_valid` + `pass_tags::tensor_space_declarations_checked`
+// (i.e. SymbolValidationPass + TensorSpaceConsistencyPass must have run
+// first). If you add a pass that transforms expressions (e.g. a future
+// TimeIntegrationPass), register it AFTER the validators but BEFORE
+// CodeEmitPass.
 class CodeEmitPass final : public Pass {
 public:
   [[nodiscard]] auto name() const -> std::string_view override {

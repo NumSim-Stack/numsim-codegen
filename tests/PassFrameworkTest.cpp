@@ -107,6 +107,27 @@ TEST(RecipeView, MutableConstructorGivesMutableAccess) {
   EXPECT_EQ(view.name(), "M");
 }
 
+TEST(RecipeView, RequireMutableModelThrowsOnConstView) {
+  // m1: the canonical helper that Phase 2 mutating passes will call.
+  // Throws with the pass name + a pipeline-misconfiguration message.
+  ConstitutiveModel model("M");
+  RecipeView view(static_cast<ConstitutiveModel const &>(model));
+  try {
+    view.require_mutable_model("TestMutatingPass");
+    FAIL() << "expected runtime_error when require_mutable on a const view";
+  } catch (std::runtime_error const &e) {
+    std::string msg(e.what());
+    EXPECT_NE(msg.find("TestMutatingPass"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("mutable RecipeView"), std::string::npos) << msg;
+  }
+}
+
+TEST(RecipeView, RequireMutableModelReturnsRefOnMutableView) {
+  ConstitutiveModel model("M");
+  RecipeView view(model);
+  EXPECT_EQ(&view.require_mutable_model("TestPass"), &model);
+}
+
 TEST(RecipeView, BothCtorPathsAgreeOnRawModel) {
   // Sanity: regardless of how the view was constructed, raw_model()
   // returns the same underlying recipe.
@@ -129,7 +150,7 @@ TEST(PassManager, RunsPassesInRegistrationOrder) {
                         std::vector<std::string_view>{});
 
   auto model = make_empty_model();
-  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt};
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt, {}};
   pm.run(pctx);
 
   ASSERT_EQ(trace.size(), 3u);
@@ -148,7 +169,7 @@ TEST(PassManager, EnforcesPrecondition) {
                         std::vector<std::string_view>{});
 
   auto model = make_empty_model();
-  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt};
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt, {}};
   try {
     pm.run(pctx);
     FAIL() << "expected runtime_error for unmet precondition";
@@ -171,7 +192,7 @@ TEST(PassManager, SatisfiedPreconditionAllowsRun) {
                         std::vector<std::string_view>{});
 
   auto model = make_empty_model();
-  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt};
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt, {}};
   pm.run(pctx);
 
   ASSERT_EQ(trace.size(), 2u);
@@ -297,6 +318,11 @@ TEST(SymbolValidationPass, PopulatesPassContextSymbolLookup) {
   // passes can resolve name → SymbolDecl in O(1) instead of an O(N)
   // scan. Verify the map contains every declared symbol after the pass
   // runs.
+  //
+  // C1 fixup: the value type is `std::size_t` index into `model.symbols()`,
+  // not a pointer, so vector growth (Phase 2 synthetic symbols) won't
+  // dangle. Direct map access verifies the indices; `find_tensor_symbol`
+  // (next test) verifies the canonical resolver.
   ConstitutiveModel model("LinearElasticShear");
   auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
   auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
@@ -309,14 +335,39 @@ TEST(SymbolValidationPass, PopulatesPassContextSymbolLookup) {
   ASSERT_EQ(pctx.symbol_lookup.size(), 2u); // mu + eps
   auto mu_it = pctx.symbol_lookup.find("mu");
   ASSERT_NE(mu_it, pctx.symbol_lookup.end());
-  EXPECT_EQ(mu_it->second->kind, SymbolDecl::Kind::Scalar);
-  EXPECT_EQ(mu_it->second->category, SymbolDecl::Category::Parameter);
+  EXPECT_LT(mu_it->second, model.symbols().size());
+  auto const &mu_decl = model.symbols()[mu_it->second];
+  EXPECT_EQ(mu_decl.kind, SymbolDecl::Kind::Scalar);
+  EXPECT_EQ(mu_decl.category, SymbolDecl::Category::Parameter);
 
   auto eps_it = pctx.symbol_lookup.find("eps");
   ASSERT_NE(eps_it, pctx.symbol_lookup.end());
-  EXPECT_EQ(eps_it->second->kind, SymbolDecl::Kind::Tensor);
-  EXPECT_EQ(eps_it->second->category, SymbolDecl::Category::Input);
-  EXPECT_EQ(eps_it->second->role.name, "strain");
+  EXPECT_LT(eps_it->second, model.symbols().size());
+  auto const &eps_decl = model.symbols()[eps_it->second];
+  EXPECT_EQ(eps_decl.kind, SymbolDecl::Kind::Tensor);
+  EXPECT_EQ(eps_decl.category, SymbolDecl::Category::Input);
+  EXPECT_EQ(eps_decl.role.name, "strain");
+}
+
+TEST(SymbolValidationPass, FindTensorSymbolResolvesByName) {
+  // M3 fixup: the canonical `find + kind == Tensor` helper. Returns a
+  // valid SymbolDecl* for tensors, nullptr for scalars and unknowns.
+  ConstitutiveModel model("M");
+  model.add_parameter("mu", 0.5, "");
+  model.add_tensor_input("eps", 3, 2, roles::Strain);
+
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt, {}};
+  SymbolValidationPass{}.run(pctx);
+
+  auto const *eps = find_tensor_symbol(pctx, "eps");
+  ASSERT_NE(eps, nullptr);
+  EXPECT_EQ(eps->name, "eps");
+  EXPECT_EQ(eps->kind, SymbolDecl::Kind::Tensor);
+
+  // Scalar parameter — helper returns nullptr because it's not a tensor.
+  EXPECT_EQ(find_tensor_symbol(pctx, "mu"), nullptr);
+  // Unknown name — also nullptr.
+  EXPECT_EQ(find_tensor_symbol(pctx, "nonexistent"), nullptr);
 }
 
 TEST(SymbolValidationPass, PreservesMissingSymbolDiagnostic) {
@@ -426,7 +477,7 @@ TEST(CodeEmitPass, RefusesToRunWithoutValidationPredecessor) {
   // should fail loudly — CodeEmitPass advertises preconditions that are
   // unmet.
   ConstitutiveModel model("M");
-  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt};
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt, {}};
   PassManager pm;
   pm.emplace<CodeEmitPass>();
 
