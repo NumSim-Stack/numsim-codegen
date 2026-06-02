@@ -12,6 +12,7 @@
 #include <numsim_cas/tensor/wrappers/tensor_inv.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_expression.h>
 
+#include <format>
 #include <functional>
 #include <ranges>
 #include <sstream>
@@ -87,9 +88,9 @@ public:
       m_result = register_temp(&v, os.str());
       return;
     }
-    throw std::runtime_error(
-        "TensorCodeEmit: identity_tensor of rank " +
-        std::to_string(v.rank()) + " not supported in Phase A MVP");
+    throw std::runtime_error(std::format(
+        "TensorCodeEmit: identity_tensor of rank {} not supported in Phase A MVP",
+        v.rank()));
   }
 
   void operator()(cas::levi_civita_tensor const &v) override {
@@ -209,12 +210,12 @@ public:
   void operator()(cas::tensor_projector const &v) override {
     const auto r = v.acts_on_rank();
     if (r != 2) {
-      throw std::runtime_error(
-          "TensorCodeEmit: tensor_projector with acts_on_rank=" +
-          std::to_string(r) +
-          " is not yet supported. Only acts_on_rank=2 (rank-4 projectors on "
-          "rank-2 tensors) ships now; higher-rank projector emit lands once "
-          "we have a recipe that needs it.");
+      throw std::runtime_error(std::format(
+          "TensorCodeEmit: tensor_projector with acts_on_rank={} is not yet "
+          "supported. Only acts_on_rank=2 (rank-4 projectors on rank-2 "
+          "tensors) ships now; higher-rank projector emit lands once we "
+          "have a recipe that needs it.",
+          r));
     }
     const auto d_str = std::to_string(v.dim());
     const std::string eye = "tmech::eye<double, " + d_str + ", 2>()";
@@ -373,11 +374,11 @@ public:
   // until a recipe needs it.
   void operator()(cas::tensor_pow const &v) override {
     if (v.rank() != 2) {
-      throw std::runtime_error(
-          "TensorCodeEmit: tensor_pow of rank " + std::to_string(v.rank()) +
-          " is not yet supported. tmech::pow ships rank-2 only; higher-rank "
-          "bases require static-exponent unrolling — not implemented in this "
-          "phase.");
+      throw std::runtime_error(std::format(
+          "TensorCodeEmit: tensor_pow of rank {} is not yet supported. "
+          "tmech::pow ships rank-2 only; higher-rank bases require "
+          "static-exponent unrolling — not implemented in this phase.",
+          v.rank()));
     }
     auto base = apply(v.expr_lhs());
     auto exp = m_scalar.apply(v.expr_rhs());
@@ -427,10 +428,11 @@ public:
   // path below is unchanged. Local follow-up: #43.
   void operator()(cas::tensor_inv const &v) override {
     if (v.rank() != 2) {
-      throw std::runtime_error(
-          "TensorCodeEmit: tensor_inv of rank " + std::to_string(v.rank()) +
-          " is not yet supported. Use rank-2 tensors, or track "
-          "NumSim-Stack/numsim-cas#248 for rank-4 support landing upstream.");
+      throw std::runtime_error(std::format(
+          "TensorCodeEmit: tensor_inv of rank {} is not yet supported. "
+          "Use rank-2 tensors, or track NumSim-Stack/numsim-cas#248 for "
+          "rank-4 support landing upstream.",
+          v.rank()));
     }
     auto inner = apply(v.expr());
     // wrap_if_compound: today `inner` is always a single token (named symbol

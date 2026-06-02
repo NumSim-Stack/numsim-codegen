@@ -3,10 +3,10 @@
 
 #include <numsim_codegen/passes/pass.h>
 
+#include <format>
 #include <memory>
 #include <set>
 #include <stdexcept>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -37,10 +37,10 @@ public:
     for (auto const &p : m_passes) {
       for (auto pre : p->preconditions()) {
         if (!satisfied.contains(pre)) {
-          throw std::runtime_error(
-              "PassManager: pass '" + std::string{p->name()} +
-              "' requires precondition '" + std::string{pre} +
-              "' but no earlier pass advertised that postcondition.");
+          throw std::runtime_error(std::format(
+              "PassManager: pass '{}' requires precondition '{}' but no "
+              "earlier pass advertised that postcondition.",
+              p->name(), pre));
         }
       }
       p->run(ctx);

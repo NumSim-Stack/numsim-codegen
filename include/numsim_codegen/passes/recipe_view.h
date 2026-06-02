@@ -26,6 +26,7 @@
 #include <numsim_cas/tensor/tensor_expression.h>
 
 #include <cassert>
+#include <format>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -113,12 +114,12 @@ public:
     if (auto *p = try_mutable_model()) {
       return *p;
     }
-    throw std::runtime_error(
-        std::string{"Pass '"} + pass_name +
-        "' requires a mutable RecipeView (constructed from "
+    throw std::runtime_error(std::format(
+        "Pass '{}' requires a mutable RecipeView (constructed from "
         "ConstitutiveModel&), but the PassContext holds a const view. "
         "This is a pipeline-construction error — the pass shouldn't have "
-        "been registered in a const-only path (e.g. validate()).");
+        "been registered in a const-only path (e.g. validate()).",
+        pass_name));
   }
 
 private:
