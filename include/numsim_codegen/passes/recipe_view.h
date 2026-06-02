@@ -37,6 +37,7 @@ namespace numsim::codegen {
 class ConstitutiveModel;
 struct SymbolDecl;
 struct OutputDecl;
+struct StateVariable;
 
 class RecipeView {
 public:
@@ -62,6 +63,8 @@ public:
   [[nodiscard]] auto name() const -> std::string const &;
   [[nodiscard]] auto symbols() const -> std::vector<SymbolDecl> const &;
   [[nodiscard]] auto outputs() const -> std::vector<OutputDecl> const &;
+  [[nodiscard]] auto state_variables() const
+      -> std::vector<StateVariable> const &;
   [[nodiscard]] auto scalar_symbol_map() const -> ScalarSymbolMap const &;
   [[nodiscard]] auto tensor_symbol_map() const -> TensorSymbolMap const &;
 

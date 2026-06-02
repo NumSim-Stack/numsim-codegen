@@ -83,6 +83,15 @@ namespace roles {
   inline const Role Stress              {"stress",               false, false, true,  2};
   inline const Role ConsistentTangent   {"consistent_tangent",   false, false, false, 4};
   inline const Role Temperature         {"temperature",          false, true,  false, 0};
+  // SUPERSEDED in Phase 2.1 by ConstitutiveModel::add_*_state_variable().
+  // The new API replaces "marker-on-input" with first-class StateVariable
+  // declarations that carry an initial-value expression, register both
+  // `<name>` (current) and `<name>_old` symbols, and let backends route
+  // through `Category::StateVariable*` instead of inspecting Role.
+  // `roles::History` stays in the catalogue for one release as an alias
+  // for existing recipes; new code should use `add_*_state_variable`.
+  // `[[deprecated]]` attribute is deferred until Phase 2.6 when backends
+  // actually rewire away from this marker.
   inline const Role History             {"history",              true,  false, false};
   inline const Role Dissipation         {"dissipation",          false, false, false, 0};
   inline const Role Other               {"other"};
@@ -93,7 +102,20 @@ namespace roles {
 // read-only) but backends distinguish them — parameters come from MOOSE
 // input file via getParam, inputs come from coupled variables / state.
 struct SymbolDecl {
-  enum class Category { Input, Parameter };
+  // Phase 2.1: state variables register two distinct symbols per declared
+  // variable — a `*Current` for the value the recipe writes (i.e. what
+  // Newton iterates) and a `*Old` for the framework-supplied previous-
+  // step value (e.g. MOOSE's `getMaterialPropertyOld<>`). Backends
+  // switch on this category to wire each correctly:
+  //   - StateVariableCurrent → declareProperty (MOOSE) / function out-arg
+  //   - StateVariableOld     → getMaterialPropertyOld (MOOSE) / function in-arg
+  // Inputs/Parameters are unchanged.
+  enum class Category {
+    Input,
+    Parameter,
+    StateVariableCurrent,
+    StateVariableOld
+  };
   enum class Kind { Scalar, Tensor };
 
   std::string name;
@@ -104,6 +126,37 @@ struct SymbolDecl {
   std::optional<double> default_value; // parameter only
   std::string doc;
   Role role = roles::Other;  // semantic tag; Other for parameters
+};
+
+// Phase 2.1: declaration of a state variable — a quantity whose value at
+// step n+1 the recipe writes (during Newton iteration on the local
+// constitutive system) and whose value at step n the framework supplies
+// from storage. The classic plasticity example is the equivalent plastic
+// strain α: its evolution `Dt(α) = λ` is solved alongside the stress
+// equations, and the value at the start of each step (α_old) comes from
+// the previous step's storage.
+//
+// The codegen wires two distinct symbols per state variable:
+//   - `<name>` (the "current" value — what we're solving for)
+//   - `<name>_old` (the previous step's value — framework-supplied)
+// Both appear in `symbols()` with respective `Category::StateVariableCurrent`
+// / `StateVariableOld` so backends can route each to the correct framework
+// API (MOOSE `declareProperty` / `getMaterialPropertyOld`).
+//
+// `initial_value` is the expression evaluated at simulation start (or
+// when state is reset). Backends emit a one-shot initialisation routine.
+struct StateVariable {
+  using Kind = SymbolDecl::Kind;
+
+  std::string name;
+  Kind kind;
+  std::size_t dim = 0;   // tensor only
+  std::size_t rank = 0;  // tensor only
+  std::variant<
+      cas::expression_holder<cas::scalar_expression>,
+      cas::expression_holder<cas::tensor_expression>>
+      initial_value;
+  std::string doc;
 };
 
 // Declaration of a computed output that the generated function emits.
@@ -174,6 +227,84 @@ public:
     m_symbols.push_back(std::move(decl));
     m_scalar_symbols.emplace_back(name, var);
     return var;
+  }
+
+  // ─── State-variable declarations (Phase 2.1) ────────────────────
+  //
+  // Each `add_*_state_variable` returns a `Handle{current, previous}`.
+  // - `current`: the value the recipe writes (Newton iterates on this).
+  // - `previous`: the framework-supplied previous-step value, named
+  //   `<name>_old`. Use it in evolution equations like
+  //   `Dt(α) = (α.current − α.previous) / dt`, lowered by Phase 2.2's
+  //   TimeIntegrationPass.
+  //
+  // Both symbols register in `m_symbols` with Category
+  // StateVariableCurrent / StateVariableOld, so they flow through the
+  // existing validation pipeline (identifier check, symbol_lookup).
+
+  struct ScalarStateVariableHandle {
+    cas::expression_holder<cas::scalar_expression> current;
+    cas::expression_holder<cas::scalar_expression> previous;
+  };
+  struct TensorStateVariableHandle {
+    cas::expression_holder<cas::tensor_expression> current;
+    cas::expression_holder<cas::tensor_expression> previous;
+  };
+
+  auto add_scalar_state_variable(
+      std::string name,
+      cas::expression_holder<cas::scalar_expression> initial_value,
+      std::string doc = "") -> ScalarStateVariableHandle {
+    auto current = cas::make_expression<cas::scalar>(name);
+    auto previous = cas::make_expression<cas::scalar>(name + "_old");
+
+    SymbolDecl current_decl{name,
+                            SymbolDecl::Category::StateVariableCurrent,
+                            SymbolDecl::Kind::Scalar};
+    current_decl.doc = doc;
+    m_symbols.push_back(current_decl);
+    m_scalar_symbols.emplace_back(name, current);
+
+    SymbolDecl old_decl{name + "_old",
+                        SymbolDecl::Category::StateVariableOld,
+                        SymbolDecl::Kind::Scalar};
+    old_decl.doc = doc;
+    m_symbols.push_back(std::move(old_decl));
+    m_scalar_symbols.emplace_back(name + "_old", previous);
+
+    StateVariable sv{name, SymbolDecl::Kind::Scalar, 0, 0,
+                     std::move(initial_value), std::move(doc)};
+    m_state_variables.push_back(std::move(sv));
+
+    return {current, previous};
+  }
+
+  auto add_tensor_state_variable(
+      std::string name, std::size_t dim, std::size_t rank,
+      cas::expression_holder<cas::tensor_expression> initial_value,
+      std::string doc = "") -> TensorStateVariableHandle {
+    auto current = cas::make_expression<cas::tensor>(name, dim, rank);
+    auto previous = cas::make_expression<cas::tensor>(name + "_old", dim, rank);
+
+    SymbolDecl current_decl{name,
+                            SymbolDecl::Category::StateVariableCurrent,
+                            SymbolDecl::Kind::Tensor, dim, rank};
+    current_decl.doc = doc;
+    m_symbols.push_back(current_decl);
+    m_tensor_symbols.emplace_back(name, current);
+
+    SymbolDecl old_decl{name + "_old",
+                        SymbolDecl::Category::StateVariableOld,
+                        SymbolDecl::Kind::Tensor, dim, rank};
+    old_decl.doc = doc;
+    m_symbols.push_back(std::move(old_decl));
+    m_tensor_symbols.emplace_back(name + "_old", previous);
+
+    StateVariable sv{name, SymbolDecl::Kind::Tensor, dim, rank,
+                     std::move(initial_value), std::move(doc)};
+    m_state_variables.push_back(std::move(sv));
+
+    return {current, previous};
   }
 
   // ─── Output declarations ────────────────────────────────────────
@@ -289,6 +420,16 @@ public:
     return m_inputs_cache;
   }
 
+  // Phase 2.1: state-variable declarations. Each entry is a single
+  // StateVariable; the corresponding "current" and "_old" SymbolDecl
+  // entries live in `m_symbols` (categories StateVariableCurrent /
+  // StateVariableOld). Empty for recipes without internal state (e.g.
+  // pure elasticity).
+  [[nodiscard]] auto state_variables() const
+      -> std::vector<StateVariable> const & {
+    return m_state_variables;
+  }
+
   // Symbol → expression maps. Exposed for the Phase 1.2 pass framework so
   // a CodeEmitPass can register them with a CodeGenContext without having
   // to re-derive them from `symbols()` (which loses the expression handle).
@@ -336,6 +477,7 @@ private:
   std::vector<SymbolDecl> m_parameters_cache;
   std::vector<SymbolDecl> m_inputs_cache;
   std::vector<OutputDecl> m_outputs;
+  std::vector<StateVariable> m_state_variables; // Phase 2.1
 
   std::vector<
       std::pair<std::string, cas::expression_holder<cas::scalar_expression>>>
@@ -375,6 +517,11 @@ inline auto RecipeView::symbols() const -> std::vector<SymbolDecl> const & {
 
 inline auto RecipeView::outputs() const -> std::vector<OutputDecl> const & {
   return detail::recipe_view_const_ptr(m_model)->outputs();
+}
+
+inline auto RecipeView::state_variables() const
+    -> std::vector<StateVariable> const & {
+  return detail::recipe_view_const_ptr(m_model)->state_variables();
 }
 
 inline auto RecipeView::scalar_symbol_map() const -> ScalarSymbolMap const & {
