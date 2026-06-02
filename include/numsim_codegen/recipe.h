@@ -19,6 +19,7 @@
 #include <numsim_cas/tensor/tensor_definitions.h>
 
 #include <cstddef>
+#include <format>
 #include <memory>
 #include <optional>
 #include <set>
@@ -501,15 +502,13 @@ private:
   void assert_symbol_name_available(std::string_view name) const {
     for (auto const &existing : m_symbols) {
       if (existing.name == name) {
-        throw std::runtime_error(
-            "ConstitutiveModel '" + m_name + "': symbol name '" +
-            std::string{name} +
-            "' is already declared. Pick a unique name. (If you tried "
-            "to add a state variable, remember that the auto-generated "
-            "`<name>" +
-            std::string{state_variable_old_suffix} +
-            "` paired symbol is also reserved — do not separately "
-            "declare an input or parameter with that suffix.)");
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': symbol name '{}' is already declared. "
+            "Pick a unique name. (If you tried to add a state variable, "
+            "remember that the auto-generated `<name>{}` paired symbol is "
+            "also reserved — do not separately declare an input or "
+            "parameter with that suffix.)",
+            m_name, name, state_variable_old_suffix));
       }
     }
   }
@@ -526,11 +525,11 @@ private:
        || r.is_driving    != canon.is_driving
        || r.is_symmetric  != canon.is_symmetric
        || r.expected_rank != canon.expected_rank) {
-        throw std::runtime_error(
-            "Role '" + r.name + "' shares its name with predefined " +
-            constant_name + " but carries different attribute values. " +
-            "Either use the predefined constant directly, or pick a different "
-            "name for the custom role.");
+        throw std::runtime_error(std::format(
+            "Role '{}' shares its name with predefined {} but carries "
+            "different attribute values. Either use the predefined constant "
+            "directly, or pick a different name for the custom role.",
+            r.name, constant_name));
       }
     };
     check(roles::Strain,              "roles::Strain");
@@ -766,29 +765,32 @@ inline void SymbolValidationPass::run(PassContext &pctx) {
   // the name into generated source.
   for (auto const &[name, _] : model.scalar_symbol_map()) {
     if (!SymbolValidationPass::is_valid_cxx_identifier(name)) {
-      throw std::runtime_error(
-          "ConstitutiveModel '" + model.name() + "': scalar symbol '" + name +
-          "' is not a usable C++ identifier (bad syntax or reserved keyword). "
-          "Generated code would not compile. Use a [A-Za-z_][A-Za-z0-9_]* "
-          "name that is not a C++ keyword.");
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': scalar symbol '{}' is not a usable C++ "
+          "identifier (bad syntax or reserved keyword). Generated code "
+          "would not compile. Use a [A-Za-z_][A-Za-z0-9_]* name that is "
+          "not a C++ keyword.",
+          model.name(), name));
     }
   }
   for (auto const &[name, _] : model.tensor_symbol_map()) {
     if (!SymbolValidationPass::is_valid_cxx_identifier(name)) {
-      throw std::runtime_error(
-          "ConstitutiveModel '" + model.name() + "': tensor symbol '" + name +
-          "' is not a usable C++ identifier (bad syntax or reserved keyword). "
-          "Generated code would not compile. Use a [A-Za-z_][A-Za-z0-9_]* "
-          "name that is not a C++ keyword.");
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': tensor symbol '{}' is not a usable C++ "
+          "identifier (bad syntax or reserved keyword). Generated code "
+          "would not compile. Use a [A-Za-z_][A-Za-z0-9_]* name that is "
+          "not a C++ keyword.",
+          model.name(), name));
     }
   }
   for (auto const &out : model.outputs()) {
     if (!SymbolValidationPass::is_valid_cxx_identifier(out.name)) {
-      throw std::runtime_error(
-          "ConstitutiveModel '" + model.name() + "': output '" + out.name +
-          "' is not a usable C++ identifier (bad syntax or reserved keyword). "
-          "Generated code would not compile. Use a [A-Za-z_][A-Za-z0-9_]* "
-          "name that is not a C++ keyword.");
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': output '{}' is not a usable C++ "
+          "identifier (bad syntax or reserved keyword). Generated code "
+          "would not compile. Use a [A-Za-z_][A-Za-z0-9_]* name that is "
+          "not a C++ keyword.",
+          model.name(), out.name));
     }
   }
 
@@ -830,10 +832,12 @@ inline void SymbolValidationPass::run(PassContext &pctx) {
   }
 
   if (!missing.empty()) {
-    std::string msg = "ConstitutiveModel '" + model.name() +
-                      "': outputs reference undeclared symbol(s):";
-    for (auto const &m : missing)
-      msg += "\n  - " + m;
+    std::string msg = std::format(
+        "ConstitutiveModel '{}': outputs reference undeclared symbol(s):",
+        model.name());
+    for (auto const &m : missing) {
+      msg += std::format("\n  - {}", m);
+    }
     msg += "\nCall add_scalar_input / add_tensor_input / add_parameter "
            "before referencing a symbol in an output expression.";
     throw std::runtime_error(msg);
@@ -873,29 +877,30 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
     auto const &space_opt = t.space();
     if (space_opt.has_value() && role_ptr->is_symmetric) {
       if (std::holds_alternative<cas::Skew>(space_opt->perm)) {
-        throw std::runtime_error(
-            "ConstitutiveModel '" + model.name() + "': tensor symbol '" +
-            name + "' is declared with role '" + role_ptr->name +
-            "' (is_symmetric=true) but its tensor_space annotation has Skew "
-            "perm — a skew-symmetric tensor cannot satisfy a symmetric role. "
-            "Fix one of: (a) remove the cas-side `assume_skew()` annotation "
-            "on this symbol; (b) re-declare with a Role whose "
-            "`is_symmetric=false` (construct a custom `Role{...}`, or pick "
-            "from the `roles::` catalogue in recipe.h).");
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': tensor symbol '{}' is declared with "
+            "role '{}' (is_symmetric=true) but its tensor_space annotation "
+            "has Skew perm — a skew-symmetric tensor cannot satisfy a "
+            "symmetric role. Fix one of: (a) remove the cas-side "
+            "`assume_skew()` annotation on this symbol; (b) re-declare "
+            "with a Role whose `is_symmetric=false` (construct a custom "
+            "Role aggregate, or pick from the `roles::` catalogue in "
+            "recipe.h).",
+            model.name(), name, role_ptr->name));
       }
     }
 
     if (role_ptr->expected_rank.has_value() &&
         t.rank() != *role_ptr->expected_rank) {
-      throw std::runtime_error(
-          "ConstitutiveModel '" + model.name() + "': tensor symbol '" + name +
-          "' has rank " + std::to_string(t.rank()) + " but role '" +
-          role_ptr->name + "' expects rank " +
-          std::to_string(*role_ptr->expected_rank) +
-          ". Fix one of: (a) adjust the `rank` argument in your "
-          "`add_tensor_input(name, dim, rank, ...)` call to match the role; "
-          "(b) re-declare with a different Role (see the `roles::` catalogue "
-          "in recipe.h for their `expected_rank` values).");
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': tensor symbol '{}' has rank {} but "
+          "role '{}' expects rank {}. Fix one of: (a) adjust the `rank` "
+          "argument in your `add_tensor_input(name, dim, rank, ...)` "
+          "call to match the role; (b) re-declare with a different Role "
+          "(see the `roles::` catalogue in recipe.h for their "
+          "`expected_rank` values).",
+          model.name(), name, t.rank(), role_ptr->name,
+          *role_ptr->expected_rank));
     }
   }
 }
