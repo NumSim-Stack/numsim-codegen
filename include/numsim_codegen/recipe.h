@@ -868,7 +868,7 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
             "symmetric role. Fix one of: (a) remove the cas-side "
             "`assume_skew()` annotation on this symbol; (b) re-declare "
             "with a Role whose `is_symmetric=false` (construct a custom "
-            "`Role{{...}}`, or pick from the `roles::` catalogue in "
+            "Role aggregate, or pick from the `roles::` catalogue in "
             "recipe.h).",
             model.name(), name, role_ptr->name));
       }

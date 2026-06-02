@@ -7,6 +7,7 @@
 #include <memory>
 #include <set>
 #include <stdexcept>
+#include <string> // std::string used directly by std::format-built throw msg
 #include <utility>
 #include <vector>
 
