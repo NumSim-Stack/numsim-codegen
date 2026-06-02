@@ -256,20 +256,23 @@ The codebase uses two patterns for fallible lookups / operations:
 
 | Failure shape | Idiom | Example |
 |---|---|---|
-| **≥2 distinguishable failure modes** the caller may want to react to differently | `std::expected<T, ErrorEnum>` | `find_tensor_symbol(pctx, name)` — returns `expected<SymbolDecl const*, LookupError>` distinguishing `NotFound` from `WrongKind` |
-| **One binary failure mode** ("absent" / "wrong context") | Nullable pointer + canonical throwing wrapper | `try_mutable_model()` returns `ConstitutiveModel*`; `require_mutable_model(pass_name)` throws |
+| **≥2 failure modes the caller may want to distinguish AND act on differently** | `std::expected<T, ErrorEnum>` | `find_tensor_symbol(pctx, name)` — returns `expected<SymbolDecl const*, LookupError>` distinguishing `NotFound` from `WrongKind` |
+| **One binary failure mode**, OR ≥2 modes that every call site treats identically | Nullable pointer + canonical throwing wrapper | `try_mutable_model()` returns `ConstitutiveModel*`; `require_mutable_model(pass_name)` throws |
 
-Rationale: `std::expected<T, SingleErrorEnum>` adds machinery without information when the failure has only one variant — it's `std::optional<T>` with ceremony. Nullable pointer + `try_*` naming is the established C++ idiom for "absence is the only failure" and pairs naturally with a throwing wrapper that converts to an exception at the API boundary.
+Rationale: `std::expected<T, SingleErrorEnum>` adds machinery without adding distinguishable failure information when the failure has only one variant — equivalent to a nullable pointer at the information level. If two modes exist but every call site treats them the same way (e.g. all → "give up"), the type-system distinction is dead weight; collapse to nullable + a single throwing wrapper. Migrate to `std::expected` only when at least one caller branches on the error tag.
 
-If a future helper grows a genuinely new failure mode that callers should distinguish, migrate from nullable to `std::expected` with an explicit error enum. Don't add `Ambiguous` to an existing `LookupError`-style enum just because two helpers share two of the three modes; introduce a sibling enum.
+**Naming convention:**
+- `try_*` for operations that are inherently conditional (the request itself may be answered "no, not available here" — e.g. `try_mutable_model()` on a const view)
+- `find_*` for searching a collection (the request is well-formed; the answer is whether a match exists — e.g. `find_input_by_role()`, `find_tensor_symbol()`)
+
+Both prefixes pair with the nullable / `expected` idiom appropriate to the failure shape.
+
+If a future helper grows a genuinely new failure mode that callers should distinguish, migrate from nullable to `std::expected` with an explicit error enum. For an existing `expected`-typed helper that gains a new mode (e.g. `Ambiguous`): consider a sibling enum vs extending the existing one based on whether the new mode is *semantically a lookup error* or *a different operation*. Don't expand `LookupError` globally just because two helpers share two of three modes.
 
 ### 6.2 Host-compiler baseline (CI)
 
-The library targets C++23 and uses `std::expected` / `std::format` / `std::span`. The CI matrix runs:
+The library targets C++23 and uses `std::expected` / `std::format` / `std::span`. The CI matrix runs gcc and clang from the LLVM toolchain repo, paired with a recent libstdc++. Specifics (compiler versions, install steps) live in `.github/workflows/build.yml` — treat that file as the source of truth, not this section.
 
-- **gcc-14** (ubuntu-24.04 default — ships its own libstdc++-14)
-- **clang-19** (from `apt.llvm.org`'s LLVM toolchain repo, paired with `libstdc++-14-dev`)
-
-ubuntu-24.04's default clang-18 ships only with libstdc++-13, which lacks `std::expected`. clang-19 plus an explicitly-installed libstdc++-14 covers the C++23 features the project requires. See `.github/workflows/build.yml` for the install step shape.
+The reason a stock ubuntu-24.04 clang install doesn't suffice: clang defaults to pairing with the system libstdc++ (gcc-13 era on noble), which lacks `<expected>`. The CI workflow installs a newer libstdc++ alongside clang explicitly.
 
 Downstream consumers (MOOSE / Abaqus / standalone) target their own C++ standard for the *emitted* code (Phase A defaults to C++17), so this host-compiler baseline doesn't bleed into the generated sources.

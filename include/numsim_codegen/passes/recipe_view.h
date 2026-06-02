@@ -100,9 +100,10 @@ public:
   // **Why nullable pointer, not `std::expected`** (issue #62): this API
   // has exactly one failure mode (view holds a const arm). An
   // `std::expected<ConstitutiveModel*, SingleErrorEnum>` would always
-  // tag the failure with the same value — no information beyond what
-  // `nullptr` already conveys. `std::expected` is the right tool when
-  // failure has structured variants worth distinguishing; for binary
+  // tag the failure with the same value — adds machinery without
+  // adding distinguishable failure information beyond what `nullptr`
+  // already conveys. `std::expected` is the right tool when failure
+  // has structured variants worth distinguishing; for binary
   // present/absent the `try_*` + nullable idiom is clearer. Contrast
   // with `find_tensor_symbol` (passes/pass.h), which distinguishes
   // NotFound from WrongKind and uses `std::expected` for that reason.
