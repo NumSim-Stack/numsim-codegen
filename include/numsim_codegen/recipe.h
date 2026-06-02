@@ -1,6 +1,7 @@
 #ifndef NUMSIM_CODEGEN_RECIPE_H
 #define NUMSIM_CODEGEN_RECIPE_H
 
+#include <numsim_codegen/code_emit/code_emit_pipeline.h>
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/code_emit/leaf_collector.h>
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
@@ -217,7 +218,7 @@ public:
   // artifacts for the emit pipeline must run inside the same
   // emit_compute_function() invocation, not a separate validate() call.
   void validate() const {
-    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt};
+    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt, {}};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
     pm.emplace<TensorSpaceConsistencyPass>();
@@ -231,7 +232,7 @@ public:
   // Future phases (TimeIntegrationPass, AlgorithmicTangentPass, …) plug
   // additional passes into this same pipeline.
   [[nodiscard]] auto emit_compute_function() const -> std::string {
-    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt};
+    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt, {}};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
     pm.emplace<TensorSpaceConsistencyPass>();
@@ -348,25 +349,66 @@ private:
 //
 // Declared in passes/recipe_view.h; defined here because ConstitutiveModel
 // must be complete to instantiate the delegations.
+//
+// P1: each delegate visits through the variant to get a `const
+// ConstitutiveModel *` (the non-const arm decays to const for read
+// access). The lambda is `inline` and the visit body is one line —
+// optimisers should fold it to the same code as the pre-P1 direct
+// pointer dereference.
+
+namespace detail {
+inline auto recipe_view_const_ptr(
+    std::variant<ConstitutiveModel const *, ConstitutiveModel *> const &v)
+    noexcept -> ConstitutiveModel const * {
+  return std::visit(
+      [](auto const *p) -> ConstitutiveModel const * { return p; }, v);
+}
+} // namespace detail
 
 inline auto RecipeView::name() const -> std::string const & {
-  return m_model->name();
+  return detail::recipe_view_const_ptr(m_model)->name();
 }
 
 inline auto RecipeView::symbols() const -> std::vector<SymbolDecl> const & {
-  return m_model->symbols();
+  return detail::recipe_view_const_ptr(m_model)->symbols();
 }
 
 inline auto RecipeView::outputs() const -> std::vector<OutputDecl> const & {
-  return m_model->outputs();
+  return detail::recipe_view_const_ptr(m_model)->outputs();
 }
 
 inline auto RecipeView::scalar_symbol_map() const -> ScalarSymbolMap const & {
-  return m_model->scalar_symbol_map();
+  return detail::recipe_view_const_ptr(m_model)->scalar_symbol_map();
 }
 
 inline auto RecipeView::tensor_symbol_map() const -> TensorSymbolMap const & {
-  return m_model->tensor_symbol_map();
+  return detail::recipe_view_const_ptr(m_model)->tensor_symbol_map();
+}
+
+// ─── PassContext symbol-lookup helpers ───────────────────────────────
+//
+// Declared in passes/pass.h; defined here because SymbolDecl::Kind is
+// only complete after the ConstitutiveModel class body. The lookup
+// values are `std::size_t` indices into `model.symbols()` (post-C1
+// fixup — see REVIEW-pr-57.md); these helpers resolve the index
+// through the model and apply the kind discriminator in one place.
+
+[[nodiscard]] inline auto find_tensor_symbol(PassContext const &pctx,
+                                             std::string const &name) noexcept
+    -> SymbolDecl const * {
+  auto const it = pctx.symbol_lookup.find(name);
+  if (it == pctx.symbol_lookup.end()) {
+    return nullptr;
+  }
+  auto const &symbols = pctx.model.symbols();
+  if (it->second >= symbols.size()) {
+    return nullptr; // Defensive: shouldn't happen if SVP populated correctly.
+  }
+  auto const &decl = symbols[it->second];
+  if (decl.kind != SymbolDecl::Kind::Tensor) {
+    return nullptr;
+  }
+  return &decl;
 }
 
 // ─── Function-frame rendering (free functions) ───────────────────────
@@ -485,6 +527,17 @@ inline auto render_compute_function(
 inline void SymbolValidationPass::run(PassContext &pctx) {
   auto const &model = pctx.model;
 
+  // P4 (post-fixup C1): build the name → index lookup once. Indices
+  // survive any future `m_symbols.push_back()` reallocation, whereas
+  // the original SymbolDecl pointers would silently dangle the first
+  // time a Phase 2 mutating pass synthesised a new symbol. Consumers
+  // resolve through `find_tensor_symbol` (one indirection per lookup;
+  // a fair trade for eliminating the dangling class).
+  auto const &symbols = model.symbols();
+  for (std::size_t i = 0; i < symbols.size(); ++i) {
+    pctx.symbol_lookup.emplace(symbols[i].name, i);
+  }
+
   // (1) C++ identifier validity on declared symbol names. We check
   // *declared* names (not user-typed reference strings) — the cas
   // expression layer accepts anything for tensor("foo-bar", ...), so the
@@ -582,17 +635,18 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
   // validate end-to-end). The current shallow check exists primarily
   // to validate the framework with a second non-trivial pass before
   // Phase 2 wires expression rewriters into the same PassContext.
+  // P4 (post-fixup M3): one-shot lookup via the canonical helper. The
+  // pre-P4 body did a linear scan over model.symbols() inside this
+  // loop, giving O(N·M); the post-P4-pre-fixup body open-coded
+  // `find + kind == Tensor`, which would duplicate across every
+  // Phase 2 validator. `find_tensor_symbol` is the single canonical
+  // join.
   for (auto const &[name, expr] : model.tensor_symbol_map()) {
-    // Find the matching SymbolDecl to learn its Role.
-    Role const *role_ptr = nullptr;
-    for (auto const &s : model.symbols()) {
-      if (s.name == name && s.kind == SymbolDecl::Kind::Tensor) {
-        role_ptr = &s.role;
-        break;
-      }
+    auto const *decl = find_tensor_symbol(pctx, name);
+    if (decl == nullptr) {
+      continue; // Should not happen — SymbolValidationPass guards it.
     }
-    if (role_ptr == nullptr)
-      continue; // Should not happen — SymbolValidationPass would have caught.
+    Role const *role_ptr = &decl->role;
 
     auto const &t = expr.get();
     auto const &space_opt = t.space();
@@ -629,24 +683,11 @@ inline void CodeEmitPass::run(PassContext &pctx) {
   auto const &model = pctx.model;
   auto &ctx = pctx.ctx;
 
-  ScalarCodeEmit scalar_emit(ctx);
-
-  // M3: TensorCodeEmit now requires a T2sApply at construction. The
-  // tensor↔t2s visitor cycle is broken via a unique_ptr indirection:
-  // tensor_emit gets a callback that dispatches through `t2s_emit_storage`
-  // (empty at this point). We then populate the storage with the real
-  // TensorToScalarCodeEmit (which itself takes tensor_emit by reference).
-  // The callback is only invoked DURING apply() below, well after the
-  // storage has been emplaced — no UB.
-  auto t2s_emit_storage = std::unique_ptr<TensorToScalarCodeEmit>{};
-  TensorCodeEmit tensor_emit(ctx, scalar_emit,
-      [&t2s_emit_storage](auto const &e) {
-        return t2s_emit_storage->apply(e);
-      });
-  t2s_emit_storage = std::make_unique<TensorToScalarCodeEmit>(
-      ctx, scalar_emit, tensor_emit);
-  // (no named reference — the lambda captures t2s_emit_storage directly;
-  //  a named alias would invite future direct-call bypass.)
+  // P2: cycle-break is now encapsulated in CodeEmitPipeline. The class
+  // owns the three emitters + closes the TensorCodeEmit ↔
+  // TensorToScalarCodeEmit cycle internally. See its header for the
+  // construction-order reasoning.
+  CodeEmitPipeline pipeline(ctx);
 
   for (auto const &[name, expr] : model.scalar_symbol_map()) {
     ctx.register_symbol_scalar(expr, name);
@@ -664,9 +705,9 @@ inline void CodeEmitPass::run(PassContext &pctx) {
           if constexpr (std::is_same_v<
                             T,
                             cas::expression_holder<cas::scalar_expression>>) {
-            return scalar_emit.apply(e);
+            return pipeline.scalar().apply(e);
           } else {
-            return tensor_emit.apply(e);
+            return pipeline.tensor().apply(e);
           }
         },
         out.expr));

@@ -4,12 +4,16 @@
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/passes/recipe_view.h>
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace numsim::codegen {
+
+struct SymbolDecl;
 
 // Shared state for a single PassManager invocation. Passes read the
 // recipe via `model` (a RecipeView — const-only today, will gain a
@@ -18,11 +22,37 @@ namespace numsim::codegen {
 // deposit their final products into the output slots below. Phase 1.2
 // only needs one output slot (the rendered compute function); Phase
 // 2/3 will add more (tangent source, state-variable wiring, etc.).
+//
+// `symbol_lookup` (P4 in issue #56) is populated by SymbolValidationPass
+// during validation and consumed by downstream passes (e.g.
+// TensorSpaceConsistencyPass) that need to resolve a symbol name to its
+// SymbolDecl. Empty until SymbolValidationPass runs; populating it is
+// part of that pass's contract.
+//
+// **Value is an INDEX into `model.symbols()`, not a pointer.** Pre-fixup
+// the value type was `SymbolDecl const *`, which dangled the moment any
+// Phase 2 mutating pass `push_back`-ed onto `m_symbols` and reallocated
+// the vector. Indices survive vector growth at the cost of one
+// indirection per lookup. The free function `find_tensor_symbol` below
+// hides the indirection and provides the canonical "look up a symbol
+// known to be a tensor" entry point.
 struct PassContext {
   RecipeView model;
   CodeGenContext ctx;
   std::optional<std::string> compute_function_source;
+  std::unordered_map<std::string, std::size_t> symbol_lookup;
 };
+
+// Convenience: resolve a name to its SymbolDecl, requiring it to be a
+// tensor. Returns nullptr if the name is not in the lookup OR the
+// corresponding SymbolDecl is not a tensor. Centralises the
+// "find + kind == Tensor" check that would otherwise duplicate across
+// every validator (M3 in REVIEW-pr-57.md). Definition lives in recipe.h
+// where `ConstitutiveModel::symbols()` and `SymbolDecl::Kind` are
+// complete.
+[[nodiscard]] inline auto find_tensor_symbol(PassContext const &pctx,
+                                             std::string const &name) noexcept
+    -> SymbolDecl const *;
 
 // Abstract base for a single codegen pass.
 //

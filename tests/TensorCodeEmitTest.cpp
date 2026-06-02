@@ -3,6 +3,7 @@
 // leaf and tensor-operator emit case fail in isolation rather than as a
 // substring inside the larger generated source.
 
+#include <numsim_codegen/code_emit/code_emit_pipeline.h>
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_code_emit.h>
@@ -32,9 +33,9 @@ namespace {
 //
 // If you're authoring a test that constructs a
 // `tensor_to_scalar_with_tensor_mul` node (or any future cross-domain
-// tensor node carrying a t2s subterm), DO NOT use this stub — use the
-// `std::unique_ptr<TensorToScalarCodeEmit>` cycle-break pattern instead
-// (see `T2sWithTensorMulMultipliesScalarByTensor` for the template).
+// tensor node carrying a t2s subterm), DO NOT use this stub — construct
+// a `CodeEmitPipeline` instead (see `T2sWithTensorMulMultipliesScalarByTensor`
+// for the pattern).
 inline auto throwing_t2s_apply() -> TensorCodeEmit::T2sApply {
   return [](auto const &) -> std::string {
     throw std::logic_error(
@@ -665,19 +666,11 @@ TEST(TensorCodeEmit, T2sWithTensorMulMultipliesScalarByTensor) {
   // trace(A) * B — t2s on the rhs, tensor on the lhs. Expect the t2s
   // callback to fire and the emit to read `<trace_emit> * <tensor>`.
   //
-  // M3: the cycle (tensor_emit needs t2s callback; t2s_emit holds
-  // tensor_emit&) is broken via unique_ptr indirection — see the same
-  // pattern in CodeEmitPass::run.
+  // P2: cycle-break is now encapsulated in CodeEmitPipeline. Tests that
+  // need the full t2s pipeline construct one, skipping the per-test
+  // unique_ptr dance.
   CodeGenContext ctx;
-  ScalarCodeEmit scalar_emit(ctx);
-
-  auto t2s_emit_storage = std::unique_ptr<TensorToScalarCodeEmit>{};
-  TensorCodeEmit tensor_emit(ctx, scalar_emit,
-      [&t2s_emit_storage](auto const &e) {
-        return t2s_emit_storage->apply(e);
-      });
-  t2s_emit_storage = std::make_unique<TensorToScalarCodeEmit>(
-      ctx, scalar_emit, tensor_emit);
+  CodeEmitPipeline pipeline(ctx);
 
   auto A = cas::make_expression<cas::tensor>("A", 3, 2);
   auto B = cas::make_expression<cas::tensor>("B", 3, 2);
@@ -685,7 +678,7 @@ TEST(TensorCodeEmit, T2sWithTensorMulMultipliesScalarByTensor) {
   ctx.register_symbol_tensor(B, "B");
 
   auto tr_A = cas::make_expression<cas::tensor_trace>(A);
-  tensor_emit.apply(
+  pipeline.tensor().apply(
       cas::make_expression<cas::tensor_to_scalar_with_tensor_mul>(B, tr_A));
   auto rendered = ctx.render_statements();
   EXPECT_NE(rendered.find("tmech::trace(A)"), std::string::npos)

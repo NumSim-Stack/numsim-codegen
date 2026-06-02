@@ -2,6 +2,7 @@
 #define NUMSIM_CODEGEN_SYMBOL_VALIDATION_PASS_H
 
 #include <numsim_codegen/passes/pass.h>
+#include <numsim_codegen/passes/pass_tags.h>
 // NOTE: include order — `run()` is defined in recipe.h after
 // ConstitutiveModel is complete. Any TU instantiating this pass must
 // include recipe.h; in practice recipe.h is the only constructor site.
@@ -33,7 +34,7 @@ public:
   }
   [[nodiscard]] auto postconditions() const
       -> std::vector<std::string_view> override {
-    return {"symbols-declared", "identifiers-valid"};
+    return {pass_tags::symbols_declared, pass_tags::identifiers_valid};
   }
   void run(PassContext &pctx) override; // defined in recipe.h after class.
 

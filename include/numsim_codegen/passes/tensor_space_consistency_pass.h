@@ -2,6 +2,7 @@
 #define NUMSIM_CODEGEN_TENSOR_SPACE_CONSISTENCY_PASS_H
 
 #include <numsim_codegen/passes/pass.h>
+#include <numsim_codegen/passes/pass_tags.h>
 
 namespace numsim::codegen {
 
@@ -40,11 +41,14 @@ public:
     // satisfies them transitively today, but stating the full dependency
     // up front keeps the precondition graph self-documenting for future
     // passes that may want to insert between the two validators.
-    return {"symbols-declared", "identifiers-valid"};
+    return {pass_tags::symbols_declared, pass_tags::identifiers_valid};
   }
   [[nodiscard]] auto postconditions() const
       -> std::vector<std::string_view> override {
-    return {"tensor-space-validated"};
+    // P6: renamed from `tensor-space-validated`. Today's pass only checks
+    // declaration-level consistency. Phase 2 will introduce
+    // `tensor_space_inferred` for the stronger end-to-end guarantee.
+    return {pass_tags::tensor_space_declarations_checked};
   }
   void run(PassContext &pctx) override; // defined in recipe.h.
 };
