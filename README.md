@@ -106,7 +106,18 @@ factory + a registry entry — no other code changes required.
 
 ## Build
 
-CMake 3.20+, C++23, GCC 14 or Clang 18 or MSVC 19.30+.
+CMake 3.20+, C++23, GCC 14 or Clang 19 or MSVC 19.30+.
+
+Clang 18 is **not in the CI matrix** — ubuntu-24.04 defaults to pairing
+it with libstdc++-13, which lacks the C++23 `<expected>` header. The
+workaround of manually installing `libstdc++-14-dev` alongside clang-18
+is untested and unsupported here. The supported clang path is clang-19
+from the LLVM toolchain repo paired with `libstdc++-14-dev` — see
+`docs/workflow.md` §6.2 and `.github/workflows/build.yml`.
+
+To verify your toolchain: `clang++ --version` should report ≥19, and the
+libstdc++ it picks up should be ≥14 (check with
+`echo "#include <expected>" | $CXX -std=c++23 -x c++ -E - > /dev/null`).
 
 ```bash
 git clone https://github.com/NumSim-Stack/numsim-codegen.git

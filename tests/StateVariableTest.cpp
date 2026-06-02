@@ -165,13 +165,13 @@ TEST(StateVariable, FindTensorSymbolResolvesTensorStateVarBothHandles) {
   PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt, {}};
   SymbolValidationPass{}.run(pctx);
 
-  auto const *cur = find_tensor_symbol(pctx, "eps_p");
-  ASSERT_NE(cur, nullptr);
-  EXPECT_EQ(cur->category, SymbolDecl::Category::StateVariableCurrent);
+  auto cur = find_tensor_symbol(pctx, "eps_p");
+  ASSERT_TRUE(cur.has_value());
+  EXPECT_EQ((*cur)->category, SymbolDecl::Category::StateVariableCurrent);
 
-  auto const *old = find_tensor_symbol(pctx, "eps_p_old");
-  ASSERT_NE(old, nullptr);
-  EXPECT_EQ(old->category, SymbolDecl::Category::StateVariableOld);
+  auto old = find_tensor_symbol(pctx, "eps_p_old");
+  ASSERT_TRUE(old.has_value());
+  EXPECT_EQ((*old)->category, SymbolDecl::Category::StateVariableOld);
 }
 
 // ─── Name-collision protection (M1+M2 in REVIEW-pr-58.md) ───────────

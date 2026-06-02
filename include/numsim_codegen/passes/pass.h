@@ -5,6 +5,7 @@
 #include <numsim_codegen/passes/recipe_view.h>
 
 #include <cstddef>
+#include <expected>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -43,16 +44,34 @@ struct PassContext {
   std::unordered_map<std::string, std::size_t> symbol_lookup;
 };
 
+// Why a symbol lookup failed. The pre-modernization API returned a
+// nullable `SymbolDecl const *`, which collapsed two genuinely distinct
+// failure modes into one — callers that wanted to distinguish "no
+// symbol with this name" from "symbol exists but is scalar, not tensor"
+// had to inspect the model separately. Issue #62 item 1.
+//
+// **Reuse policy for Phase 2.2+ helpers** (per `docs/workflow.md`'s
+// fallible-API convention): future symbol-lookup helpers
+// (`find_state_variable_by_name` from issue #59, etc.) that share
+// these two failure modes should reuse this enum, NOT introduce
+// per-helper error types. If a future helper grows a genuinely third
+// failure mode (e.g. `Ambiguous` for multi-match), introduce a sibling
+// enum at that point rather than expanding `LookupError` globally.
+enum class LookupError {
+  NotFound, // name absent from symbol_lookup
+  WrongKind // name present but the resolved SymbolDecl is not a tensor
+};
+
 // Convenience: resolve a name to its SymbolDecl, requiring it to be a
-// tensor. Returns nullptr if the name is not in the lookup OR the
-// corresponding SymbolDecl is not a tensor. Centralises the
-// "find + kind == Tensor" check that would otherwise duplicate across
-// every validator (M3 in REVIEW-pr-57.md). Definition lives in recipe.h
-// where `ConstitutiveModel::symbols()` and `SymbolDecl::Kind` are
-// complete.
+// tensor. Returns std::expected — on success, a non-null SymbolDecl *;
+// on failure, a LookupError that distinguishes "not found" from "found
+// but wrong kind". Centralises the "find + kind == Tensor" check that
+// would otherwise duplicate across every validator (M3 in
+// REVIEW-pr-57.md). Definition lives in recipe.h where
+// `ConstitutiveModel::symbols()` and `SymbolDecl::Kind` are complete.
 [[nodiscard]] inline auto find_tensor_symbol(PassContext const &pctx,
                                              std::string const &name) noexcept
-    -> SymbolDecl const *;
+    -> std::expected<SymbolDecl const *, LookupError>;
 
 // Abstract base for a single codegen pass.
 //
