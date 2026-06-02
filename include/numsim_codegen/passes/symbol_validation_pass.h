@@ -34,7 +34,8 @@ public:
   }
   [[nodiscard]] auto postconditions() const
       -> std::vector<std::string_view> override {
-    return {pass_tags::symbols_declared, pass_tags::identifiers_valid};
+    return {pass_tags::symbols_declared, pass_tags::identifiers_valid,
+            pass_tags::state_variables_declared};
   }
   void run(PassContext &pctx) override; // defined in recipe.h after class.
 

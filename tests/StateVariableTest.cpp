@@ -316,4 +316,97 @@ TEST(StateVariable, StateVarUsableInOutputExpression) {
       << "_old value appears as const input param: " << src;
 }
 
+// ─── Phase 2.2 prep (issue #59) ──────────────────────────────────────
+
+TEST(StateVariablePhase22Prep, AlignmentInvariantValidatesScalarAndTensor) {
+  // Item 1 / REVIEW-pr-58.md m1: validate() runs the
+  // validate_state_variable_symbol_alignment() invariant check before
+  // the pass pipeline. A well-formed recipe with both scalar and tensor
+  // state variables (interleaved with inputs + parameters so indices
+  // land at non-trivial offsets) must pass.
+  ConstitutiveModel model("M");
+  auto K = model.add_parameter("K", 1.0);
+  (void)model.add_scalar_input("eps_v");
+  auto alpha = model.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  (void)K;
+  (void)alpha;
+  auto eps_p_init = cas::make_expression<cas::tensor_zero>(3, 2);
+  (void)model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
+
+  EXPECT_NO_THROW(model.validate());
+
+  // Indices land where add_*_state_variable claims they do:
+  for (auto const &sv : model.state_variables()) {
+    auto const &cur = model.symbols()[sv.current_symbol_idx];
+    auto const &old = model.symbols()[sv.old_symbol_idx];
+    EXPECT_EQ(cur.name, sv.name);
+    EXPECT_EQ(old.name, sv.name + "_old");
+    EXPECT_EQ(cur.kind, sv.kind);
+    EXPECT_EQ(old.kind, sv.kind);
+    EXPECT_EQ(cur.category, SymbolDecl::Category::StateVariableCurrent);
+    EXPECT_EQ(old.category, SymbolDecl::Category::StateVariableOld);
+    if (sv.kind == SymbolDecl::Kind::Tensor) {
+      EXPECT_EQ(cur.dim, sv.dim);
+      EXPECT_EQ(cur.rank, sv.rank);
+      EXPECT_EQ(old.dim, sv.dim);
+      EXPECT_EQ(old.rank, sv.rank);
+    }
+  }
+}
+
+TEST(StateVariablePhase22Prep, SymbolValidationPassAdvertisesStateVarsTag) {
+  // Item 2 / REVIEW-pr-58.md m2: SymbolValidationPass advertises
+  // `state_variables_declared` unconditionally, including for recipes
+  // with zero state variables. Phase 2.2's TimeIntegrationPass will
+  // declare this as a precondition.
+  SymbolValidationPass pass;
+  auto const post = pass.postconditions();
+  bool found = false;
+  for (auto const &tag : post) {
+    if (tag == pass_tags::state_variables_declared) {
+      found = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found)
+      << "SymbolValidationPass must advertise state_variables_declared";
+
+  // The tag must be satisfied even when the recipe has no state vars:
+  ConstitutiveModel pure_elastic("E");
+  (void)pure_elastic.add_parameter("mu", 0.5);
+  EXPECT_NO_THROW(pure_elastic.validate());
+}
+
+TEST(StateVariablePhase22Prep, FindStateVariableByName) {
+  // Item 3 / REVIEW-pr-58.md m3: find_state_variable_by_name resolves
+  // a name to its StateVariable record. Returns nullptr on miss.
+  ConstitutiveModel model("M");
+  (void)model.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  auto eps_p_init = cas::make_expression<cas::tensor_zero>(3, 2);
+  (void)model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
+
+  PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt, {}};
+
+  auto const *alpha_sv = find_state_variable_by_name(pctx, "alpha");
+  ASSERT_NE(alpha_sv, nullptr);
+  EXPECT_EQ(alpha_sv->name, "alpha");
+  EXPECT_EQ(alpha_sv->kind, SymbolDecl::Kind::Scalar);
+
+  auto const *eps_p_sv = find_state_variable_by_name(pctx, "eps_p");
+  ASSERT_NE(eps_p_sv, nullptr);
+  EXPECT_EQ(eps_p_sv->name, "eps_p");
+  EXPECT_EQ(eps_p_sv->kind, SymbolDecl::Kind::Tensor);
+
+  // The paired `_old` symbol is NOT itself a StateVariable record — it
+  // is a SymbolDecl whose owning StateVariable is named without the
+  // suffix. Looking up by the suffixed name must miss.
+  EXPECT_EQ(find_state_variable_by_name(pctx, "alpha_old"), nullptr);
+
+  // Unrelated names miss.
+  EXPECT_EQ(find_state_variable_by_name(pctx, "nope"), nullptr);
+  EXPECT_EQ(find_state_variable_by_name(pctx, ""), nullptr);
+}
+
 } // namespace numsim::codegen

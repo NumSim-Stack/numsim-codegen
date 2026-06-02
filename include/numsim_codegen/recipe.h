@@ -382,6 +382,7 @@ public:
   // artifacts for the emit pipeline must run inside the same
   // emit_compute_function() invocation, not a separate validate() call.
   void validate() const {
+    validate_state_variable_symbol_alignment();
     PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt, {}};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
@@ -396,6 +397,7 @@ public:
   // Future phases (TimeIntegrationPass, AlgorithmicTangentPass, …) plug
   // additional passes into this same pipeline.
   [[nodiscard]] auto emit_compute_function() const -> std::string {
+    validate_state_variable_symbol_alignment();
     PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt, {}};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
@@ -488,6 +490,73 @@ public:
   }
 
 private:
+  // Phase 2.2 prep (issue #59 / REVIEW-pr-58.md m1): structural-integrity
+  // invariant linking `m_state_variables` and `m_symbols`.
+  //
+  // Today the two are dual sources of truth: `add_*_state_variable`
+  // writes to both atomically, so an externally-visible mismatch can't
+  // arise from the public API alone. The check guards against:
+  //   (a) Phase 2.2+ mutating passes that synthesise / replace state
+  //       variables and forget to keep the paired SymbolDecls aligned;
+  //   (b) a future internal codepath constructing a StateVariable
+  //       directly (bypassing the add methods);
+  //   (c) post-construction mutation of m_symbols by a not-yet-existing
+  //       refactor pass that reorders / removes entries.
+  //
+  // Runs from validate() and emit_compute_function() before the pass
+  // pipeline so downstream passes can rely on the invariant. Throws
+  // std::runtime_error naming the offending state variable + the
+  // specific mismatch — silent corruption is worse than a loud throw.
+  void validate_state_variable_symbol_alignment() const {
+    auto check = [&](std::size_t idx, std::string_view expected_name,
+                     SymbolDecl::Category expected_cat,
+                     StateVariable const &sv, char const *which) {
+      if (idx >= m_symbols.size()) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': StateVariable '{}' carries {} index "
+            "{} which is out of bounds for m_symbols (size {}). State "
+            "variable / symbol vectors are out of sync.",
+            m_name, sv.name, which, idx, m_symbols.size()));
+      }
+      auto const &s = m_symbols[idx];
+      if (s.name != expected_name) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': StateVariable '{}' {} index points "
+            "to SymbolDecl named '{}'; expected '{}'.",
+            m_name, sv.name, which, s.name, expected_name));
+      }
+      if (s.category != expected_cat) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': StateVariable '{}' {} symbol has "
+            "wrong Category. State variable / symbol vectors are out of "
+            "sync.",
+            m_name, sv.name, which));
+      }
+      if (s.kind != sv.kind) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': StateVariable '{}' {} symbol has "
+            "Kind mismatched against the state-variable record.",
+            m_name, sv.name, which));
+      }
+      if (sv.kind == SymbolDecl::Kind::Tensor &&
+          (s.dim != sv.dim || s.rank != sv.rank)) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': StateVariable '{}' {} symbol has "
+            "dim/rank ({}, {}) mismatched against the state-variable "
+            "record ({}, {}).",
+            m_name, sv.name, which, s.dim, s.rank, sv.dim, sv.rank));
+      }
+    };
+    for (auto const &sv : m_state_variables) {
+      check(sv.current_symbol_idx, sv.name,
+            SymbolDecl::Category::StateVariableCurrent, sv, "current");
+      auto const old_name =
+          sv.name + std::string{state_variable_old_suffix};
+      check(sv.old_symbol_idx, old_name,
+            SymbolDecl::Category::StateVariableOld, sv, "old");
+    }
+  }
+
   // Phase 2.1 (M1+M2 in REVIEW-pr-58.md): reject a duplicate symbol
   // name at add time, with a clear pipeline-misconfiguration message.
   // Two collision modes this catches:
@@ -632,6 +701,17 @@ inline auto RecipeView::tensor_symbol_map() const -> TensorSymbolMap const & {
     return std::unexpected(LookupError::WrongKind);
   }
   return &decl;
+}
+
+[[nodiscard]] inline auto find_state_variable_by_name(
+    PassContext const &pctx, std::string_view name) noexcept
+    -> StateVariable const * {
+  for (auto const &sv : pctx.model.state_variables()) {
+    if (sv.name == name) {
+      return &sv;
+    }
+  }
+  return nullptr;
 }
 
 // ─── Function-frame rendering (free functions) ───────────────────────

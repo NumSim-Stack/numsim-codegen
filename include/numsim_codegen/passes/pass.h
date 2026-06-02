@@ -15,6 +15,7 @@
 namespace numsim::codegen {
 
 struct SymbolDecl;
+struct StateVariable;
 
 // Shared state for a single PassManager invocation. Passes read the
 // recipe via `model` (a RecipeView — const-only today, will gain a
@@ -72,6 +73,20 @@ enum class LookupError {
 [[nodiscard]] inline auto find_tensor_symbol(PassContext const &pctx,
                                              std::string const &name) noexcept
     -> std::expected<SymbolDecl const *, LookupError>;
+
+// Convenience: resolve a name to its StateVariable record. Returns
+// nullable pointer rather than `std::expected` per `docs/workflow.md`
+// §6.1 — only one failure mode ("no state variable with this name")
+// that the caller could distinguish. Linear scan over
+// `pctx.model.state_variables()`; state-variable counts are small
+// (single-digit typical, tens worst-case for multi-surface plasticity)
+// so the scan is fine. Could be promoted to a populated map in
+// PassContext if that ever changes. Issue #59 / REVIEW-pr-58.md m3.
+//
+// Definition lives in recipe.h where `StateVariable` is complete.
+[[nodiscard]] inline auto find_state_variable_by_name(
+    PassContext const &pctx, std::string_view name) noexcept
+    -> StateVariable const *;
 
 // Abstract base for a single codegen pass.
 //

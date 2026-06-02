@@ -36,6 +36,17 @@ namespace numsim::codegen::pass_tags {
 inline constexpr std::string_view symbols_declared = "symbols-declared";
 inline constexpr std::string_view identifiers_valid = "identifiers-valid";
 
+// SymbolValidationPass postcondition for Phase 2.1+ state variables
+// (issue #59 / REVIEW-pr-58.md m2). Phase 2.2's TimeIntegrationPass
+// materially depends on state variables being declared (it lowers
+// `Dt(α) → (α − α_old)/dt` by looking up the pair). The tag means
+// "checked," not "non-empty" — SymbolValidationPass advertises it
+// unconditionally after walking `state_variables()`. Recipes without
+// internal state (pure elasticity) still satisfy the postcondition with
+// an empty `state_variables()` span.
+inline constexpr std::string_view state_variables_declared =
+    "state-variables-declared";
+
 // TensorSpaceConsistencyPass postcondition. Renamed from the original
 // `tensor-space-validated` per P6 — the original overpromised; Phase 2's
 // expression-level inference pass will use a separate tag.
