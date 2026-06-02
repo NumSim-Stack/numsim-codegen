@@ -29,6 +29,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -128,6 +129,22 @@ private:
   // API into ConstRecipeView/MutableRecipeView types. The const surface
   // (every other accessor) works identically for either variant arm.
   std::variant<ConstitutiveModel const *, ConstitutiveModel *> m_model;
+
+  // The const RecipeView delegates (`symbols()`, `outputs()`, etc.) are
+  // declared `noexcept` and their bodies call `std::visit` on `m_model`.
+  // `std::visit` is not standardly `noexcept` — it can throw
+  // `std::bad_variant_access` if the variant is `valueless_by_exception`.
+  // We rely on the runtime invariant that `m_model` is constructed only
+  // by the two `noexcept` constructors above, which assign a pointer and
+  // can never leave the variant valueless. These asserts lock that
+  // invariant into the type system: any future code path that introduces
+  // a potentially-throwing assignment to `m_model` will fail to compile,
+  // catching the regression where the `noexcept` delegates would
+  // otherwise silently `std::terminate`.
+  static_assert(std::is_nothrow_constructible_v<
+                decltype(m_model), ConstitutiveModel const *>);
+  static_assert(std::is_nothrow_constructible_v<
+                decltype(m_model), ConstitutiveModel *>);
 };
 
 } // namespace numsim::codegen
