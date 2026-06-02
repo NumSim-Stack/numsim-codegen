@@ -11,7 +11,8 @@ User-facing flow from recipe construction to generated source on disk.
 ```mermaid
 flowchart TD
     A[User builds ConstitutiveModel] --> B[add_scalar_input<br/>add_tensor_input<br/>add_parameter]
-    B --> C[add_output with semantic Role]
+    B --> SV[add_scalar_state_variable<br/>add_tensor_state_variable<br/>&#40;Phase 2.1&#41;]
+    SV --> C[add_output with semantic Role]
     C --> D[Pick a Target<br/>StandaloneCxx / MooseMaterial / ...]
     D --> E[Target.emit&#40;model&#41;]
     E --> F[Target calls<br/>model.emit_compute_function&#40;&#41;]
@@ -21,7 +22,18 @@ flowchart TD
 
     style F fill:#e1f5e1
     style G fill:#fff4d6
+    style SV fill:#e1f0ff
 ```
+
+**Phase 2.1 addition (blue node):** state variables declare a pair of
+symbols per entry — `<name>` for the value the recipe writes (Newton
+iterates on this) and `<name>_old` for the framework-supplied
+previous-step value. Both live in `m_symbols` with categories
+`StateVariableCurrent` / `StateVariableOld`, and flow through the same
+validation + emit pipeline as inputs and parameters. The returned
+`Handle{current, previous}` lets the user write evolution equations
+like `Dt(α.current − α.previous) = ...` that Phase 2.2's
+`TimeIntegrationPass` lowers into discrete update forms.
 
 The CAS expression DAG (numsim-cas) lives "behind" the recipe — `add_output(name, expr, role)` accepts an `expression_holder<scalar|tensor>` built via cas operators. The DAG is immutable through this entire flow; passes consume it and emit code referencing its leaves.
 
@@ -219,14 +231,17 @@ Three layers wrap or feed the pipeline above:
 
 Where future work plugs in (per epic #28 and follow-up issue #56):
 
-| Phase | Addition | Insertion point |
-|---|---|---|
-| **2** | `TimeIntegrationPass` lowering `Dt(α) → (α_new − α_old)/dt` via cas substitute | Between SymbolValidationPass and CodeEmitPass; advertises `dt-lowered` postcondition |
-| **2** | `KuhnTuckerLoweringPass` rewriting NCP constraints to Fischer-Burmeister | Between SymbolValidationPass and CodeEmitPass; advertises `kt-lowered` |
-| **2** | `LocalNewtonLoweringPass` emitting the Newton iteration body | Between lowering passes and CodeEmitPass |
-| **2** | Mutable `RecipeView` surface for the above rewrites | See #56 / P1 — sibling typed view or `variant` storage |
-| **3** | `AlgorithmicTangentPass` (consistent tangent via implicit diff) | After Newton lowering, before CodeEmitPass |
-| **3** | `TangentEmitPass` / `MoosePropertyEmitPass` (additional emit targets) | After CodeEmitPass or replacing it depending on target |
-| **3** | `CodeEmitPipeline` aggregate replacing the unique_ptr cycle break | See #56 / P2 |
+| Phase | Addition | Insertion point | Status |
+|---|---|---|---|
+| **2.1** | `StateVariable` IR + `add_*_state_variable` API + RecipeView delegate | `ConstitutiveModel`, `RecipeView`, `SymbolDecl::Category` | ✓ landed |
+| **2.2** | `TimeIntegrationPass` lowering `Dt(α) → (α − α_old)/dt` via cas substitute | Between SymbolValidationPass and CodeEmitPass; advertises `dt-lowered` postcondition | next |
+| **2.3** | `Equation` + `ComplementarityConstraint` IR types | `ConstitutiveModel` IR section | next |
+| **2.4** | `LocalNewtonSystem` IR (unknown state vars + residual expressions) | New section on `ConstitutiveModel` | next |
+| **2.5** | `KuhnTuckerLoweringPass` rewriting NCP constraints to Fischer-Burmeister | Between SymbolValidationPass and CodeEmitPass; advertises `kt-lowered` | next |
+| **2.6** | `LocalNewtonLoweringPass` emitting the Newton iteration body | Between lowering passes and CodeEmitPass | next |
+| **2.6** | MOOSE backend wiring (`getMaterialPropertyOld<>` / `declareProperty<>`) | `MooseMaterialTarget`; switches on `Category::StateVariable*` | next |
+| **2.7** | Standalone backend: state-variable buffer args | `StandaloneCxxTarget` | next |
+| **3a** | `AlgorithmicTangentPass` (consistent tangent via implicit diff) | After Newton lowering, before CodeEmitPass | future |
+| **3b** | `TangentEmitPass` / `MoosePropertyEmitPass` (additional emit targets) | After CodeEmitPass or replacing it depending on target | future |
 
 The pass framework's value proposition is exactly this: new behaviour ships as a new `Pass` subclass + a one-line `pm.emplace<...>()` registration in the pipeline. The existing passes don't need to change.
