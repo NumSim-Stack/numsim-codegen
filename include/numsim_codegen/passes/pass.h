@@ -49,6 +49,14 @@ struct PassContext {
 // failure modes into one — callers that wanted to distinguish "no
 // symbol with this name" from "symbol exists but is scalar, not tensor"
 // had to inspect the model separately. Issue #62 item 1.
+//
+// **Reuse policy for Phase 2.2+ helpers** (per `docs/workflow.md`'s
+// fallible-API convention): future symbol-lookup helpers
+// (`find_state_variable_by_name` from issue #59, etc.) that share
+// these two failure modes should reuse this enum, NOT introduce
+// per-helper error types. If a future helper grows a genuinely third
+// failure mode (e.g. `Ambiguous` for multi-match), introduce a sibling
+// enum at that point rather than expanding `LookupError` globally.
 enum class LookupError {
   NotFound, // name absent from symbol_lookup
   WrongKind // name present but the resolved SymbolDecl is not a tensor

@@ -13,8 +13,15 @@ jobs:
       fail-fast: false
       matrix:
         compiler:
+          # gcc-14 ships its own libstdc++-14 which includes the C++23
+          # standard library features the project uses (notably
+          # std::expected). Available in ubuntu-24.04 directly.
           - { name: gcc-14,    cc: gcc-14,    cxx: g++-14 }
-          - { name: clang-18,  cc: clang-18,  cxx: clang++-18 }
+          # clang-19 from the LLVM apt repo. clang-18 (the ubuntu-24.04
+          # default) picks up gcc-13's libstdc++ which lacks std::expected;
+          # bumping to clang-19 paired with libstdc++-14 covers the C++23
+          # baseline the project requires. See docs/workflow.md.
+          - { name: clang-19,  cc: clang-19,  cxx: clang++-19 }
         build_type: [Debug, Release]
 
     steps:
@@ -23,7 +30,21 @@ jobs:
       - name: Install compiler
         run: |
           sudo apt-get update
+          if [[ "${{ matrix.compiler.cxx }}" == clang* ]]; then
+            # LLVM apt repo for clang-19+. ubuntu-24.04 default ships
+            # clang up to 18 only.
+            wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | \
+              sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+            echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-19 main" | \
+              sudo tee /etc/apt/sources.list.d/llvm.list
+            sudo apt-get update
+          fi
           sudo apt-get install -y ${{ matrix.compiler.cxx }}
+          # libstdc++-14 must be installed alongside clang so it picks
+          # the newer headers (std::expected lives there).
+          if [[ "${{ matrix.compiler.cxx }}" == clang* ]]; then
+            sudo apt-get install -y libstdc++-14-dev
+          fi
 
       - name: Configure
         env:

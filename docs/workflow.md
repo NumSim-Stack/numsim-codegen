@@ -245,3 +245,31 @@ Where future work plugs in (per epic #28 and follow-up issue #56):
 | **3b** | `TangentEmitPass` / `MoosePropertyEmitPass` (additional emit targets) | After CodeEmitPass or replacing it depending on target | future |
 
 The pass framework's value proposition is exactly this: new behaviour ships as a new `Pass` subclass + a one-line `pm.emplace<...>()` registration in the pipeline. The existing passes don't need to change.
+
+---
+
+## 6. Conventions
+
+### 6.1 Fallible-API style: `std::expected` vs nullable pointer
+
+The codebase uses two patterns for fallible lookups / operations:
+
+| Failure shape | Idiom | Example |
+|---|---|---|
+| **≥2 distinguishable failure modes** the caller may want to react to differently | `std::expected<T, ErrorEnum>` | `find_tensor_symbol(pctx, name)` — returns `expected<SymbolDecl const*, LookupError>` distinguishing `NotFound` from `WrongKind` |
+| **One binary failure mode** ("absent" / "wrong context") | Nullable pointer + canonical throwing wrapper | `try_mutable_model()` returns `ConstitutiveModel*`; `require_mutable_model(pass_name)` throws |
+
+Rationale: `std::expected<T, SingleErrorEnum>` adds machinery without information when the failure has only one variant — it's `std::optional<T>` with ceremony. Nullable pointer + `try_*` naming is the established C++ idiom for "absence is the only failure" and pairs naturally with a throwing wrapper that converts to an exception at the API boundary.
+
+If a future helper grows a genuinely new failure mode that callers should distinguish, migrate from nullable to `std::expected` with an explicit error enum. Don't add `Ambiguous` to an existing `LookupError`-style enum just because two helpers share two of the three modes; introduce a sibling enum.
+
+### 6.2 Host-compiler baseline (CI)
+
+The library targets C++23 and uses `std::expected` / `std::format` / `std::span`. The CI matrix runs:
+
+- **gcc-14** (ubuntu-24.04 default — ships its own libstdc++-14)
+- **clang-19** (from `apt.llvm.org`'s LLVM toolchain repo, paired with `libstdc++-14-dev`)
+
+ubuntu-24.04's default clang-18 ships only with libstdc++-13, which lacks `std::expected`. clang-19 plus an explicitly-installed libstdc++-14 covers the C++23 features the project requires. See `.github/workflows/build.yml` for the install step shape.
+
+Downstream consumers (MOOSE / Abaqus / standalone) target their own C++ standard for the *emitted* code (Phase A defaults to C++17), so this host-compiler baseline doesn't bleed into the generated sources.

@@ -106,7 +106,12 @@ factory + a registry entry — no other code changes required.
 
 ## Build
 
-CMake 3.20+, C++23, GCC 14 or Clang 18 or MSVC 19.30+.
+CMake 3.20+, C++23, GCC 14 or Clang 19 or MSVC 19.30+.
+
+Clang 18 is **not** supported because ubuntu-24.04 packages it against
+libstdc++-13, which lacks the C++23 `<expected>` header the library uses.
+Clang 19 from the LLVM toolchain repo, paired with `libstdc++-14-dev`,
+satisfies the C++23 baseline. See `docs/workflow.md` §6.2.
 
 ```bash
 git clone https://github.com/NumSim-Stack/numsim-codegen.git
