@@ -50,6 +50,7 @@ sequenceDiagram
     participant PM as PassManager
     participant SVP as SymbolValidationPass
     participant TSP as TensorSpaceConsistencyPass
+    participant TIP as TimeIntegrationPass
     participant CEP as CodeEmitPass
     participant SE as ScalarCodeEmit
     participant TE as TensorCodeEmit
@@ -75,6 +76,12 @@ sequenceDiagram
     TSP->>TSP: cross-check Role.is_symmetric vs<br/>tensor_space.perm (Skew = conflict)
     TSP->>TSP: cross-check Role.expected_rank vs<br/>tensor.rank()
     TSP-->>PM: postconditions:<br/>{tensor-space-declarations-checked}
+
+    Note over PM,TIP: Phase 2.2: TimeIntegrationPass registered only<br/>when `m_evolution_equations` is non-empty.
+    PM->>TIP: run(pctx) [if evolution equations present]
+    TIP->>TIP: require_mutable_model("TimeIntegrationPass")
+    TIP->>TIP: for each EvolutionEquation:<br/>add_output(`<sv>_residual`, (sv − sv_old)/dt − rate)
+    TIP-->>PM: postconditions:<br/>{dt-lowered}
 
     PM->>CEP: run(pctx)
     Note over CEP: Cycle-break via<br/>unique_ptr<T2sCodeEmit> indirection
@@ -237,7 +244,7 @@ Where future work plugs in (per epic #28 and follow-up issue #56):
 | Phase | Addition | Insertion point | Status |
 |---|---|---|---|
 | **2.1** | `StateVariable` IR + `add_*_state_variable` API + RecipeView delegate | `ConstitutiveModel`, `RecipeView`, `SymbolDecl::Category` | ✓ landed |
-| **2.2** | `TimeIntegrationPass` lowering `Dt(α) → (α − α_old)/dt` via cas substitute | Between SymbolValidationPass and CodeEmitPass; advertises `dt-lowered` postcondition | next |
+| **2.2** | `EvolutionEquation` IR + `TimeIntegrationPass` lowering `Dt(α) → (α − α_old)/dt` via mutate-recipe (synthesises `<sv>_residual` outputs) | Between SymbolValidationPass and CodeEmitPass; advertises `dt-lowered` postcondition. Scalar-only; tensor evolutions deferred. | ✓ landed |
 | **2.3** | `Equation` + `ComplementarityConstraint` IR types | `ConstitutiveModel` IR section | next |
 | **2.4** | `LocalNewtonSystem` IR (unknown state vars + residual expressions) | New section on `ConstitutiveModel` | next |
 | **2.5** | `KuhnTuckerLoweringPass` rewriting NCP constraints to Fischer-Burmeister | Between SymbolValidationPass and CodeEmitPass; advertises `kt-lowered` | next |

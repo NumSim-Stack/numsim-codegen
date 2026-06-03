@@ -74,6 +74,13 @@ inline constexpr std::string_view state_variables_non_empty =
 inline constexpr std::string_view tensor_space_declarations_checked =
     "tensor-space-declarations-checked";
 
+// TimeIntegrationPass postcondition (Phase 2.2, issue #68). Advertises
+// that every evolution equation `Dt(α) = rate` declared on the recipe
+// has been lowered to a backward-Euler residual output
+// `(α − α_old)/dt − rate`. Phase 3a's `LocalNewtonLoweringPass` will
+// consume this tag as a precondition before iterating the residuals.
+inline constexpr std::string_view dt_lowered = "dt-lowered";
+
 // CodeEmitPass postcondition.
 inline constexpr std::string_view compute_function_emitted =
     "compute-function-emitted";

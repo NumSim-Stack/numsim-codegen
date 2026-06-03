@@ -12,6 +12,7 @@
 #include <numsim_codegen/passes/pass_manager.h>
 #include <numsim_codegen/passes/symbol_validation_pass.h>
 #include <numsim_codegen/passes/tensor_space_consistency_pass.h>
+#include <numsim_codegen/passes/time_integration_pass.h>
 #include <numsim_codegen/recipe_render.h>
 
 #include <numsim_cas/scalar/scalar_all.h>
@@ -173,6 +174,35 @@ struct StateVariable {
   // partner symbol — lowering passes just read these.
   std::size_t current_symbol_idx = 0;
   std::size_t old_symbol_idx = 0;
+};
+
+// Phase 2.2 (issue #68): the framework-supplied symbol used as the time
+// step in the backward-Euler discretization. Auto-registered as a
+// scalar parameter when the first evolution equation is added to a
+// recipe. Lifted to a named constant so TimeIntegrationPass and any
+// future backend wiring (MOOSE `_dt`, standalone driver argument)
+// reference the same string.
+inline constexpr std::string_view state_time_step_name = "dt";
+
+// Phase 2.2 (issue #68): declaration of a state variable's evolution.
+// "α has rate λ" → backward-Euler discretization is the residual
+// `(α − α_old)/dt − λ = 0`, which TimeIntegrationPass synthesises as
+// a new output expression. Phase 3a (issue #34) will consume that
+// residual via a local-Newton lowering; for Phase 2.2 it surfaces as
+// a regular output and the user supplies the Newton driver.
+//
+// Scalar-only in this Phase 2.2 scope — tensor evolutions are common
+// in plasticity (rate-form `Dt(ε^p) = ...`) but the Phase 2.2 scope
+// caps at scalar to keep the residual-synthesis path narrow. Tensor
+// evolutions land in a follow-up once a first consumer surfaces.
+//
+// `state_variable_idx` is an index into `m_state_variables` (not a
+// pointer or reference) — mirrors the index-based PR #58 design that
+// survives vector growth from future mutating passes.
+struct EvolutionEquation {
+  std::size_t state_variable_idx;
+  cas::expression_holder<cas::scalar_expression> rate;
+  std::string doc;
 };
 
 // Declaration of a computed output that the generated function emits.
@@ -348,6 +378,49 @@ public:
     return {current, previous};
   }
 
+  // ─── Evolution equations (Phase 2.2, issue #68) ─────────────────
+  //
+  // Declares that a state variable evolves at a given rate. Backward-
+  // Euler lowering is performed by `TimeIntegrationPass`, which
+  // synthesises `(<sv> − <sv>_old)/dt − rate` as a new scalar output.
+  //
+  // The first call to this method auto-registers a `dt` scalar
+  // parameter (default value 0.0; the framework supplies the actual
+  // time step at runtime). If the user has already declared a symbol
+  // named `dt`, that one is reused and no new symbol is registered.
+
+  auto add_scalar_evolution_equation(
+      ScalarStateVariableHandle const &state_var,
+      cas::expression_holder<cas::scalar_expression> rate,
+      std::string doc = "") -> void {
+    // The handle's `current` was created inside `add_scalar_state_variable`
+    // as `cas::make_expression<cas::scalar>(name)` — i.e. a leaf symbol
+    // node with a name. Recover the name + look up the matching record.
+    auto const sv_name = state_var.current.template get<cas::scalar>().name();
+    std::size_t found_idx = m_state_variables.size();
+    for (std::size_t i = 0; i < m_state_variables.size(); ++i) {
+      if (m_state_variables[i].kind == SymbolDecl::Kind::Scalar &&
+          m_state_variables[i].name == sv_name) {
+        found_idx = i;
+        break;
+      }
+    }
+    if (found_idx == m_state_variables.size()) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': add_scalar_evolution_equation handle "
+          "names scalar state variable '{}' but no such state variable "
+          "is registered on this model. Did the handle come from a "
+          "different ConstitutiveModel, or was the state variable added "
+          "with add_tensor_state_variable instead?",
+          m_name, sv_name));
+    }
+
+    ensure_dt_symbol_registered_();
+
+    EvolutionEquation eq{found_idx, std::move(rate), std::move(doc)};
+    m_evolution_equations.push_back(std::move(eq));
+  }
+
   // ─── Output declarations ────────────────────────────────────────
 
   void add_output(std::string name,
@@ -404,10 +477,26 @@ public:
   // Future phases (TimeIntegrationPass, AlgorithmicTangentPass, …) plug
   // additional passes into this same pipeline.
   [[nodiscard]] auto emit_compute_function() const -> std::string {
-    PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt, {}};
+    // Phase 2.2 (issue #68): TimeIntegrationPass synthesises new
+    // outputs via the mutable-RecipeView arm. Working on a copy of
+    // `*this` lets us keep `emit_compute_function()` const — the
+    // public contract stays "emit produces source, no recipe state
+    // change" while the pass's mutation lives only inside this call.
+    // ConstitutiveModel is value-typed (vectors + shared_ptr handles)
+    // so the copy is cheap relative to the codegen itself.
+    ConstitutiveModel working_copy = *this;
+    PassContext pctx{RecipeView{working_copy}, CodeGenContext{},
+                     std::nullopt, {}};
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
     pm.emplace<TensorSpaceConsistencyPass>();
+    // TimeIntegrationPass is registered only when the recipe has
+    // evolution equations. Its `state_variables_non_empty` precondition
+    // would otherwise fail at run() on pure-elasticity recipes — by
+    // gating registration here we keep the elastic path unchanged.
+    if (!m_evolution_equations.empty()) {
+      pm.emplace<TimeIntegrationPass>();
+    }
     pm.emplace<CodeEmitPass>();
     pm.run(pctx);
     if (!pctx.compute_function_source) {
@@ -482,6 +571,14 @@ public:
   [[nodiscard]] auto state_variables() const noexcept
       -> std::span<StateVariable const> {
     return m_state_variables;
+  }
+
+  // Phase 2.2 (issue #68): evolution-equation declarations. Empty for
+  // recipes without rate-form constitutive equations. Consumed by
+  // TimeIntegrationPass to synthesise the discrete residual outputs.
+  [[nodiscard]] auto evolution_equations() const noexcept
+      -> std::span<EvolutionEquation const> {
+    return m_evolution_equations;
   }
 
   // Symbol → expression maps. Exposed for the Phase 1.2 pass framework so
@@ -572,12 +669,26 @@ private:
     check(roles::Other,               "roles::Other");
   }
 
+  // Phase 2.2 (issue #68): auto-register a `dt` scalar parameter on
+  // the first add_*_evolution_equation call. If the user has already
+  // declared a symbol named `dt`, reuse it — don't throw on the name
+  // collision the way `assert_symbol_name_available` would.
+  void ensure_dt_symbol_registered_() {
+    for (auto const &s : m_symbols) {
+      if (s.name == state_time_step_name) return;
+    }
+    add_parameter(std::string{state_time_step_name}, 0.0,
+                  "time step (framework-supplied; auto-registered "
+                  "by the first add_*_evolution_equation call)");
+  }
+
   std::string m_name;
   std::vector<SymbolDecl> m_symbols;
   std::vector<SymbolDecl> m_parameters_cache;
   std::vector<SymbolDecl> m_inputs_cache;
   std::vector<OutputDecl> m_outputs;
   std::vector<StateVariable> m_state_variables; // Phase 2.1
+  std::vector<EvolutionEquation> m_evolution_equations; // Phase 2.2
 
   std::vector<
       std::pair<std::string, cas::expression_holder<cas::scalar_expression>>>
@@ -624,6 +735,11 @@ inline auto RecipeView::outputs() const noexcept
 inline auto RecipeView::state_variables() const noexcept
     -> std::span<StateVariable const> {
   return detail::recipe_view_const_ptr(m_model)->state_variables();
+}
+
+inline auto RecipeView::evolution_equations() const noexcept
+    -> std::span<EvolutionEquation const> {
+  return detail::recipe_view_const_ptr(m_model)->evolution_equations();
 }
 
 inline auto RecipeView::scalar_symbol_map() const -> ScalarSymbolMap const & {
@@ -1066,6 +1182,61 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
           model.name(), name, t.rank(), role_ptr->name,
           *role_ptr->expected_rank));
     }
+  }
+}
+
+// Phase 2.2 (issue #68): backward-Euler lowering. For each evolution
+// equation `(state_var, rate)` declared on the recipe, synthesise a
+// new scalar output `<state_var>_residual` whose expression is the
+// discrete residual `(state_var − state_var_old)/dt − rate`.
+inline void TimeIntegrationPass::run(PassContext &pctx) {
+  auto &model_mut = pctx.model.require_mutable_model(
+      "TimeIntegrationPass");
+  auto const &equations = model_mut.evolution_equations();
+  auto const &svs = model_mut.state_variables();
+
+  // The `dt` symbol must already be registered (auto-registered by
+  // add_scalar_evolution_equation). Build a cas handle for it by
+  // looking up the existing scalar map entry.
+  cas::expression_holder<cas::scalar_expression> dt_expr;
+  for (auto const &[name, h] : model_mut.scalar_symbol_map()) {
+    if (name == state_time_step_name) {
+      dt_expr = h;
+      break;
+    }
+  }
+  if (!dt_expr.is_valid()) {
+    throw std::runtime_error(std::format(
+        "ConstitutiveModel '{}': TimeIntegrationPass cannot find the "
+        "'{}' symbol that add_scalar_evolution_equation should have "
+        "auto-registered. State variable / symbol vectors are out of "
+        "sync.",
+        model_mut.name(), state_time_step_name));
+  }
+
+  // For each evolution equation, locate the current+old scalar handles
+  // and synthesise `(α − α_old)/dt − rate` as a new output.
+  for (auto const &eq : equations) {
+    auto const &sv = svs[eq.state_variable_idx];
+    auto const &cur_name = model_mut.symbols()[sv.current_symbol_idx].name;
+    auto const &old_name = model_mut.symbols()[sv.old_symbol_idx].name;
+
+    cas::expression_holder<cas::scalar_expression> cur_expr;
+    cas::expression_holder<cas::scalar_expression> old_expr;
+    for (auto const &[name, h] : model_mut.scalar_symbol_map()) {
+      if (name == cur_name) cur_expr = h;
+      if (name == old_name) old_expr = h;
+    }
+    if (!cur_expr.is_valid() || !old_expr.is_valid()) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': TimeIntegrationPass cannot resolve "
+          "current/old scalar handles for state variable '{}'. State "
+          "variable / symbol vectors are out of sync.",
+          model_mut.name(), sv.name));
+    }
+
+    auto residual = (cur_expr - old_expr) / dt_expr - eq.rate;
+    model_mut.add_output(sv.name + "_residual", std::move(residual));
   }
 }
 
