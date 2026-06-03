@@ -368,6 +368,18 @@ TEST(StateVariablePhase22Prep, SymbolValidationPassAdvertisesStateVarTags) {
     return false;
   };
 
+  // PR #66 round-2 #6: pin the pre-`run()` contract. A pristine pass
+  // instance reports the safe (no non_empty) shape. Without this test
+  // a future refactor that lazy-inits in `run()` could silently regress
+  // the safe default.
+  {
+    SymbolValidationPass pristine;
+    auto const pre_run = pristine.postconditions();
+    EXPECT_TRUE(has(pre_run, pass_tags::state_variables_checked));
+    EXPECT_FALSE(has(pre_run, pass_tags::state_variables_non_empty))
+        << "non_empty tag must NOT fire before run()";
+  }
+
   // Pure-elasticity recipe: only the always-on tag advertised.
   {
     ConstitutiveModel pure_elastic("E");
@@ -430,24 +442,25 @@ TEST(StateVariablePhase22Prep, FindStateVariableByName) {
   EXPECT_EQ(find_state_variable_by_name(pctx, ""), nullptr);
 }
 
-// ─── Friend access for negative-path tests (PR #66 review #1) ────────
+// ─── Friend access for negative-path tests (PR #66 review #1, #5) ────
 //
 // `verify_state_variable_symbol_alignment` has 5 distinct throw branches.
 // The public ConstitutiveModel API cannot violate the invariant today,
 // so the only way to verify each branch fires correctly is to mutate
-// the internals directly. `testing_internal_state_variable_alignment`
+// the internals directly. `testing_detail::state_variable_alignment_access`
 // is declared `friend struct` inside ConstitutiveModel; its definition
-// lives only here, in the test TU. Production code cannot reach it.
+// lives only here in the test TU.
 //
-// When Phase 2.2 mutating passes land, these injection sites become the
-// production negative-test corpus — they prove the alignment check
-// catches each kind of corruption a mutator might produce.
+// Lives in `numsim::codegen::testing_detail::` rather than the production
+// `numsim::codegen::` namespace — both as a marker ("if you're writing
+// production code and naming this, you've taken a wrong turn") and to
+// keep the friend's reachable surface narrow from production TUs.
 
 } // namespace numsim::codegen
 
-namespace numsim::codegen {
+namespace numsim::codegen::testing_detail {
 
-struct testing_internal_state_variable_alignment {
+struct state_variable_alignment_access {
   // Clobber the name of the SymbolDecl pointed at by a state variable's
   // current/old index. Simulates a mutating pass renaming a symbol
   // without keeping the pair in sync.
@@ -479,37 +492,52 @@ struct testing_internal_state_variable_alignment {
   }
 };
 
+} // namespace numsim::codegen::testing_detail
+
+namespace numsim::codegen {
+
+// Shorthand for the negative-path tests below.
+using poison = testing_detail::state_variable_alignment_access;
+
 TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionOutOfBoundsIdx) {
+  // PR #66 round-2 #7: single try/catch + FAIL() — silent test-pass on
+  // non-throw is impossible. Negative-substring asserts pin which arm
+  // fires (round-2 #8).
   ConstitutiveModel model("M");
   (void)model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
-  testing_internal_state_variable_alignment::poison_state_var_current_idx(
-      model, 0, 999);
-  EXPECT_THROW(model.validate(), std::runtime_error);
+  poison::poison_state_var_current_idx(model, 0, 999);
   try {
     model.validate();
+    FAIL() << "expected std::runtime_error from alignment OOB arm";
   } catch (std::runtime_error const &e) {
     std::string const what = e.what();
     EXPECT_NE(what.find("out of bounds"), std::string::npos) << what;
     EXPECT_NE(what.find("alpha"), std::string::npos) << what;
+    // Pin: no other arm should have fired.
+    EXPECT_EQ(what.find("wrong Category"), std::string::npos) << what;
+    EXPECT_EQ(what.find("Kind mismatched"), std::string::npos) << what;
+    EXPECT_EQ(what.find("dim/rank"), std::string::npos) << what;
   }
 }
 
 TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionRenamedSymbol) {
   ConstitutiveModel model("M");
-  auto h = model.add_scalar_state_variable(
+  (void)model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
-  (void)h;
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
-  testing_internal_state_variable_alignment::poison_symbol_name(
-      model, cur_idx, "beta");
-  EXPECT_THROW(model.validate(), std::runtime_error);
+  poison::poison_symbol_name(model, cur_idx, "beta");
   try {
     model.validate();
+    FAIL() << "expected std::runtime_error from alignment name arm";
   } catch (std::runtime_error const &e) {
     std::string const what = e.what();
     EXPECT_NE(what.find("named 'beta'"), std::string::npos) << what;
     EXPECT_NE(what.find("expected 'alpha'"), std::string::npos) << what;
+    EXPECT_EQ(what.find("wrong Category"), std::string::npos) << what;
+    EXPECT_EQ(what.find("Kind mismatched"), std::string::npos) << what;
+    EXPECT_EQ(what.find("dim/rank"), std::string::npos) << what;
+    EXPECT_EQ(what.find("out of bounds"), std::string::npos) << what;
   }
 }
 
@@ -518,18 +546,21 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongCategory) {
   (void)model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
-  testing_internal_state_variable_alignment::poison_symbol_category(
-      model, cur_idx, SymbolDecl::Category::Input);
-  EXPECT_THROW(model.validate(), std::runtime_error);
+  poison::poison_symbol_category(model, cur_idx,
+                                 SymbolDecl::Category::Input);
   try {
     model.validate();
+    FAIL() << "expected std::runtime_error from alignment category arm";
   } catch (std::runtime_error const &e) {
     std::string const what = e.what();
     // The message must print both observed and expected enum values
-    // (PR #66 review #4):
+    // (PR #66 round-1 #4).
+    EXPECT_NE(what.find("wrong Category"), std::string::npos) << what;
     EXPECT_NE(what.find("expected="), std::string::npos) << what;
     EXPECT_NE(what.find("got="), std::string::npos) << what;
-    EXPECT_NE(what.find("wrong Category"), std::string::npos) << what;
+    EXPECT_EQ(what.find("Kind mismatched"), std::string::npos) << what;
+    EXPECT_EQ(what.find("dim/rank"), std::string::npos) << what;
+    EXPECT_EQ(what.find("out of bounds"), std::string::npos) << what;
   }
 }
 
@@ -538,16 +569,21 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongKind) {
   (void)model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
-  testing_internal_state_variable_alignment::poison_symbol_kind(
-      model, cur_idx, SymbolDecl::Kind::Tensor);
-  EXPECT_THROW(model.validate(), std::runtime_error);
+  poison::poison_symbol_kind(model, cur_idx, SymbolDecl::Kind::Tensor);
   try {
     model.validate();
+    FAIL() << "expected std::runtime_error from alignment kind arm";
   } catch (std::runtime_error const &e) {
     std::string const what = e.what();
     EXPECT_NE(what.find("Kind mismatched"), std::string::npos) << what;
     EXPECT_NE(what.find("expected="), std::string::npos) << what;
     EXPECT_NE(what.find("got="), std::string::npos) << what;
+    // Pin: must be the kind arm, not the dim arm — the dim arm is
+    // gated on `sv.kind == Tensor` (record side, still Scalar here);
+    // a future reorder that swapped gating could silently still pass.
+    EXPECT_EQ(what.find("dim/rank"), std::string::npos) << what;
+    EXPECT_EQ(what.find("wrong Category"), std::string::npos) << what;
+    EXPECT_EQ(what.find("out of bounds"), std::string::npos) << what;
   }
 }
 
@@ -556,15 +592,17 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongDim) {
   auto eps_p_init = cas::make_expression<cas::tensor_zero>(3, 2);
   (void)model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
-  testing_internal_state_variable_alignment::poison_symbol_dim(
-      model, cur_idx, 2);
-  EXPECT_THROW(model.validate(), std::runtime_error);
+  poison::poison_symbol_dim(model, cur_idx, 2);
   try {
     model.validate();
+    FAIL() << "expected std::runtime_error from alignment dim arm";
   } catch (std::runtime_error const &e) {
     std::string const what = e.what();
     EXPECT_NE(what.find("dim/rank"), std::string::npos) << what;
     EXPECT_NE(what.find("eps_p"), std::string::npos) << what;
+    EXPECT_EQ(what.find("wrong Category"), std::string::npos) << what;
+    EXPECT_EQ(what.find("Kind mismatched"), std::string::npos) << what;
+    EXPECT_EQ(what.find("out of bounds"), std::string::npos) << what;
   }
 }
 

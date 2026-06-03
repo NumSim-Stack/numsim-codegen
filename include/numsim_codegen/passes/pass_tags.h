@@ -52,10 +52,13 @@ inline constexpr std::string_view identifiers_valid = "identifiers-valid";
 //   * `state_variables_non_empty` — advertised IFF the recipe actually
 //     has at least one state variable. A pass whose body is a no-op on
 //     empty state vectors (TimeIntegrationPass, KuhnTuckerLoweringPass)
-//     takes this as a precondition; PassManager then automatically
-//     refuses to register it on a pure-elasticity recipe — surfacing
+//     takes this as a precondition; on a pure-elasticity recipe
+//     PassManager then fails at `run()` with a clear
+//     `"pass X requires precondition state-variables-non-empty but no
+//     earlier pass advertised that postcondition"` message — surfacing
 //     the misconfiguration loudly rather than the pass silently doing
-//     nothing.
+//     nothing. (PassManager checks preconditions at `run()` time, not
+//     at registration; see `pass_manager.h:39-46`.)
 //
 // The split keeps the framework's tag-tracking honest: a passcondition
 // has the same name across every consumer, so a typo or rename surfaces

@@ -66,12 +66,13 @@ sequenceDiagram
     PM->>SVP: run(pctx)
     SVP->>SVP: walk symbols, check identifier validity<br/>(ASCII range + C++ keyword reject)
     SVP->>SVP: walk outputs, check no undeclared symbols
-    SVP-->>PM: postconditions:<br/>{symbols-declared, identifiers-valid}
+    SVP->>SVP: verify_state_variable_symbol_alignment<br/>(Phase 2.1+ pairing invariant)
+    SVP-->>PM: postconditions:<br/>{symbols-declared, identifiers-valid,<br/>state-variables-checked,<br/>state-variables-non-empty&nbsp;(iff&nbsp;non-empty)}
 
     PM->>TSP: run(pctx)
     TSP->>TSP: cross-check Role.is_symmetric vs<br/>tensor_space.perm (Skew = conflict)
     TSP->>TSP: cross-check Role.expected_rank vs<br/>tensor.rank()
-    TSP-->>PM: postconditions:<br/>{tensor-space-validated}
+    TSP-->>PM: postconditions:<br/>{tensor-space-declarations-checked}
 
     PM->>CEP: run(pctx)
     Note over CEP: Cycle-break via<br/>unique_ptr<T2sCodeEmit> indirection

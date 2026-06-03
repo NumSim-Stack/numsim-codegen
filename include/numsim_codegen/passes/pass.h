@@ -103,10 +103,30 @@ class Pass {
 public:
   virtual ~Pass() = default;
   [[nodiscard]] virtual auto name() const -> std::string_view = 0;
+
+  // Tags this pass requires to be satisfied before `run()` is called.
+  // Stable across the pass's lifetime — `preconditions()` is queried by
+  // `PassManager::run()` *before* `run()`, so the value must not depend
+  // on per-call state.
   [[nodiscard]] virtual auto preconditions() const
       -> std::vector<std::string_view> {
     return {};
   }
+
+  // Tags this pass advertises as satisfied after `run()` returns
+  // successfully. **Lifecycle contract (PR #66 round-2 review #11):**
+  // `PassManager::run()` queries `postconditions()` AFTER each call to
+  // `run()`, never before. Implementations are therefore free to return
+  // values that depend on per-call state set during `run()` (e.g.
+  // SymbolValidationPass uses this to conditionally advertise
+  // `state_variables_non_empty` based on the recipe). A pre-`run()`
+  // query is well-defined but may return a *subset* of what the
+  // post-`run()` query would — implementations should treat pre-`run()`
+  // as the safe-default shape.
+  //
+  // Implementations that store per-call state for this purpose must
+  // RESET that state at the *start* of `run()`, not the end, so a
+  // throwing `run()` leaves the pass in a coherent observable state.
   [[nodiscard]] virtual auto postconditions() const
       -> std::vector<std::string_view> {
     return {};

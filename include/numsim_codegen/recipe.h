@@ -190,6 +190,14 @@ struct OutputDecl {
   Role role = roles::Other;
 };
 
+// Forward-declared in a sub-namespace so `ConstitutiveModel`'s
+// `friend struct testing_detail::state_variable_alignment_access;`
+// resolves. Definition lives only in the test TU (see
+// `tests/StateVariableTest.cpp`). PR #66 round-2 review #5.
+namespace testing_detail {
+struct state_variable_alignment_access;
+} // namespace testing_detail
+
 // The constitutive-model registry. Holds declared inputs, parameters,
 // outputs, and their semantic role tags. Target-agnostic — the same
 // recipe can be emitted as standalone C++, MOOSE Material, Abaqus UMAT,
@@ -487,16 +495,28 @@ public:
     return m_tensor_symbols;
   }
 
-  // Test-only accessor: grants negative-path tests in `tests/` controlled
-  // write access to `m_symbols` and `m_state_variables` so they can
-  // simulate the corruption shapes that Phase 2.2+ mutating passes might
-  // produce (issue #59 review finding #1). The friend is declared but
-  // never defined inside `numsim::codegen`; tests provide the only
-  // definition. Keeping the surface narrow — a single friend struct —
-  // means production code paths cannot accidentally rely on it.
-  friend struct testing_internal_state_variable_alignment;
-
 private:
+  // ─── Test-only friends ──────────────────────────────────────────
+  //
+  // PR #66 round-2 review #5: grants negative-path tests in `tests/`
+  // controlled write access to `m_symbols` and `m_state_variables` so
+  // they can simulate the corruption shapes Phase 2.2+ mutating passes
+  // might produce. Placed under the `private:` label (rather than the
+  // public block) so a reader scanning the class layout doesn't mistake
+  // the line for a public-API affordance.
+  //
+  // Lives in the `testing_detail::` sub-namespace — both as a marker
+  // ("if you're writing production code and naming this, you've taken
+  // a wrong turn") and to keep the friend's reachable surface narrow
+  // from production-namespace TUs.
+  //
+  // The struct is declared here but never defined inside
+  // `numsim::codegen`; tests provide the only definition (see
+  // `tests/StateVariableTest.cpp`). Keeping the surface to a single
+  // friend struct means a single ODR slot in the test binary; if a
+  // future test TU needs the same access, factor the definition to a
+  // shared `tests/internal/` header rather than redefining it.
+  friend struct testing_detail::state_variable_alignment_access;
   // Phase 2.1 (M1+M2 in REVIEW-pr-58.md): reject a duplicate symbol
   // name at add time, with a clear pipeline-misconfiguration message.
   // Two collision modes this catches:
@@ -663,16 +683,25 @@ inline auto RecipeView::tensor_symbol_map() const -> TensorSymbolMap const & {
 // because `add_*_state_variable` writes both vectors atomically. The
 // check earns its keep when Phase 2.2+ mutating passes start touching
 // `m_state_variables` / `m_symbols` independently — at that point this
-// function lives inside `SymbolValidationPass`, so mutators can re-run
-// the pass (or a derived pass that calls this) to re-verify between
-// stages. Run from the pass framework rather than `validate()` directly
-// so the invariant cannot be bypassed by a future code path that runs
-// passes without invoking `validate()`.
+// function lives inside `SymbolValidationPass`, so any pipeline that
+// registers `SymbolValidationPass` re-verifies the invariant on every
+// run. Phase 2.2 mutating passes can re-run the pass (or a derived
+// `StructuralIntegrityPass` that calls this) to re-check between
+// mutations.
 //
-// TODO(phase-2.2): when the first mutating pass lands, the
-// `testing_internal_state_variable_alignment` friend struct in
-// `tests/StateVariableTest.cpp` exercises the failure paths; that
-// scaffolding will become the production negative-test corpus.
+// **Bypass caveat:** a caller that constructs a `PassManager` and
+// omits `SymbolValidationPass` skips the check entirely. The framework
+// has no enforcement against that today; the convention is that any
+// pipeline that emits code or mutates state variables registers
+// `SymbolValidationPass` first. `ConstitutiveModel::validate()` and
+// `::emit_compute_function()` both do so.
+//
+// TODO(phase-2.2): this scaffolding fault-injects the assertion arms
+// (see the friend-poison tests in `tests/StateVariableTest.cpp`). When
+// the first mutating pass lands, mutator-driven integration tests
+// (apply mutator → assert throws) will be added alongside this corpus,
+// not replace it — the fault-injection harness covers the assertion
+// arms; the integration tests cover the mutator-to-arm wiring.
 inline void verify_state_variable_symbol_alignment(RecipeView model) {
   auto check = [&](std::size_t idx, std::string_view expected_name,
                    SymbolDecl::Category expected_cat,
@@ -846,6 +875,21 @@ inline auto render_compute_function(
 
 inline void SymbolValidationPass::run(PassContext &pctx) {
   auto const &model = pctx.model;
+
+  // Reset the conditional-postcondition flag on entry — PR #66 round-2
+  // review #2. Without this, three failure modes leak prior state:
+  //   (a) `verify_state_variable_symbol_alignment` below throws → the
+  //       end-of-run assignment never executes → the flag retains its
+  //       previous value;
+  //   (b) the same pass instance is reused across two recipes with
+  //       different state-variable counts → mid-run state advertised
+  //       between calls reflects the prior recipe;
+  //   (c) a hypothetical pre-`run()` query (no caller today, but the
+  //       framework contract is implicit) sees stale state.
+  // Resetting up-front guarantees `m_state_variables_non_empty` always
+  // reflects the *current* run; the real value is computed after
+  // validation succeeds at the bottom of this function.
+  m_state_variables_non_empty = false;
 
   // P4 (post-fixup C1): build the name → index lookup once. Indices
   // survive any future `m_symbols.push_back()` reallocation, whereas
