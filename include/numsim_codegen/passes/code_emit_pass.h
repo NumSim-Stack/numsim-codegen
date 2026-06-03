@@ -21,8 +21,17 @@ namespace numsim::codegen {
 //
 // Preconditions: `pass_tags::symbols_declared` +
 // `pass_tags::identifiers_valid` + `pass_tags::tensor_space_declarations_checked`
-// (i.e. SymbolValidationPass + TensorSpaceConsistencyPass must have run
-// first). If you add a pass that transforms expressions (e.g. a future
+// + `pass_tags::state_variables_checked` (i.e. SymbolValidationPass +
+// TensorSpaceConsistencyPass must have run first). The state-var tag
+// (PR #66 round-3 review #3) codifies the bypass-caveat from
+// `verify_state_variable_symbol_alignment` in the precondition graph:
+// SymbolValidationPass advertises it unconditionally, so any emit
+// pipeline transitively requires SVP — a custom pipeline that stubs
+// the identifier tags via a no-op pass and skips SVP would now fail
+// at `run()` rather than silently emit code with an unverified
+// state-var alignment.
+//
+// If you add a pass that transforms expressions (e.g. a future
 // TimeIntegrationPass), register it AFTER the validators but BEFORE
 // CodeEmitPass.
 class CodeEmitPass final : public Pass {
@@ -33,7 +42,8 @@ public:
   [[nodiscard]] auto preconditions() const
       -> std::vector<std::string_view> override {
     return {pass_tags::symbols_declared, pass_tags::identifiers_valid,
-            pass_tags::tensor_space_declarations_checked};
+            pass_tags::tensor_space_declarations_checked,
+            pass_tags::state_variables_checked};
   }
   [[nodiscard]] auto postconditions() const
       -> std::vector<std::string_view> override {

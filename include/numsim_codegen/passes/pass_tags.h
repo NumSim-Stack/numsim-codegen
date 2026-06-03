@@ -36,6 +36,38 @@ namespace numsim::codegen::pass_tags {
 inline constexpr std::string_view symbols_declared = "symbols-declared";
 inline constexpr std::string_view identifiers_valid = "identifiers-valid";
 
+// State-variable tags advertised by `SymbolValidationPass` (issue #59 /
+// REVIEW-pr-58.md m2, refined by PR #66 review).
+//
+// Phase 2.2+ passes that touch state variables fall in one of two
+// shapes, and the framework can serve them differently with two tags:
+//
+//   * `state_variables_checked` — ALWAYS advertised. The
+//     SymbolValidationPass body has walked `state_variables()` and
+//     verified the alignment invariant with `symbols()` (via
+//     `verify_state_variable_symbol_alignment`). A pass that runs even
+//     on pure-elasticity recipes (e.g. one that emits no-op stubs for
+//     consistency) takes this as a precondition.
+//
+//   * `state_variables_non_empty` — advertised IFF the recipe actually
+//     has at least one state variable. A pass whose body is a no-op on
+//     empty state vectors (TimeIntegrationPass, KuhnTuckerLoweringPass)
+//     takes this as a precondition; on a pure-elasticity recipe
+//     PassManager then fails at `run()` with a clear
+//     `"pass X requires precondition state-variables-non-empty but no
+//     earlier pass advertised that postcondition"` message — surfacing
+//     the misconfiguration loudly rather than the pass silently doing
+//     nothing. (PassManager checks preconditions at `run()` time, not
+//     at registration; see `pass_manager.h:39-46`.)
+//
+// The split keeps the framework's tag-tracking honest: a passcondition
+// has the same name across every consumer, so a typo or rename surfaces
+// at compile time, not in the form of a pass that quietly never fires.
+inline constexpr std::string_view state_variables_checked =
+    "state-variables-checked";
+inline constexpr std::string_view state_variables_non_empty =
+    "state-variables-non-empty";
+
 // TensorSpaceConsistencyPass postcondition. Renamed from the original
 // `tensor-space-validated` per P6 — the original overpromised; Phase 2's
 // expression-level inference pass will use a separate tag.

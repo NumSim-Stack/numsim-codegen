@@ -15,6 +15,7 @@
 namespace numsim::codegen {
 
 struct SymbolDecl;
+struct StateVariable;
 
 // Shared state for a single PassManager invocation. Passes read the
 // recipe via `model` (a RecipeView — const-only today, will gain a
@@ -73,6 +74,20 @@ enum class LookupError {
                                              std::string const &name) noexcept
     -> std::expected<SymbolDecl const *, LookupError>;
 
+// Convenience: resolve a name to its StateVariable record. Returns
+// nullable pointer rather than `std::expected` per `docs/workflow.md`
+// §6.1 — only one failure mode ("no state variable with this name")
+// that the caller could distinguish. Linear scan over
+// `pctx.model.state_variables()`; state-variable counts are small
+// (single-digit typical, tens worst-case for multi-surface plasticity)
+// so the scan is fine. Could be promoted to a populated map in
+// PassContext if that ever changes. Issue #59 / REVIEW-pr-58.md m3.
+//
+// Definition lives in recipe.h where `StateVariable` is complete.
+[[nodiscard]] inline auto find_state_variable_by_name(
+    PassContext const &pctx, std::string_view name) noexcept
+    -> StateVariable const *;
+
 // Abstract base for a single codegen pass.
 //
 // Passes advertise their pre/postconditions as string tags. PassManager
@@ -88,10 +103,34 @@ class Pass {
 public:
   virtual ~Pass() = default;
   [[nodiscard]] virtual auto name() const -> std::string_view = 0;
+
+  // Tags this pass requires to be satisfied before `run()` is called.
+  // Stable across the pass's lifetime — `preconditions()` is queried by
+  // `PassManager::run()` *before* `run()`, so the value must not depend
+  // on per-call state.
   [[nodiscard]] virtual auto preconditions() const
       -> std::vector<std::string_view> {
     return {};
   }
+
+  // Tags this pass advertises as satisfied after `run()` returns
+  // successfully. **Lifecycle (PR #66 round-2 review #11, round-3 #2):**
+  // `PassManager::run()` queries `postconditions()` AFTER each call to
+  // `run()`, never before. Implementations are therefore free to return
+  // values that depend on per-call state set during `run()`.
+  //
+  // Most passes (`TensorSpaceConsistencyPass`, `CodeEmitPass`) return
+  // literal initialiser lists from `postconditions()` and don't need to
+  // think about lifecycle. `SymbolValidationPass` uses the pattern to
+  // conditionally advertise `state_variables_non_empty` based on the
+  // recipe — see its `run()` body for the canonical shape.
+  //
+  // **Guidance for passes that DO store per-call postcondition state:**
+  // reset that state at the *start* of `run()`, not the end, so a
+  // throwing `run()` leaves the pass in a coherent observable state and
+  // a pre-`run()` query reports the safe-default shape. This is
+  // convention, not a framework-enforced contract — PassManager has no
+  // way to check it.
   [[nodiscard]] virtual auto postconditions() const
       -> std::vector<std::string_view> {
     return {};

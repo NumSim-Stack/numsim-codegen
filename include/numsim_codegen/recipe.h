@@ -190,6 +190,14 @@ struct OutputDecl {
   Role role = roles::Other;
 };
 
+// Forward-declared in a sub-namespace so `ConstitutiveModel`'s
+// `friend struct testing_detail::state_variable_alignment_access;`
+// resolves. Definition lives only in the test TU (see
+// `tests/StateVariableTest.cpp`). PR #66 round-2 review #5.
+namespace testing_detail {
+struct state_variable_alignment_access;
+} // namespace testing_detail
+
 // The constitutive-model registry. Holds declared inputs, parameters,
 // outputs, and their semantic role tags. Target-agnostic — the same
 // recipe can be emitted as standalone C++, MOOSE Material, Abaqus UMAT,
@@ -488,6 +496,27 @@ public:
   }
 
 private:
+  // ─── Test-only friends ──────────────────────────────────────────
+  //
+  // PR #66 round-2 review #5: grants negative-path tests in `tests/`
+  // controlled write access to `m_symbols` and `m_state_variables` so
+  // they can simulate the corruption shapes Phase 2.2+ mutating passes
+  // might produce. Placed under the `private:` label (rather than the
+  // public block) so a reader scanning the class layout doesn't mistake
+  // the line for a public-API affordance.
+  //
+  // Lives in the `testing_detail::` sub-namespace — both as a marker
+  // ("if you're writing production code and naming this, you've taken
+  // a wrong turn") and to keep the friend's reachable surface narrow
+  // from production-namespace TUs.
+  //
+  // The struct is declared here but never defined inside
+  // `numsim::codegen`; tests provide the only definition (see
+  // `tests/StateVariableTest.cpp`). Keeping the surface to a single
+  // friend struct means a single ODR slot in the test binary; if a
+  // future test TU needs the same access, factor the definition to a
+  // shared `tests/internal/` header rather than redefining it.
+  friend struct testing_detail::state_variable_alignment_access;
   // Phase 2.1 (M1+M2 in REVIEW-pr-58.md): reject a duplicate symbol
   // name at add time, with a clear pipeline-misconfiguration message.
   // Two collision modes this catches:
@@ -634,6 +663,107 @@ inline auto RecipeView::tensor_symbol_map() const -> TensorSymbolMap const & {
   return &decl;
 }
 
+[[nodiscard]] inline auto find_state_variable_by_name(
+    PassContext const &pctx, std::string_view name) noexcept
+    -> StateVariable const * {
+  for (auto const &sv : pctx.model.state_variables()) {
+    if (sv.name == name) {
+      return &sv;
+    }
+  }
+  return nullptr;
+}
+
+// Phase 2.2 prep (issue #59 / REVIEW-pr-58.md m1 + PR #66 review):
+// verify the structural alignment between `model.state_variables()` and
+// `model.symbols()`. Throws `std::runtime_error` naming the specific
+// mismatch — silent corruption is worse than a loud throw.
+//
+// Today no public `ConstitutiveModel` API can produce a violation
+// because `add_*_state_variable` writes both vectors atomically. The
+// check earns its keep when Phase 2.2+ mutating passes start touching
+// `m_state_variables` / `m_symbols` independently — at that point this
+// function lives inside `SymbolValidationPass`, so any pipeline that
+// registers `SymbolValidationPass` re-verifies the invariant on every
+// run. Phase 2.2 mutating passes can re-run the pass (or a derived
+// `StructuralIntegrityPass` that calls this) to re-check between
+// mutations.
+//
+// **Bypass caveat:** a caller that constructs a `PassManager` and
+// omits `SymbolValidationPass` skips the check entirely. The framework
+// has no enforcement against that today; the convention is that any
+// pipeline that emits code or mutates state variables registers
+// `SymbolValidationPass` first. `ConstitutiveModel::validate()` and
+// `::emit_compute_function()` both do so.
+//
+// TODO(phase-2.2): this scaffolding fault-injects the assertion arms
+// (see the friend-poison tests in `tests/StateVariableTest.cpp`). When
+// the first mutating pass lands, mutator-driven integration tests
+// (apply mutator → assert throws) will be added alongside this corpus,
+// not replace it — the fault-injection harness covers the assertion
+// arms; the integration tests cover the mutator-to-arm wiring.
+inline void verify_state_variable_symbol_alignment(RecipeView model) {
+  // Hoisted out of the lambda body (PR #66 round-3 #6): the span is
+  // identical across all `check()` invocations within a single call
+  // — fetching once makes that explicit and removes a redundant copy
+  // per state variable.
+  auto const symbols = model.symbols();
+  auto check = [&](std::size_t idx, std::string_view expected_name,
+                   SymbolDecl::Category expected_cat,
+                   StateVariable const &sv, char const *which) {
+    if (idx >= symbols.size()) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': StateVariable '{}' carries {} index "
+          "{} which is out of bounds for symbols() (size {}). State "
+          "variable / symbol vectors are out of sync.",
+          model.name(), sv.name, which, idx, symbols.size()));
+    }
+    auto const &s = symbols[idx];
+    if (s.name != expected_name) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': StateVariable '{}' {} index points "
+          "to SymbolDecl named '{}'; expected '{}' (derived from "
+          "StateVariable.name). The symbols() entry has been renamed or "
+          "the indices have shifted.",
+          model.name(), sv.name, which, s.name, expected_name));
+    }
+    if (s.category != expected_cat) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': StateVariable '{}' {} symbol has "
+          "wrong Category (expected={}, got={}). State variable / symbol "
+          "vectors are out of sync.",
+          model.name(), sv.name, which,
+          static_cast<int>(expected_cat),
+          static_cast<int>(s.category)));
+    }
+    if (s.kind != sv.kind) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': StateVariable '{}' {} symbol has Kind "
+          "mismatched against the state-variable record (expected={}, "
+          "got={}).",
+          model.name(), sv.name, which,
+          static_cast<int>(sv.kind),
+          static_cast<int>(s.kind)));
+    }
+    if (sv.kind == SymbolDecl::Kind::Tensor &&
+        (s.dim != sv.dim || s.rank != sv.rank)) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': StateVariable '{}' {} symbol has "
+          "dim/rank ({}, {}) mismatched against the state-variable "
+          "record ({}, {}).",
+          model.name(), sv.name, which, s.dim, s.rank, sv.dim, sv.rank));
+    }
+  };
+  for (auto const &sv : model.state_variables()) {
+    check(sv.current_symbol_idx, sv.name,
+          SymbolDecl::Category::StateVariableCurrent, sv, "current");
+    auto const old_name =
+        std::string{sv.name} + std::string{state_variable_old_suffix};
+    check(sv.old_symbol_idx, old_name,
+          SymbolDecl::Category::StateVariableOld, sv, "old");
+  }
+}
+
 // ─── Function-frame rendering (free functions) ───────────────────────
 //
 // These render the surrounding function frame after the body statements
@@ -750,6 +880,22 @@ inline auto render_compute_function(
 inline void SymbolValidationPass::run(PassContext &pctx) {
   auto const &model = pctx.model;
 
+  // Reset the conditional-postcondition flag on entry — PR #66 round-2
+  // review #2. Two failure modes leak prior state without this:
+  //   (a) `verify_state_variable_symbol_alignment` below throws → the
+  //       end-of-run assignment never executes → the flag retains its
+  //       previous value;
+  //   (b) the same pass instance is reused across two recipes with
+  //       different state-variable counts → state advertised between
+  //       calls reflects the prior recipe.
+  // (A pre-`run()` query on a pristine pass instance is already covered
+  // by the default-initialiser at `symbol_validation_pass.h:130` — the
+  // reset-at-entry here does not need to address that case.)
+  // Resetting up-front guarantees `m_state_variables_non_empty` always
+  // reflects the *current* run; the real value is computed after
+  // validation succeeds at the bottom of this function.
+  m_state_variables_non_empty = false;
+
   // P4 (post-fixup C1): build the name → index lookup once. Indices
   // survive any future `m_symbols.push_back()` reallocation, whereas
   // the original SymbolDecl pointers would silently dangle the first
@@ -845,6 +991,18 @@ inline void SymbolValidationPass::run(PassContext &pctx) {
            "before referencing a symbol in an output expression.";
     throw std::runtime_error(msg);
   }
+
+  // (3) State-variable alignment invariant (issue #59 / PR #66 review).
+  // Throws if any StateVariable's `current_symbol_idx` / `old_symbol_idx`
+  // points at a mismatched SymbolDecl. Today's public API can't produce
+  // a violation, but running the check here means Phase 2.2+ mutating
+  // passes that touch state variables can re-run SymbolValidationPass
+  // to re-verify between stages — the invariant isn't bypassable by
+  // running passes outside `ConstitutiveModel::validate()`.
+  verify_state_variable_symbol_alignment(model);
+
+  // Drive the conditional `state_variables_non_empty` postcondition.
+  m_state_variables_non_empty = !model.state_variables().empty();
 }
 
 inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {

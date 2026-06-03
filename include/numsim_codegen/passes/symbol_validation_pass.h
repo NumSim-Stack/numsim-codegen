@@ -34,7 +34,17 @@ public:
   }
   [[nodiscard]] auto postconditions() const
       -> std::vector<std::string_view> override {
-    return {pass_tags::symbols_declared, pass_tags::identifiers_valid};
+    // `state_variables_non_empty` is conditionally advertised — PR #66
+    // review #6. `m_state_variables_non_empty` is set by `run()` to
+    // reflect the recipe's actual state-variable count; PassManager
+    // queries postconditions() AFTER run(), so the conditional is safe.
+    std::vector<std::string_view> tags{pass_tags::symbols_declared,
+                                       pass_tags::identifiers_valid,
+                                       pass_tags::state_variables_checked};
+    if (m_state_variables_non_empty) {
+      tags.push_back(pass_tags::state_variables_non_empty);
+    }
+    return tags;
   }
   void run(PassContext &pctx) override; // defined in recipe.h after class.
 
@@ -111,6 +121,13 @@ public:
     }
     return !is_cxx_keyword(s);
   }
+
+private:
+  // Runtime flag set by `run()` to drive the conditional
+  // `state_variables_non_empty` postcondition (declared above).
+  // Default-false so a pre-`run()` query reports the safe shape (no
+  // such query exists today, but defensive).
+  bool m_state_variables_non_empty = false;
 };
 
 } // namespace numsim::codegen
