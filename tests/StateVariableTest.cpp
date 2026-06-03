@@ -355,27 +355,48 @@ TEST(StateVariablePhase22Prep, AlignmentInvariantValidatesScalarAndTensor) {
   }
 }
 
-TEST(StateVariablePhase22Prep, SymbolValidationPassAdvertisesStateVarsTag) {
-  // Item 2 / REVIEW-pr-58.md m2: SymbolValidationPass advertises
-  // `state_variables_declared` unconditionally, including for recipes
-  // with zero state variables. Phase 2.2's TimeIntegrationPass will
-  // declare this as a precondition.
-  SymbolValidationPass pass;
-  auto const post = pass.postconditions();
-  bool found = false;
-  for (auto const &tag : post) {
-    if (tag == pass_tags::state_variables_declared) {
-      found = true;
-      break;
+TEST(StateVariablePhase22Prep, SymbolValidationPassAdvertisesStateVarTags) {
+  // PR #66 review: tag split. SymbolValidationPass advertises
+  // `state_variables_checked` unconditionally and
+  // `state_variables_non_empty` only when the recipe actually has
+  // state variables. PassManager queries postconditions() AFTER run(),
+  // so the conditional advertisement is observable through it.
+  auto has = [](auto const &v, std::string_view t) {
+    for (auto const &x : v) {
+      if (x == t) return true;
     }
-  }
-  EXPECT_TRUE(found)
-      << "SymbolValidationPass must advertise state_variables_declared";
+    return false;
+  };
 
-  // The tag must be satisfied even when the recipe has no state vars:
-  ConstitutiveModel pure_elastic("E");
-  (void)pure_elastic.add_parameter("mu", 0.5);
-  EXPECT_NO_THROW(pure_elastic.validate());
+  // Pure-elasticity recipe: only the always-on tag advertised.
+  {
+    ConstitutiveModel pure_elastic("E");
+    (void)pure_elastic.add_parameter("mu", 0.5);
+    PassContext pctx{RecipeView{pure_elastic}, CodeGenContext{},
+                     std::nullopt, {}};
+    SymbolValidationPass pass;
+    pass.run(pctx);
+    auto const post = pass.postconditions();
+    EXPECT_TRUE(has(post, pass_tags::state_variables_checked));
+    EXPECT_FALSE(has(post, pass_tags::state_variables_non_empty))
+        << "non_empty tag must NOT fire for state-var-free recipes";
+    // validate() itself must still succeed:
+    EXPECT_NO_THROW(pure_elastic.validate());
+  }
+
+  // Recipe with at least one state variable: both tags advertised.
+  {
+    ConstitutiveModel hardening("H");
+    (void)hardening.add_scalar_state_variable(
+        "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+    PassContext pctx{RecipeView{hardening}, CodeGenContext{},
+                     std::nullopt, {}};
+    SymbolValidationPass pass;
+    pass.run(pctx);
+    auto const post = pass.postconditions();
+    EXPECT_TRUE(has(post, pass_tags::state_variables_checked));
+    EXPECT_TRUE(has(post, pass_tags::state_variables_non_empty));
+  }
 }
 
 TEST(StateVariablePhase22Prep, FindStateVariableByName) {
@@ -407,6 +428,144 @@ TEST(StateVariablePhase22Prep, FindStateVariableByName) {
   // Unrelated names miss.
   EXPECT_EQ(find_state_variable_by_name(pctx, "nope"), nullptr);
   EXPECT_EQ(find_state_variable_by_name(pctx, ""), nullptr);
+}
+
+// ─── Friend access for negative-path tests (PR #66 review #1) ────────
+//
+// `verify_state_variable_symbol_alignment` has 5 distinct throw branches.
+// The public ConstitutiveModel API cannot violate the invariant today,
+// so the only way to verify each branch fires correctly is to mutate
+// the internals directly. `testing_internal_state_variable_alignment`
+// is declared `friend struct` inside ConstitutiveModel; its definition
+// lives only here, in the test TU. Production code cannot reach it.
+//
+// When Phase 2.2 mutating passes land, these injection sites become the
+// production negative-test corpus — they prove the alignment check
+// catches each kind of corruption a mutator might produce.
+
+} // namespace numsim::codegen
+
+namespace numsim::codegen {
+
+struct testing_internal_state_variable_alignment {
+  // Clobber the name of the SymbolDecl pointed at by a state variable's
+  // current/old index. Simulates a mutating pass renaming a symbol
+  // without keeping the pair in sync.
+  static void poison_symbol_name(ConstitutiveModel &m, std::size_t idx,
+                                 std::string new_name) {
+    m.m_symbols[idx].name = std::move(new_name);
+  }
+  // Clobber the category of a symbol.
+  static void poison_symbol_category(ConstitutiveModel &m, std::size_t idx,
+                                     SymbolDecl::Category new_cat) {
+    m.m_symbols[idx].category = new_cat;
+  }
+  // Clobber the kind of a symbol.
+  static void poison_symbol_kind(ConstitutiveModel &m, std::size_t idx,
+                                 SymbolDecl::Kind new_kind) {
+    m.m_symbols[idx].kind = new_kind;
+  }
+  // Clobber the dim of a tensor symbol.
+  static void poison_symbol_dim(ConstitutiveModel &m, std::size_t idx,
+                                std::size_t new_dim) {
+    m.m_symbols[idx].dim = new_dim;
+  }
+  // Push the current_symbol_idx of a state variable past the end of
+  // m_symbols to simulate a vector-shrink that left stale indices.
+  static void poison_state_var_current_idx(ConstitutiveModel &m,
+                                           std::size_t sv_idx,
+                                           std::size_t new_idx) {
+    m.m_state_variables[sv_idx].current_symbol_idx = new_idx;
+  }
+};
+
+TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionOutOfBoundsIdx) {
+  ConstitutiveModel model("M");
+  (void)model.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  testing_internal_state_variable_alignment::poison_state_var_current_idx(
+      model, 0, 999);
+  EXPECT_THROW(model.validate(), std::runtime_error);
+  try {
+    model.validate();
+  } catch (std::runtime_error const &e) {
+    std::string const what = e.what();
+    EXPECT_NE(what.find("out of bounds"), std::string::npos) << what;
+    EXPECT_NE(what.find("alpha"), std::string::npos) << what;
+  }
+}
+
+TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionRenamedSymbol) {
+  ConstitutiveModel model("M");
+  auto h = model.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  (void)h;
+  auto const cur_idx = model.state_variables()[0].current_symbol_idx;
+  testing_internal_state_variable_alignment::poison_symbol_name(
+      model, cur_idx, "beta");
+  EXPECT_THROW(model.validate(), std::runtime_error);
+  try {
+    model.validate();
+  } catch (std::runtime_error const &e) {
+    std::string const what = e.what();
+    EXPECT_NE(what.find("named 'beta'"), std::string::npos) << what;
+    EXPECT_NE(what.find("expected 'alpha'"), std::string::npos) << what;
+  }
+}
+
+TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongCategory) {
+  ConstitutiveModel model("M");
+  (void)model.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  auto const cur_idx = model.state_variables()[0].current_symbol_idx;
+  testing_internal_state_variable_alignment::poison_symbol_category(
+      model, cur_idx, SymbolDecl::Category::Input);
+  EXPECT_THROW(model.validate(), std::runtime_error);
+  try {
+    model.validate();
+  } catch (std::runtime_error const &e) {
+    std::string const what = e.what();
+    // The message must print both observed and expected enum values
+    // (PR #66 review #4):
+    EXPECT_NE(what.find("expected="), std::string::npos) << what;
+    EXPECT_NE(what.find("got="), std::string::npos) << what;
+    EXPECT_NE(what.find("wrong Category"), std::string::npos) << what;
+  }
+}
+
+TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongKind) {
+  ConstitutiveModel model("M");
+  (void)model.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  auto const cur_idx = model.state_variables()[0].current_symbol_idx;
+  testing_internal_state_variable_alignment::poison_symbol_kind(
+      model, cur_idx, SymbolDecl::Kind::Tensor);
+  EXPECT_THROW(model.validate(), std::runtime_error);
+  try {
+    model.validate();
+  } catch (std::runtime_error const &e) {
+    std::string const what = e.what();
+    EXPECT_NE(what.find("Kind mismatched"), std::string::npos) << what;
+    EXPECT_NE(what.find("expected="), std::string::npos) << what;
+    EXPECT_NE(what.find("got="), std::string::npos) << what;
+  }
+}
+
+TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongDim) {
+  ConstitutiveModel model("M");
+  auto eps_p_init = cas::make_expression<cas::tensor_zero>(3, 2);
+  (void)model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
+  auto const cur_idx = model.state_variables()[0].current_symbol_idx;
+  testing_internal_state_variable_alignment::poison_symbol_dim(
+      model, cur_idx, 2);
+  EXPECT_THROW(model.validate(), std::runtime_error);
+  try {
+    model.validate();
+  } catch (std::runtime_error const &e) {
+    std::string const what = e.what();
+    EXPECT_NE(what.find("dim/rank"), std::string::npos) << what;
+    EXPECT_NE(what.find("eps_p"), std::string::npos) << what;
+  }
 }
 
 } // namespace numsim::codegen
