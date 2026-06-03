@@ -23,6 +23,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+
 #include <string>
 
 namespace numsim::codegen {
@@ -85,27 +87,68 @@ TEST(TimeIntegration, AddScalarEvolutionEquationReusesExistingDt) {
   EXPECT_EQ(dt_count, 1);
 }
 
-TEST(TimeIntegration, AddEvolutionEquationRejectsUnregisteredHandle) {
-  // Construct a handle whose underlying scalar wasn't registered as a
-  // state variable on this model. The matching is name-based; an
-  // unknown name must throw.
+TEST(TimeIntegration, AddEvolutionEquationRejectsManuallyConstructedHandle) {
+  // PR #69 round-1 #3: a Handle without a `model_token` (manually
+  // constructed) is rejected before any name lookup happens. Defends
+  // against accidental hand-rolled Handles.
   ConstitutiveModel model("M");
   auto zero = cas::make_expression<cas::scalar_constant>(0.0);
   (void)model.add_scalar_state_variable("alpha", zero);
 
-  // Build a fake handle that names something else.
   auto beta = cas::make_expression<cas::scalar>("beta_unrelated");
   ConstitutiveModel::ScalarStateVariableHandle foreign{beta, beta};
+  // foreign.model_token defaults to nullptr.
 
   auto rate = cas::make_expression<cas::scalar_constant>(0.5);
   try {
     model.add_scalar_evolution_equation(foreign, rate);
-    FAIL() << "expected runtime_error for handle naming an unknown SV";
+    FAIL() << "expected runtime_error for manually-constructed handle";
   } catch (std::runtime_error const &e) {
     std::string const what = e.what();
-    EXPECT_NE(what.find("beta_unrelated"), std::string::npos) << what;
-    EXPECT_NE(what.find("no such state variable"), std::string::npos)
+    EXPECT_NE(what.find("no model token"), std::string::npos) << what;
+  }
+}
+
+TEST(TimeIntegration, AddEvolutionEquationRejectsHandleFromDifferentModel) {
+  // PR #69 round-1 #3 (cross-recipe hijack): two models BOTH have a
+  // state variable named "alpha". Without the model_token defense the
+  // call would silently bind modelA's handle to modelB's state
+  // variable (name collision). With the token, it throws.
+  ConstitutiveModel model_a("A");
+  ConstitutiveModel model_b("B");
+  auto zero = cas::make_expression<cas::scalar_constant>(0.0);
+  auto alpha_a = model_a.add_scalar_state_variable("alpha", zero);
+  (void)model_b.add_scalar_state_variable("alpha", zero);
+
+  auto rate = cas::make_expression<cas::scalar_constant>(0.5);
+  try {
+    model_b.add_scalar_evolution_equation(alpha_a, rate);
+    FAIL() << "expected runtime_error for handle from different model";
+  } catch (std::runtime_error const &e) {
+    std::string const what = e.what();
+    EXPECT_NE(what.find("different ConstitutiveModel"), std::string::npos)
         << what;
+  }
+}
+
+TEST(TimeIntegration, AddEvolutionEquationRejectsRateWithUndeclaredLeaves) {
+  // PR #69 round-1 #4: rate expression that references an undeclared
+  // symbol must throw at add-time, not silently ship to TimeIntegrationPass.
+  ConstitutiveModel model("M");
+  auto zero = cas::make_expression<cas::scalar_constant>(0.0);
+  auto alpha = model.add_scalar_state_variable("alpha", zero);
+
+  // Build a rate that references an undeclared parameter "K".
+  auto K_unregistered = cas::make_expression<cas::scalar>("K");
+  auto bad_rate = K_unregistered * alpha.current;
+
+  try {
+    model.add_scalar_evolution_equation(alpha, bad_rate);
+    FAIL() << "expected runtime_error for rate with undeclared leaf";
+  } catch (std::runtime_error const &e) {
+    std::string const what = e.what();
+    EXPECT_NE(what.find("undeclared"), std::string::npos) << what;
+    EXPECT_NE(what.find("'K'"), std::string::npos) << what;
   }
 }
 
@@ -215,6 +258,126 @@ TEST(TimeIntegration, EmitOnPureElasticityRecipeIsUnchanged) {
     EXPECT_EQ(src.find("_residual_out"), std::string::npos)
         << "no residual outputs expected on pure-elasticity recipe";
   });
+}
+
+// ─── PR #69 round-1 review fixups ────────────────────────────────────
+
+TEST(TimeIntegration, EmitDoesNotMutateRecipe) {
+  // PR #69 round-1 #5: working-copy invariant. emit_compute_function
+  // claims the user's recipe is unchanged after emit (mutation lives
+  // only on a working copy). Pin that as a test contract — without it
+  // a future refactor that drops the copy could regress silently.
+  ConstitutiveModel model("M");
+  auto K = model.add_parameter("K", 1.0);
+  auto alpha = model.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  model.add_scalar_evolution_equation(alpha, K * alpha.current);
+
+  auto const outputs_before = model.outputs().size();
+  auto const symbols_before = model.symbols().size();
+  auto const equations_before = model.evolution_equations().size();
+
+  (void)model.emit_compute_function();
+
+  EXPECT_EQ(model.outputs().size(), outputs_before)
+      << "emit must not mutate the user's recipe (outputs grew)";
+  EXPECT_EQ(model.symbols().size(), symbols_before)
+      << "emit must not mutate the user's recipe (symbols grew)";
+  EXPECT_EQ(model.evolution_equations().size(), equations_before)
+      << "emit must not mutate the user's recipe (equations grew)";
+}
+
+TEST(TimeIntegration, MultipleEvolutionEquationsAllLowered) {
+  // PR #69 round-1 #6: N>1 equations. Single-equation tests can't
+  // catch loop bugs (off-by-one, stale handles across iterations).
+  ConstitutiveModel model("Multi");
+  auto K = model.add_parameter("K", 1.0);
+  auto zero = cas::make_expression<cas::scalar_constant>(0.0);
+  auto a = model.add_scalar_state_variable("a", zero);
+  auto b = model.add_scalar_state_variable("b", zero);
+  auto c = model.add_scalar_state_variable("c", zero);
+
+  model.add_scalar_evolution_equation(a, K * a.current);
+  model.add_scalar_evolution_equation(b, K * b.current);
+  model.add_scalar_evolution_equation(c, K);
+
+  auto const src = model.emit_compute_function();
+  EXPECT_NE(src.find("a_residual_out"), std::string::npos) << src;
+  EXPECT_NE(src.find("b_residual_out"), std::string::npos) << src;
+  EXPECT_NE(src.find("c_residual_out"), std::string::npos) << src;
+}
+
+TEST(TimeIntegration, ResidualExpressionStructure) {
+  // PR #69 round-1 #7: pin the SEMANTIC shape of the synthesized
+  // residual, not just substring presence.
+  //
+  // The CAS layer canonicalizes operators: `a - b` → `a + (-b)`,
+  // `x / y` → `x * pow(y, -1.0)`. So the generated body for the
+  // backward-Euler residual `(α − α_old)/dt − rate` lands as:
+  //
+  //   auto t0 = K * alpha;            // rate
+  //   auto t1 = std::pow(dt, -1.0);   // 1/dt
+  //   auto t2 = alpha + -alpha_old;   // α − α_old
+  //   auto t3 = t1 * t2;              // (α − α_old) · 1/dt
+  //   auto t4 = -t0 + t3;             // residual − rate
+  //   alpha_residual_out = t4;
+  //
+  // The KEY invariants we pin are:
+  //   (a) `pow(dt, -1.0)` appears — confirms BACKWARD Euler
+  //       (forward Euler would multiply by `dt`, not `dt^-1`);
+  //   (b) The state-var and its `_old` both appear in the body —
+  //       confirms the discrete derivative is structurally present.
+  //
+  // Sign-flip regressions (`α_old + -α` instead of `α + -α_old`) are
+  // a known weakness of this textual check but are unlikely without
+  // an explicit CAS-layer breakage; numerical verification belongs
+  // in the Phase 4 driver suite.
+  ConstitutiveModel model("M");
+  auto K = model.add_parameter("K", 1.0);
+  auto alpha = model.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  // Self-referential rate — the J2 plasticity shape.
+  model.add_scalar_evolution_equation(alpha, K * alpha.current);
+
+  auto const src = model.emit_compute_function();
+
+  // (a) Backward Euler ⇒ dt^-1 must appear.
+  EXPECT_NE(src.find("std::pow(dt, -1.0)"), std::string::npos)
+      << "expected `std::pow(dt, -1.0)` (backward-Euler 1/dt): " << src;
+
+  // (b) Both α and α_old must appear in the body.
+  EXPECT_NE(src.find("alpha"), std::string::npos);
+  EXPECT_NE(src.find("alpha_old"), std::string::npos);
+
+  // Negative pin: forward Euler would emit `std::pow(dt, 1.0)` or
+  // direct `* dt` multiplication on the discrete-derivative path.
+  // The latter is harder to assert textually (dt appears in the
+  // signature too), but the `std::pow(dt, 1.0)` shape is a clean
+  // marker. Assert it's absent.
+  EXPECT_EQ(src.find("std::pow(dt, 1.0)"), std::string::npos)
+      << "residual must NOT use dt^+1 (would be forward Euler): " << src;
+}
+
+TEST(TimeIntegration, DtAutoRegisterDefaultIsNaN) {
+  // PR #69 round-1 #2: the auto-registered `dt` parameter has
+  // default value NaN — a forgotten dt-wiring then propagates NaN
+  // through the residual rather than producing Inf (default-0.0 would).
+  ConstitutiveModel model("M");
+  auto zero = cas::make_expression<cas::scalar_constant>(0.0);
+  auto alpha = model.add_scalar_state_variable("alpha", zero);
+  model.add_scalar_evolution_equation(alpha, zero);
+
+  bool found_dt = false;
+  for (auto const &s : model.symbols()) {
+    if (s.name == state_time_step_name) {
+      found_dt = true;
+      ASSERT_TRUE(s.default_value.has_value());
+      EXPECT_TRUE(std::isnan(*s.default_value))
+          << "auto-registered dt default must be NaN, not "
+          << *s.default_value;
+    }
+  }
+  EXPECT_TRUE(found_dt);
 }
 
 } // namespace numsim::codegen

@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -299,13 +300,23 @@ public:
   // StateVariableCurrent / StateVariableOld, so they flow through the
   // existing validation pipeline (identifier check, symbol_lookup).
 
+  // PR #69 round-1 #3: `model_token` defends against cross-recipe hijack
+  // — a handle whose underlying scalar name happens to collide with a
+  // state variable on a different model. Without the token, name-based
+  // matching in `add_scalar_evolution_equation` would silently bind to
+  // the wrong recipe. The token is set by `add_*_state_variable` to
+  // `this` and verified at every Handle-consuming API entry. Manual
+  // construction of Handles (legitimate test-only use) sets it to
+  // nullptr; consumers reject nullptr with a clear diagnostic.
   struct ScalarStateVariableHandle {
     cas::expression_holder<cas::scalar_expression> current;
     cas::expression_holder<cas::scalar_expression> previous;
+    ConstitutiveModel const *model_token = nullptr;
   };
   struct TensorStateVariableHandle {
     cas::expression_holder<cas::tensor_expression> current;
     cas::expression_holder<cas::tensor_expression> previous;
+    ConstitutiveModel const *model_token = nullptr;
   };
 
   auto add_scalar_state_variable(
@@ -340,7 +351,7 @@ public:
                      current_idx, old_idx};
     m_state_variables.push_back(std::move(sv));
 
-    return {current, previous};
+    return {current, previous, this};
   }
 
   auto add_tensor_state_variable(
@@ -375,7 +386,7 @@ public:
                      current_idx, old_idx};
     m_state_variables.push_back(std::move(sv));
 
-    return {current, previous};
+    return {current, previous, this};
   }
 
   // ─── Evolution equations (Phase 2.2, issue #68) ─────────────────
@@ -393,10 +404,48 @@ public:
       ScalarStateVariableHandle const &state_var,
       cas::expression_holder<cas::scalar_expression> rate,
       std::string doc = "") -> void {
-    // The handle's `current` was created inside `add_scalar_state_variable`
-    // as `cas::make_expression<cas::scalar>(name)` — i.e. a leaf symbol
-    // node with a name. Recover the name + look up the matching record.
-    auto const sv_name = state_var.current.template get<cas::scalar>().name();
+    // PR #69 round-1 #3: cross-recipe hijack defense. The handle's
+    // `model_token` MUST equal `this` — otherwise the user passed a
+    // handle that came from a different ConstitutiveModel (or
+    // manually-constructed). Pure name-based matching would silently
+    // bind to a coincidentally-named state variable on this model.
+    if (state_var.model_token == nullptr) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': add_scalar_evolution_equation handle "
+          "has no model token. Handles must come from "
+          "add_scalar_state_variable on this model — manually-constructed "
+          "handles are not accepted.",
+          m_name));
+    }
+    if (state_var.model_token != this) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': add_scalar_evolution_equation handle "
+          "came from a different ConstitutiveModel (handle.model_token = "
+          "{}, this = {}). Each handle is bound to the recipe that "
+          "created it; cross-recipe use would silently bind by name and "
+          "discretise the wrong state variable.",
+          m_name, static_cast<void const *>(state_var.model_token),
+          static_cast<void const *>(this)));
+    }
+
+    // PR #69 round-1 review (CRITICAL): the handle's `current` MUST be a
+    // bare scalar leaf (i.e. `cas::scalar`), not a compound expression.
+    // `expression_holder::get<cas::scalar>()` would use an
+    // `assert(dynamic_cast != nullptr)` path that's stripped under
+    // `NDEBUG`, then UB on the unchecked `static_cast`. Use an explicit
+    // runtime dynamic_cast that throws a clear diagnostic instead.
+    auto const *typed = dynamic_cast<cas::scalar const *>(
+        state_var.current.data().get());
+    if (!typed) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': add_scalar_evolution_equation handle's "
+          "`current` is not a bare scalar leaf symbol. Handles must come "
+          "from add_scalar_state_variable — you cannot synthesise one "
+          "from a compound expression like `K * alpha`.",
+          m_name));
+    }
+    auto const &sv_name = typed->name();
+
     std::size_t found_idx = m_state_variables.size();
     for (std::size_t i = 0; i < m_state_variables.size(); ++i) {
       if (m_state_variables[i].kind == SymbolDecl::Kind::Scalar &&
@@ -406,14 +455,29 @@ public:
       }
     }
     if (found_idx == m_state_variables.size()) {
+      // List registered scalar state variables to help debug.
+      std::string registered;
+      for (auto const &sv : m_state_variables) {
+        if (sv.kind == SymbolDecl::Kind::Scalar) {
+          if (!registered.empty()) registered += ", ";
+          registered += sv.name;
+        }
+      }
       throw std::runtime_error(std::format(
           "ConstitutiveModel '{}': add_scalar_evolution_equation handle "
           "names scalar state variable '{}' but no such state variable "
           "is registered on this model. Did the handle come from a "
           "different ConstitutiveModel, or was the state variable added "
-          "with add_tensor_state_variable instead?",
-          m_name, sv_name));
+          "with add_tensor_state_variable instead? Registered scalar "
+          "state variables: [{}].",
+          m_name, sv_name, registered));
     }
+
+    // Validate that the rate expression's leaves are all declared
+    // symbols on this model (PR #69 round-1 #4). Fail fast in the
+    // user's stack frame; otherwise CodeEmitPass surfaces a less-clear
+    // leaf-not-in-symbol_lookup error after lowering.
+    validate_rate_expression_leaves_(rate, sv_name);
 
     ensure_dt_symbol_registered_();
 
@@ -462,6 +526,15 @@ public:
   // does not touch pctx.ctx. A future pass that wants to cache validation
   // artifacts for the emit pipeline must run inside the same
   // emit_compute_function() invocation, not a separate validate() call.
+  //
+  // **Phase 2.2 note (PR #69 round-1 #8):** `validate()` does NOT run
+  // `TimeIntegrationPass`. Evolution-equation correctness — i.e. rate
+  // expressions referencing only declared symbols — is enforced at
+  // `add_scalar_evolution_equation()` time via
+  // `validate_rate_expression_leaves_`, so `validate()` doesn't need to
+  // re-walk those expressions. The user-side contract is: build the
+  // recipe (add fails fast on bad rates), then call `validate()` for
+  // belt-and-suspenders, then `emit_compute_function()`.
   void validate() const {
     PassContext pctx{RecipeView{*this}, CodeGenContext{}, std::nullopt, {}};
     PassManager pm;
@@ -673,13 +746,63 @@ private:
   // the first add_*_evolution_equation call. If the user has already
   // declared a symbol named `dt`, reuse it — don't throw on the name
   // collision the way `assert_symbol_name_available` would.
+  //
+  // Default value is NaN (PR #69 round-1 #2): the framework MUST
+  // supply the actual time step at runtime. A forgotten dt wiring then
+  // propagates NaN through `(α − α_old)/dt − rate`, which is loudly
+  // visible in any Newton residual check or numeric inspection. A
+  // default of 0.0 would silently produce Inf/-Inf, harder to triage.
   void ensure_dt_symbol_registered_() {
     for (auto const &s : m_symbols) {
       if (s.name == state_time_step_name) return;
     }
-    add_parameter(std::string{state_time_step_name}, 0.0,
+    add_parameter(std::string{state_time_step_name},
+                  std::numeric_limits<double>::quiet_NaN(),
                   "time step (framework-supplied; auto-registered "
-                  "by the first add_*_evolution_equation call)");
+                  "by the first add_*_evolution_equation call). "
+                  "Default is NaN — the framework must overwrite it.");
+  }
+
+  // PR #69 round-1 #4: validate that the leaves of a rate expression
+  // are all registered symbols on this model. Called from
+  // `add_scalar_evolution_equation` to fail fast in the user's stack
+  // frame, rather than letting the bug surface from CodeEmitPass after
+  // TimeIntegrationPass has synthesised an output referencing the
+  // undeclared leaf. Mirrors the leaf-validity check in
+  // SymbolValidationPass::run but anchored at the recipe-build call.
+  void validate_rate_expression_leaves_(
+      cas::expression_holder<cas::scalar_expression> const &rate,
+      std::string_view sv_name) const {
+    LeafCollector lc;
+    lc.collect_scalar(rate);
+    std::vector<std::string> missing;
+    for (auto const &leaf_name : lc.scalar_names()) {
+      bool found = false;
+      for (auto const &[name, _] : m_scalar_symbols) {
+        if (name == leaf_name) { found = true; break; }
+      }
+      if (!found) missing.push_back("scalar '" + leaf_name + "'");
+    }
+    for (auto const &leaf_name : lc.tensor_names()) {
+      bool found = false;
+      for (auto const &[name, _] : m_tensor_symbols) {
+        if (name == leaf_name) { found = true; break; }
+      }
+      if (!found) missing.push_back("tensor '" + leaf_name + "'");
+    }
+    if (!missing.empty()) {
+      std::string msg = std::format(
+          "ConstitutiveModel '{}': add_scalar_evolution_equation rate "
+          "expression for state variable '{}' references undeclared "
+          "symbol(s):",
+          m_name, sv_name);
+      for (auto const &m : missing) {
+        msg += std::format("\n  - {}", m);
+      }
+      msg += "\nCall add_scalar_input / add_tensor_input / add_parameter "
+             "before referencing a symbol in a rate expression.";
+      throw std::runtime_error(msg);
+    }
   }
 
   std::string m_name;

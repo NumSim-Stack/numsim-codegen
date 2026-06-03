@@ -77,10 +77,10 @@ sequenceDiagram
     TSP->>TSP: cross-check Role.expected_rank vs<br/>tensor.rank()
     TSP-->>PM: postconditions:<br/>{tensor-space-declarations-checked}
 
-    Note over PM,TIP: Phase 2.2: TimeIntegrationPass registered only<br/>when `m_evolution_equations` is non-empty.
+    Note over PM,TIP: Phase 2.2: TimeIntegrationPass registered only<br/>when m_evolution_equations is non-empty.
     PM->>TIP: run(pctx) [if evolution equations present]
     TIP->>TIP: require_mutable_model("TimeIntegrationPass")
-    TIP->>TIP: for each EvolutionEquation:<br/>add_output(`<sv>_residual`, (sv − sv_old)/dt − rate)
+    TIP->>TIP: for each EvolutionEquation:<br/>add_output(sv_residual, (sv − sv_old)/dt − rate)
     TIP-->>PM: postconditions:<br/>{dt-lowered}
 
     PM->>CEP: run(pctx)
