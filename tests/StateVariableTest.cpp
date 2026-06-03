@@ -15,8 +15,13 @@
 // flow through codegen. This file only exercises the IR layer.
 
 #include <numsim_codegen/passes/pass.h>
+#include <numsim_codegen/passes/pass_tags.h>
 #include <numsim_codegen/passes/symbol_validation_pass.h>
 #include <numsim_codegen/recipe.h>
+
+// Shared friend-access header for negative-path tests — see header
+// comment for the ODR rationale (PR #66 round-3 review #7).
+#include "internal/state_variable_alignment_access.h"
 
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
@@ -409,6 +414,61 @@ TEST(StateVariablePhase22Prep, SymbolValidationPassAdvertisesStateVarTags) {
     EXPECT_TRUE(has(post, pass_tags::state_variables_checked));
     EXPECT_TRUE(has(post, pass_tags::state_variables_non_empty));
   }
+
+  // Same-instance reuse: PR #66 round-3 #5. Mode (b) of the reset
+  // comment in `SymbolValidationPass::run` ("same instance reused
+  // across recipes with different state-var counts") is exercised
+  // here. Without the reset-at-entry the second `run()` would leave
+  // the non-empty tag advertised from the first run.
+  {
+    SymbolValidationPass reused;
+
+    ConstitutiveModel with_sv("S");
+    (void)with_sv.add_scalar_state_variable(
+        "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+    ConstitutiveModel pure("P");
+    (void)pure.add_parameter("k", 1.0);
+
+    // First run: state-var recipe → both tags advertised.
+    {
+      PassContext pctx1{RecipeView{with_sv}, CodeGenContext{},
+                        std::nullopt, {}};
+      reused.run(pctx1);
+      auto const post1 = reused.postconditions();
+      EXPECT_TRUE(has(post1, pass_tags::state_variables_checked));
+      EXPECT_TRUE(has(post1, pass_tags::state_variables_non_empty));
+    }
+
+    // Second run on the SAME instance: pure-elasticity recipe →
+    // non-empty tag must be cleared.
+    {
+      PassContext pctx2{RecipeView{pure}, CodeGenContext{},
+                        std::nullopt, {}};
+      reused.run(pctx2);
+      auto const post2 = reused.postconditions();
+      EXPECT_TRUE(has(post2, pass_tags::state_variables_checked));
+      EXPECT_FALSE(has(post2, pass_tags::state_variables_non_empty))
+          << "reset-at-entry must clear stale non-empty advert "
+             "when the same pass instance is reused across recipes "
+             "with different state-var counts (mode b)";
+    }
+
+    // Reverse order on the SAME instance for symmetry — pure first,
+    // then state-var. Catches a hypothetical "lazy-init that only
+    // initialises once" regression.
+    {
+      PassContext pctx3{RecipeView{pure}, CodeGenContext{},
+                        std::nullopt, {}};
+      reused.run(pctx3);
+      EXPECT_FALSE(has(reused.postconditions(),
+                       pass_tags::state_variables_non_empty));
+      PassContext pctx4{RecipeView{with_sv}, CodeGenContext{},
+                        std::nullopt, {}};
+      reused.run(pctx4);
+      EXPECT_TRUE(has(reused.postconditions(),
+                      pass_tags::state_variables_non_empty));
+    }
+  }
 }
 
 TEST(StateVariablePhase22Prep, FindStateVariableByName) {
@@ -442,62 +502,24 @@ TEST(StateVariablePhase22Prep, FindStateVariableByName) {
   EXPECT_EQ(find_state_variable_by_name(pctx, ""), nullptr);
 }
 
-// ─── Friend access for negative-path tests (PR #66 review #1, #5) ────
+// ─── Negative-path tests for the alignment invariant ────────────────
 //
 // `verify_state_variable_symbol_alignment` has 5 distinct throw branches.
 // The public ConstitutiveModel API cannot violate the invariant today,
 // so the only way to verify each branch fires correctly is to mutate
-// the internals directly. `testing_detail::state_variable_alignment_access`
-// is declared `friend struct` inside ConstitutiveModel; its definition
-// lives only here in the test TU.
-//
-// Lives in `numsim::codegen::testing_detail::` rather than the production
-// `numsim::codegen::` namespace — both as a marker ("if you're writing
-// production code and naming this, you've taken a wrong turn") and to
-// keep the friend's reachable surface narrow from production TUs.
+// the internals directly via the `testing_detail::state_variable_alignment_access`
+// friend struct. Its definition lives in `tests/internal/` (PR #66
+// round-3 #7) so future test TUs that need the same access include the
+// shared header rather than redefining the struct — making the ODR
+// contract mechanical, not social.
 
-} // namespace numsim::codegen
-
-namespace numsim::codegen::testing_detail {
-
-struct state_variable_alignment_access {
-  // Clobber the name of the SymbolDecl pointed at by a state variable's
-  // current/old index. Simulates a mutating pass renaming a symbol
-  // without keeping the pair in sync.
-  static void poison_symbol_name(ConstitutiveModel &m, std::size_t idx,
-                                 std::string new_name) {
-    m.m_symbols[idx].name = std::move(new_name);
-  }
-  // Clobber the category of a symbol.
-  static void poison_symbol_category(ConstitutiveModel &m, std::size_t idx,
-                                     SymbolDecl::Category new_cat) {
-    m.m_symbols[idx].category = new_cat;
-  }
-  // Clobber the kind of a symbol.
-  static void poison_symbol_kind(ConstitutiveModel &m, std::size_t idx,
-                                 SymbolDecl::Kind new_kind) {
-    m.m_symbols[idx].kind = new_kind;
-  }
-  // Clobber the dim of a tensor symbol.
-  static void poison_symbol_dim(ConstitutiveModel &m, std::size_t idx,
-                                std::size_t new_dim) {
-    m.m_symbols[idx].dim = new_dim;
-  }
-  // Push the current_symbol_idx of a state variable past the end of
-  // m_symbols to simulate a vector-shrink that left stale indices.
-  static void poison_state_var_current_idx(ConstitutiveModel &m,
-                                           std::size_t sv_idx,
-                                           std::size_t new_idx) {
-    m.m_state_variables[sv_idx].current_symbol_idx = new_idx;
-  }
-};
-
-} // namespace numsim::codegen::testing_detail
-
-namespace numsim::codegen {
-
-// Shorthand for the negative-path tests below.
-using poison = testing_detail::state_variable_alignment_access;
+namespace {
+// Anonymous-namespace alias (PR #66 round-3 #8) so a future test TU
+// using `using poison = ...` for a different access struct doesn't
+// quietly mean different things across TUs.
+using sv_align_poison =
+    testing_detail::state_variable_alignment_access;
+} // namespace
 
 TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionOutOfBoundsIdx) {
   // PR #66 round-2 #7: single try/catch + FAIL() — silent test-pass on
@@ -506,7 +528,7 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionOutOfBoundsIdx) {
   ConstitutiveModel model("M");
   (void)model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
-  poison::poison_state_var_current_idx(model, 0, 999);
+  sv_align_poison::poison_state_var_current_idx(model, 0, 999);
   try {
     model.validate();
     FAIL() << "expected std::runtime_error from alignment OOB arm";
@@ -526,7 +548,7 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionRenamedSymbol) {
   (void)model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
-  poison::poison_symbol_name(model, cur_idx, "beta");
+  sv_align_poison::poison_symbol_name(model, cur_idx, "beta");
   try {
     model.validate();
     FAIL() << "expected std::runtime_error from alignment name arm";
@@ -546,7 +568,7 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongCategory) {
   (void)model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
-  poison::poison_symbol_category(model, cur_idx,
+  sv_align_poison::poison_symbol_category(model, cur_idx,
                                  SymbolDecl::Category::Input);
   try {
     model.validate();
@@ -569,7 +591,7 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongKind) {
   (void)model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
-  poison::poison_symbol_kind(model, cur_idx, SymbolDecl::Kind::Tensor);
+  sv_align_poison::poison_symbol_kind(model, cur_idx, SymbolDecl::Kind::Tensor);
   try {
     model.validate();
     FAIL() << "expected std::runtime_error from alignment kind arm";
@@ -592,7 +614,7 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongDim) {
   auto eps_p_init = cas::make_expression<cas::tensor_zero>(3, 2);
   (void)model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
-  poison::poison_symbol_dim(model, cur_idx, 2);
+  sv_align_poison::poison_symbol_dim(model, cur_idx, 2);
   try {
     model.validate();
     FAIL() << "expected std::runtime_error from alignment dim arm";

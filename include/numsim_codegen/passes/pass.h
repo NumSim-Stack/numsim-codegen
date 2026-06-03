@@ -114,19 +114,23 @@ public:
   }
 
   // Tags this pass advertises as satisfied after `run()` returns
-  // successfully. **Lifecycle contract (PR #66 round-2 review #11):**
+  // successfully. **Lifecycle (PR #66 round-2 review #11, round-3 #2):**
   // `PassManager::run()` queries `postconditions()` AFTER each call to
   // `run()`, never before. Implementations are therefore free to return
-  // values that depend on per-call state set during `run()` (e.g.
-  // SymbolValidationPass uses this to conditionally advertise
-  // `state_variables_non_empty` based on the recipe). A pre-`run()`
-  // query is well-defined but may return a *subset* of what the
-  // post-`run()` query would — implementations should treat pre-`run()`
-  // as the safe-default shape.
+  // values that depend on per-call state set during `run()`.
   //
-  // Implementations that store per-call state for this purpose must
-  // RESET that state at the *start* of `run()`, not the end, so a
-  // throwing `run()` leaves the pass in a coherent observable state.
+  // Most passes (`TensorSpaceConsistencyPass`, `CodeEmitPass`) return
+  // literal initialiser lists from `postconditions()` and don't need to
+  // think about lifecycle. `SymbolValidationPass` uses the pattern to
+  // conditionally advertise `state_variables_non_empty` based on the
+  // recipe — see its `run()` body for the canonical shape.
+  //
+  // **Guidance for passes that DO store per-call postcondition state:**
+  // reset that state at the *start* of `run()`, not the end, so a
+  // throwing `run()` leaves the pass in a coherent observable state and
+  // a pre-`run()` query reports the safe-default shape. This is
+  // convention, not a framework-enforced contract — PassManager has no
+  // way to check it.
   [[nodiscard]] virtual auto postconditions() const
       -> std::vector<std::string_view> {
     return {};

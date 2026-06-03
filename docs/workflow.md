@@ -64,10 +64,12 @@ sequenceDiagram
     Model->>PM: run(pctx)
 
     PM->>SVP: run(pctx)
+    SVP->>SVP: reset m_state_variables_non_empty = false<br/>(round-3 safe-on-throw guarantee)
     SVP->>SVP: walk symbols, check identifier validity<br/>(ASCII range + C++ keyword reject)
     SVP->>SVP: walk outputs, check no undeclared symbols
     SVP->>SVP: verify_state_variable_symbol_alignment<br/>(Phase 2.1+ pairing invariant)
-    SVP-->>PM: postconditions:<br/>{symbols-declared, identifiers-valid,<br/>state-variables-checked,<br/>state-variables-non-empty&nbsp;(iff&nbsp;non-empty)}
+    SVP->>SVP: set m_state_variables_non_empty<br/>= !state_variables().empty()
+    SVP-->>PM: postconditions:<br/>{symbols-declared, identifiers-valid,<br/>state-variables-checked,<br/>state-variables-non-empty (iff non-empty)}
 
     PM->>TSP: run(pctx)
     TSP->>TSP: cross-check Role.is_symmetric vs<br/>tensor_space.perm (Skew = conflict)

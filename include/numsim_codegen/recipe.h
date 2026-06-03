@@ -703,10 +703,14 @@ inline auto RecipeView::tensor_symbol_map() const -> TensorSymbolMap const & {
 // not replace it — the fault-injection harness covers the assertion
 // arms; the integration tests cover the mutator-to-arm wiring.
 inline void verify_state_variable_symbol_alignment(RecipeView model) {
+  // Hoisted out of the lambda body (PR #66 round-3 #6): the span is
+  // identical across all `check()` invocations within a single call
+  // — fetching once makes that explicit and removes a redundant copy
+  // per state variable.
+  auto const symbols = model.symbols();
   auto check = [&](std::size_t idx, std::string_view expected_name,
                    SymbolDecl::Category expected_cat,
                    StateVariable const &sv, char const *which) {
-    auto const symbols = model.symbols();
     if (idx >= symbols.size()) {
       throw std::runtime_error(std::format(
           "ConstitutiveModel '{}': StateVariable '{}' carries {} index "
@@ -877,15 +881,16 @@ inline void SymbolValidationPass::run(PassContext &pctx) {
   auto const &model = pctx.model;
 
   // Reset the conditional-postcondition flag on entry — PR #66 round-2
-  // review #2. Without this, three failure modes leak prior state:
+  // review #2. Two failure modes leak prior state without this:
   //   (a) `verify_state_variable_symbol_alignment` below throws → the
   //       end-of-run assignment never executes → the flag retains its
   //       previous value;
   //   (b) the same pass instance is reused across two recipes with
-  //       different state-variable counts → mid-run state advertised
-  //       between calls reflects the prior recipe;
-  //   (c) a hypothetical pre-`run()` query (no caller today, but the
-  //       framework contract is implicit) sees stale state.
+  //       different state-variable counts → state advertised between
+  //       calls reflects the prior recipe.
+  // (A pre-`run()` query on a pristine pass instance is already covered
+  // by the default-initialiser at `symbol_validation_pass.h:130` — the
+  // reset-at-entry here does not need to address that case.)
   // Resetting up-front guarantees `m_state_variables_non_empty` always
   // reflects the *current* run; the real value is computed after
   // validation succeeds at the bottom of this function.
