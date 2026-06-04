@@ -1333,20 +1333,28 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
 // source of truth for the backward-Euler discrete residual; both
 // passes call it.
 //
-// Returns the residual expression PLUS the resolved `cur_expr` handle
-// (needed by LJP to call `cas::diff` wrt the state variable). The
-// caller checks `dt_expr.is_valid()` indirectly via the throw paths
-// inside the helper.
+// PR #71 round-2 #7: wrapped in `pass_internal::` sub-namespace so the
+// helper isn't an unintended public-API surface. The two consumers
+// (TIP::run, LJP::run) call `pass_internal::build_backward_euler_residual`;
+// future Phase 3a-2+ passes that need the same machinery move under
+// `pass_internal::` themselves (or explicitly opt into the internal
+// surface). Keeps `numsim::codegen::` clean for the recipe-builder API.
+namespace pass_internal {
+
 struct BackwardEulerResidual {
   cas::expression_holder<cas::scalar_expression> residual;
   cas::expression_holder<cas::scalar_expression> cur_expr;
 };
 
-inline auto build_backward_euler_residual(ConstitutiveModel &model_mut,
-                                          EvolutionEquation const &eq,
-                                          char const *calling_pass_name)
-    -> BackwardEulerResidual {
-  auto const &svs = model_mut.state_variables();
+// PR #71 round-2 #1, #2: takes `ConstitutiveModel const &` (helper only
+// reads) and `std::string_view` for the caller name (matches
+// `Pass::name()`'s return type + avoids the `std::format("{}", nullptr)`
+// UB hazard of a `char const *`). Mutation in TIP/LJP happens at the
+// `add_output` call AFTER the helper returns.
+inline auto build_backward_euler_residual(
+    ConstitutiveModel const &model, EvolutionEquation const &eq,
+    std::string_view calling_pass_name) -> BackwardEulerResidual {
+  auto const &svs = model.state_variables();
   auto const &sv = svs[eq.state_variable_idx];
 
   // Resolve `dt`, `<sv>`, `<sv>_old` scalar handles by walking the
@@ -1358,9 +1366,9 @@ inline auto build_backward_euler_residual(ConstitutiveModel &model_mut,
   cas::expression_holder<cas::scalar_expression> dt_expr;
   cas::expression_holder<cas::scalar_expression> cur_expr;
   cas::expression_holder<cas::scalar_expression> old_expr;
-  auto const &cur_name = model_mut.symbols()[sv.current_symbol_idx].name;
-  auto const &old_name = model_mut.symbols()[sv.old_symbol_idx].name;
-  for (auto const &[name, h] : model_mut.scalar_symbol_map()) {
+  auto const &cur_name = model.symbols()[sv.current_symbol_idx].name;
+  auto const &old_name = model.symbols()[sv.old_symbol_idx].name;
+  for (auto const &[name, h] : model.scalar_symbol_map()) {
     if (name == state_time_step_name) dt_expr = h;
     else if (name == cur_name) cur_expr = h;
     else if (name == old_name) old_expr = h;
@@ -1371,19 +1379,21 @@ inline auto build_backward_euler_residual(ConstitutiveModel &model_mut,
         "`ensure_dt_symbol_registered_()` should have auto-registered "
         "it on the first add_scalar_evolution_equation call. State "
         "variable / symbol vectors are out of sync.",
-        model_mut.name(), calling_pass_name, state_time_step_name));
+        model.name(), calling_pass_name, state_time_step_name));
   }
   if (!cur_expr.is_valid() || !old_expr.is_valid()) {
     throw std::runtime_error(std::format(
         "ConstitutiveModel '{}': {} cannot resolve current/old scalar "
         "handles for state variable '{}'. State variable / symbol "
         "vectors are out of sync.",
-        model_mut.name(), calling_pass_name, sv.name));
+        model.name(), calling_pass_name, sv.name));
   }
 
   auto residual = (cur_expr - old_expr) / dt_expr - eq.rate;
   return {std::move(residual), std::move(cur_expr)};
 }
+
+} // namespace pass_internal
 
 // Phase 2.2 (issue #68): backward-Euler lowering. For each evolution
 // equation `(state_var, rate)` declared on the recipe, synthesise a
@@ -1397,7 +1407,7 @@ inline void TimeIntegrationPass::run(PassContext &pctx) {
 
   for (auto const &eq : equations) {
     auto const &sv = svs[eq.state_variable_idx];
-    auto built = build_backward_euler_residual(
+    auto built = pass_internal::build_backward_euler_residual(
         model_mut, eq, "TimeIntegrationPass");
     model_mut.add_output(sv.name + "_residual",
                          std::move(built.residual));
@@ -1422,17 +1432,16 @@ inline void LocalJacobianPass::run(PassContext &pctx) {
 
   for (auto const &eq : equations) {
     auto const &sv = svs[eq.state_variable_idx];
-    auto built = build_backward_euler_residual(
+    auto built = pass_internal::build_backward_euler_residual(
         model_mut, eq, "LocalJacobianPass");
 
-    // PR #71 round-1 #3 (TODO): `cas::diff` produces a fresh expression
+    // TODO(numsim-codegen#72): `cas::diff` produces a fresh expression
     // tree. Sub-terms structurally identical to those in the residual
     // (parameter handles, `1/dt` factor) are pointer-distinct from
     // TimeIntegrationPass's tree, so the CodeGenContext's pointer-keyed
     // CSE misses them. Fine at single-SV scale; Phase 4's multi-SV +
-    // rank-4-tensor Jacobian path will benefit from either tighter
-    // residual/Jacobian co-emission OR a value-based CSE upgrade.
-    // Pinned here so the next person scaling this is forced to choose.
+    // rank-4-tensor Jacobian path will need value-based CSE or
+    // residual/Jacobian co-emission. See #72 for the design discussion.
     auto jacobian = cas::diff(built.residual, built.cur_expr);
     model_mut.add_output(sv.name + "_jacobian", std::move(jacobian));
   }

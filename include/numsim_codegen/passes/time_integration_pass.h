@@ -25,10 +25,12 @@ namespace numsim::codegen {
 // only when the recipe actually has evolution equations, so the
 // pure-elasticity path doesn't trip the precondition check.
 //
-// **Newton iteration is out of scope.** The residual is emitted as a
-// regular output; the caller supplies the Newton driver externally.
-// Phase 3a (issue #34) introduces `LocalNewtonLoweringPass` which
-// consumes this pass's `backward_euler_residual_emitted` postcondition.
+// **Newton iteration body is out of scope.** This pass synthesises the
+// residual outputs only. Phase 3a-1's `LocalJacobianPass` (issue #70)
+// consumes the `backward_euler_residual_emitted` postcondition and adds
+// paired `<sv>_jacobian` outputs via `cas::diff`. Phase 3a-2 (issue #34)
+// will add `LocalNewtonLoweringPass` on top to emit the actual Newton
+// iteration body once the control-flow emit infrastructure lands.
 //
 // **Scalar-only.** Tensor evolution equations (rate-form plasticity,
 // `Dt(ε^p) = ...`) are common in mechanics but out of Phase 2.2 scope.

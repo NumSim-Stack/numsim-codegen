@@ -6,7 +6,8 @@
 //   - Constant rate (`rate = K`) → J = 1/dt, independent of α
 //   - Linear-hardening rate (`rate = K·α`) → J = 1/dt − K
 //   - Multi-equation case (3 SVs → 3 jacobians)
-//   - Precondition graph: pass requires dt_lowered postcondition
+//   - Precondition graph: pass requires backward_euler_residual_emitted
+//     postcondition (renamed from `dt_lowered` per PR #71 round-1 #4)
 //   - End-to-end emit contains both residual + jacobian outputs
 //   - Working-copy invariant: emit doesn't mutate the user's recipe
 
@@ -41,16 +42,33 @@ namespace {
 // Recursive expansion is over-engineering for the assertion shapes we
 // care about today (presence/absence of K, alpha_old in the Jacobian's
 // top-level RHS). If that changes, swap to a full chain-walker.
+//
+// PR #71 round-2 #6: hardening:
+//   * `rfind` instead of `find` — a future audit comment containing
+//     `// alpha_jacobian_out = ...` won't mis-slice (the actual write
+//     statement is the LAST occurrence in the body).
+//   * Whitespace-tolerant RHS extraction — survives a formatter
+//     re-emitting `=  tN` (double space) or `= \tN` (tab).
+//   * Derived `out_eq` offset instead of redundant `find('=')` — no
+//     accidental match if `out_name` itself ever contained `=`.
 std::string immediate_def_for_output(std::string const &src,
                                      std::string const &out_name) {
-  auto const out_idx = src.find(out_name + " = ");
+  auto const out_idx = src.rfind(out_name + " = ");
   if (out_idx == std::string::npos) return {};
-  auto const out_eq = src.find('=', out_idx);
-  auto const out_semi = src.find(';', out_eq);
-  auto const temp_id = src.substr(out_eq + 2, out_semi - out_eq - 2);
-  auto const def_idx = src.find("auto " + temp_id + " =");
+  auto const out_eq = out_idx + out_name.size() + 1; // points at '='
+  if (out_eq >= src.size() || src[out_eq] != '=') return {};
+  // Skip whitespace after '=' to land at the temp id.
+  auto const rhs_start = src.find_first_not_of(" \t", out_eq + 1);
+  if (rhs_start == std::string::npos) return {};
+  auto const out_semi = src.find(';', rhs_start);
+  if (out_semi == std::string::npos) return {};
+  auto const temp_id = src.substr(rhs_start, out_semi - rhs_start);
+  // Same `rfind` discipline for the definition lookup — guards
+  // against any speculative reference to the temp earlier in the body.
+  auto const def_idx = src.rfind("auto " + temp_id + " =");
   if (def_idx == std::string::npos) return {};
   auto const def_semi = src.find(';', def_idx);
+  if (def_semi == std::string::npos) return {};
   return src.substr(def_idx, def_semi - def_idx);
 }
 } // namespace
