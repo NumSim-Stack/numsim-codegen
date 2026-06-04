@@ -25,6 +25,7 @@ add_executable(numsim_codegen_tests
     RecipeRegistrySmokeTest.cpp
     PassFrameworkTest.cpp
     StateVariableTest.cpp
+    TimeIntegrationTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests

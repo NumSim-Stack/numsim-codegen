@@ -41,6 +41,7 @@ class ConstitutiveModel;
 struct SymbolDecl;
 struct OutputDecl;
 struct StateVariable;
+struct EvolutionEquation;
 
 class RecipeView {
 public:
@@ -68,6 +69,8 @@ public:
   [[nodiscard]] auto outputs() const noexcept -> std::span<OutputDecl const>;
   [[nodiscard]] auto state_variables() const noexcept
       -> std::span<StateVariable const>;
+  [[nodiscard]] auto evolution_equations() const noexcept
+      -> std::span<EvolutionEquation const>;
   [[nodiscard]] auto scalar_symbol_map() const -> ScalarSymbolMap const &;
   [[nodiscard]] auto tensor_symbol_map() const -> TensorSymbolMap const &;
 
