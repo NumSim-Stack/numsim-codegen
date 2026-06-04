@@ -19,7 +19,7 @@ namespace numsim::codegen {
 // once the control-flow emission infrastructure lands) consume both
 // outputs to iterate `α_{k+1} = α_k − R/J`.
 //
-// **Driver contract (PR #71 round-1 #5):** the emitted `<sv>_jacobian`
+// **Driver contract:** the emitted `<sv>_jacobian`
 // references `dt` as a regular scalar input. A Newton driver MUST hold
 // `dt` constant across all iterations of the local solve — otherwise
 // the system being solved changes mid-iteration and convergence is

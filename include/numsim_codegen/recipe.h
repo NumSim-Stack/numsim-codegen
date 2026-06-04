@@ -577,7 +577,7 @@ public:
       // LocalNewtonLoweringPass once control-flow emit lands) can
       // iterate `α ← α − R/J` without needing finite differences.
       //
-      // **Policy (PR #71 round-1 #6):** LocalJacobianPass runs
+      // **Policy:** LocalJacobianPass runs
       // unconditionally whenever there are evolution equations. This is
       // the intended forever-default — every Newton-driven consumer
       // wants the Jacobian, and external FD-based drivers can simply
@@ -849,6 +849,15 @@ private:
 // optimisers should fold it to the same code as the pre-P1 direct
 // pointer dereference.
 
+// **`detail::` namespace policy.** Implementation
+// helpers that aren't part of the public recipe-builder API live under
+// `numsim::codegen::detail::`. This file currently has multiple
+// `namespace detail { ... }` blocks (here, in the rendering helpers
+// section, and in the pass-internal block near TIP/LJP) — they merge
+// at the language level. **Promote** a `detail::` block to
+// `include/numsim_codegen/passes/internal/<topic>.h` when it exceeds
+// ~75 LOC OR introduces a non-trivial type. Without the threshold,
+// `recipe.h` drifts unboundedly as Phase 3a-2 / Phase 4 helpers land.
 namespace detail {
 inline auto recipe_view_const_ptr(
     std::variant<ConstitutiveModel const *, ConstitutiveModel *> const &v)
@@ -1325,45 +1334,27 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
   }
 }
 
-// PR #71 round-1 #1: shared residual-construction helper. Before this
-// extraction, both `TimeIntegrationPass::run` and `LocalJacobianPass::run`
-// independently reconstructed `(α − α_old)/dt − rate` — a silent-drift
-// hazard if either pass's residual shape ever changed (sign convention,
-// scaling factor, BDF2 numerator, etc.). The helper is the single
-// source of truth for the backward-Euler discrete residual; both
-// passes call it.
+// Shared backward-Euler residual-construction helper. Single source of
+// truth across `TimeIntegrationPass::run` and `LocalJacobianPass::run`
+// for the discrete residual shape `(α − α_old)/dt − rate`. If the shape
+// ever changes (sign convention, scaling factor, BDF2 numerator), both
+// passes pick up the change for free.
 //
-// PR #71 round-3 #1: lives under `detail::` (renamed from the earlier
-// `pass_internal::` proposal) so the helper matches the existing
-// codebase convention — `numsim::cas::detail::`,
-// `numsim::codegen::detail::` (also used elsewhere in this file for
-// `recipe_view_const_ptr` and `param_decl`), `testing_detail::`. Single
-// "implementation, please don't touch" idiom across the codebase; no
-// fourth name.
+// Carries `cur_expr` alongside the synthesized residual so LJP can call
+// `cas::diff` on the same DAG without re-resolving the state-variable
+// handle.
 namespace detail {
 
-// **Phase 3a-2 design hint (PR #71 round-3 #2):** this struct carries
-// the residual + the resolved `cur_expr` handle so LJP can call
-// `cas::diff` itself. When Phase 3a-2's `LocalNewtonLoweringPass` lands
-// it'll need BOTH the residual AND the Jacobian for `α_new = α − R/J`.
-// Decide then whether to (a) extend this struct to carry the Jacobian
-// too (computing `cas::diff` inside the helper, eliminating LJP's
-// independent diff call AND addressing #72's cross-pass CSE miss), or
-// (b) keep this struct residual-only and have 3a-2 pair the helper
-// with LJP's emitted `<sv>_jacobian` output via a Newton-pass-internal
-// helper. Option (a) is cleaner; option (b) preserves the
-// single-responsibility split between residual and Jacobian. Pin the
-// choice before 3a-2 starts.
+// Phase 3a-2 will need to extend or pair with this helper to access
+// the Jacobian alongside the residual. See #73 for the decision.
 struct BackwardEulerResidual {
   cas::expression_holder<cas::scalar_expression> residual;
   cas::expression_holder<cas::scalar_expression> cur_expr;
 };
 
-// PR #71 round-2 #1, #2: takes `ConstitutiveModel const &` (helper only
-// reads) and `std::string_view` for the caller name (matches
-// `Pass::name()`'s return type + avoids the `std::format("{}", nullptr)`
-// UB hazard of a `char const *`). Mutation in TIP/LJP happens at the
-// `add_output` call AFTER the helper returns.
+// Takes the recipe by `const &` (helper only reads); mutation happens
+// at the `add_output` call in the calling pass. `calling_pass_name` is
+// `std::string_view` so callers can pass `Pass::name()` directly.
 inline auto build_backward_euler_residual(
     ConstitutiveModel const &model, EvolutionEquation const &eq,
     std::string_view calling_pass_name) -> BackwardEulerResidual {
@@ -1374,8 +1365,8 @@ inline auto build_backward_euler_residual(
   // scalar symbol map. Single pass over the map captures all three.
   // The `dt` symbol is auto-registered by
   // `add_scalar_evolution_equation` → `ensure_dt_symbol_registered_`
-  // (PR #69 round-1 #7) so the lookup must succeed if the recipe was
-  // built through the public API.
+  // so the lookup must succeed if the recipe was built through the
+  // public API.
   cas::expression_holder<cas::scalar_expression> dt_expr;
   cas::expression_holder<cas::scalar_expression> cur_expr;
   cas::expression_holder<cas::scalar_expression> old_expr;
@@ -1434,10 +1425,9 @@ inline void TimeIntegrationPass::run(PassContext &pctx) {
 //
 // Re-derives the residual through the shared
 // `build_backward_euler_residual` helper — the single source of truth
-// for the discrete residual shape (PR #71 round-1 #1). If
-// TimeIntegrationPass ever changes its residual form (sign convention,
-// BDF2 numerator, scaling factor), LJP automatically picks up the same
-// change here.
+// for the discrete residual shape. If TimeIntegrationPass ever changes
+// its residual form (sign convention, BDF2 numerator, scaling factor),
+// LJP automatically picks up the same change here.
 inline void LocalJacobianPass::run(PassContext &pctx) {
   auto &model_mut = pctx.model.require_mutable_model("LocalJacobianPass");
   auto const &equations = model_mut.evolution_equations();

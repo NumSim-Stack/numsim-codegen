@@ -7,7 +7,7 @@
 //   - Linear-hardening rate (`rate = K·α`) → J = 1/dt − K
 //   - Multi-equation case (3 SVs → 3 jacobians)
 //   - Precondition graph: pass requires backward_euler_residual_emitted
-//     postcondition (renamed from `dt_lowered` per PR #71 round-1 #4)
+//     postcondition
 //   - End-to-end emit contains both residual + jacobian outputs
 //   - Working-copy invariant: emit doesn't mutate the user's recipe
 
@@ -30,39 +30,31 @@
 namespace numsim::codegen {
 
 namespace {
-// PR #71 round-1 #2: slice helper. The generated source emits all CSE
-// temps first, then the output writes (`<sv>_residual_out = tN;`,
-// `<sv>_jacobian_out = tM;`). Substring-matching the whole body can't
-// distinguish "K appears in the residual" from "K appears in the
-// Jacobian". This helper extracts the IMMEDIATE definition of the temp
-// referenced by `<output>_out = tN;` so tests can assert on that line.
+// Slice helper. The generated source emits all CSE temps first, then the
+// output writes (`<sv>_residual_out = tN;`, `<sv>_jacobian_out = tM;`).
+// Substring-matching the whole body can't distinguish "K appears in the
+// residual" from "K appears in the Jacobian". This helper extracts the
+// IMMEDIATE definition of the temp referenced by `<output>_out = tN;`
+// so tests can assert against that line specifically.
 //
-// Doesn't recurse into chained temps — for that, a Jacobian's nested
-// `1/dt` factor lives in a separate `auto tK = std::pow(dt, -1.0)` line.
-// Recursive expansion is over-engineering for the assertion shapes we
-// care about today (presence/absence of K, alpha_old in the Jacobian's
-// top-level RHS). If that changes, swap to a full chain-walker.
+// **Design choices:**
+//   * `rfind` (not `find`) for both the output-write and temp-def
+//     lookups — defends against a future audit comment containing
+//     `// alpha_jacobian_out = ...` mis-slicing.
+//   * Symmetric whitespace trim via `find_first_not_of` + `find_last_not_of`
+//     so a formatter re-emitting `"= t6 ;"` or `"=\tt6\t;"` still works.
+//   * Derived `out_eq` offset instead of a redundant `find('=')` —
+//     no accidental match if `out_name` ever contained `=`.
 //
-// PR #71 round-2 #6: hardening:
-//   * `rfind` instead of `find` — a future audit comment containing
-//     `// alpha_jacobian_out = ...` won't mis-slice (the actual write
-//     statement is the LAST occurrence in the body).
-//   * Whitespace-tolerant RHS extraction — survives a formatter
-//     re-emitting `=  tN` (double space) or `= \tN` (tab).
-//   * Derived `out_eq` offset instead of redundant `find('=')` — no
-//     accidental match if `out_name` itself ever contained `=`.
-//
-// PR #71 round-3:
-//   * #3: trailing-whitespace symmetry. Leading WS is skipped via
-//     `find_first_not_of`; trailing WS in `temp_id` must be trimmed
-//     symmetrically via `find_last_not_of` so a formatter emitting
-//     `"= t6 ;"` doesn't break the downstream `rfind("auto t6  =")`.
-//   * #4: **Precondition (load-bearing):** the generated source emits
-//     exactly ONE write per `<out_name>`. `rfind` quietly returns the
-//     last occurrence, so a multi-write generator (e.g. predictor-
-//     corrector overwriting the same output) would silently slice
-//     only the final write. If that ever changes, this helper and
-//     its callers must adapt.
+// **Limits:**
+//   * Doesn't recurse into chained temps. A Jacobian's nested
+//     `pow(dt, -1.0)` factor lives in a separate `auto tK = ...` line;
+//     callers assert against the FULL src for those.
+//   * **Precondition (load-bearing):** the generator emits exactly ONE
+//     write per `<out_name>`. `rfind` quietly picks the last occurrence,
+//     so a multi-write generator (e.g. predictor-corrector overwriting
+//     the same output) would silently slice only the final write. If
+//     that ever changes, this helper and its callers must adapt.
 std::string immediate_def_for_output(std::string const &src,
                                      std::string const &out_name) {
   auto const out_idx = src.rfind(out_name + " = ");
@@ -74,8 +66,8 @@ std::string immediate_def_for_output(std::string const &src,
   if (rhs_start == std::string::npos) return {};
   auto const out_semi = src.find(';', rhs_start);
   if (out_semi == std::string::npos || out_semi <= rhs_start) return {};
-  // PR #71 round-3 #3: also trim TRAILING whitespace before the `;`
-  // so `temp_id` doesn't capture `"t6 "` from `"= t6 ;"`.
+  // Trim trailing whitespace before the `;` so `temp_id` doesn't
+  // capture `"t6 "` from `"= t6 ;"`.
   auto const rhs_end = src.find_last_not_of(" \t", out_semi - 1);
   if (rhs_end == std::string::npos || rhs_end < rhs_start) return {};
   auto const temp_id = src.substr(rhs_start, rhs_end - rhs_start + 1);
@@ -116,10 +108,9 @@ TEST(LocalJacobian, PassSynthesizesJacobianOutput) {
 TEST(LocalJacobian, ConstantRateGivesPureInverseDt) {
   // rate = K (constant in α) ⇒ ∂rate/∂α = 0 ⇒ J = 1/dt.
   //
-  // PR #71 round-1 #2: slice to the Jacobian's immediate definition.
-  // The pattern is `alpha_jacobian_out = tN; auto tN = std::pow(dt, -1.0);`
-  // — the Jacobian's RHS temp must define `std::pow(dt, -1.0)` and
-  // NOT reference K (∂K/∂α = 0) nor alpha_old (independent leaf).
+  // Slice to the Jacobian's immediate definition (helper above). The
+  // Jacobian's RHS temp must define `std::pow(dt, -1.0)` and NOT
+  // reference K (∂K/∂α = 0) nor alpha_old (independent leaf).
   ConstitutiveModel model("M");
   auto K = model.add_parameter("K", 1.0);
   auto alpha = model.add_scalar_state_variable(
@@ -144,7 +135,7 @@ TEST(LocalJacobian, ConstantRateGivesPureInverseDt) {
 TEST(LocalJacobian, LinearHardeningRateGivesInverseDtMinusK) {
   // rate = K·α ⇒ ∂rate/∂α = K ⇒ J = 1/dt − K.
   //
-  // PR #71 round-1 #2: slice to the Jacobian's immediate def to PIN:
+  // Slice to the Jacobian's immediate def (helper above) to pin:
   //   (a) `-K` appears (sign of the chain-rule term)
   //   (b) The Jacobian's `+ <temp>` chains to a `std::pow(dt, -1.0)` temp
   //   (c) The Jacobian's immediate def does NOT contain `alpha_old`
@@ -204,8 +195,7 @@ TEST(LocalJacobian, MultipleEvolutionEquationsEachGetTheirJacobian) {
 TEST(LocalJacobian, PassPreconditionRequiresBackwardEulerResidualEmitted) {
   // LJP declares backward_euler_residual_emitted as a precondition.
   // Registering LJP WITHOUT TimeIntegrationPass having run first must
-  // fail at PassManager::run() time. (PR #71 round-1 #4: per-scheme
-  // tag, NOT the coarse legacy `dt_lowered`.)
+  // fail at PassManager::run() time.
   ConstitutiveModel model("M");
   auto K = model.add_parameter("K", 1.0);
   auto alpha = model.add_scalar_state_variable(
