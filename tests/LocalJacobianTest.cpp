@@ -51,18 +51,34 @@ namespace {
 //     re-emitting `=  tN` (double space) or `= \tN` (tab).
 //   * Derived `out_eq` offset instead of redundant `find('=')` — no
 //     accidental match if `out_name` itself ever contained `=`.
+//
+// PR #71 round-3:
+//   * #3: trailing-whitespace symmetry. Leading WS is skipped via
+//     `find_first_not_of`; trailing WS in `temp_id` must be trimmed
+//     symmetrically via `find_last_not_of` so a formatter emitting
+//     `"= t6 ;"` doesn't break the downstream `rfind("auto t6  =")`.
+//   * #4: **Precondition (load-bearing):** the generated source emits
+//     exactly ONE write per `<out_name>`. `rfind` quietly returns the
+//     last occurrence, so a multi-write generator (e.g. predictor-
+//     corrector overwriting the same output) would silently slice
+//     only the final write. If that ever changes, this helper and
+//     its callers must adapt.
 std::string immediate_def_for_output(std::string const &src,
                                      std::string const &out_name) {
   auto const out_idx = src.rfind(out_name + " = ");
   if (out_idx == std::string::npos) return {};
   auto const out_eq = out_idx + out_name.size() + 1; // points at '='
   if (out_eq >= src.size() || src[out_eq] != '=') return {};
-  // Skip whitespace after '=' to land at the temp id.
+  // Skip leading whitespace after '=' to land at the temp id.
   auto const rhs_start = src.find_first_not_of(" \t", out_eq + 1);
   if (rhs_start == std::string::npos) return {};
   auto const out_semi = src.find(';', rhs_start);
-  if (out_semi == std::string::npos) return {};
-  auto const temp_id = src.substr(rhs_start, out_semi - rhs_start);
+  if (out_semi == std::string::npos || out_semi <= rhs_start) return {};
+  // PR #71 round-3 #3: also trim TRAILING whitespace before the `;`
+  // so `temp_id` doesn't capture `"t6 "` from `"= t6 ;"`.
+  auto const rhs_end = src.find_last_not_of(" \t", out_semi - 1);
+  if (rhs_end == std::string::npos || rhs_end < rhs_start) return {};
+  auto const temp_id = src.substr(rhs_start, rhs_end - rhs_start + 1);
   // Same `rfind` discipline for the definition lookup — guards
   // against any speculative reference to the temp earlier in the body.
   auto const def_idx = src.rfind("auto " + temp_id + " =");

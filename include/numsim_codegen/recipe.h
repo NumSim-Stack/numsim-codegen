@@ -1333,14 +1333,27 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
 // source of truth for the backward-Euler discrete residual; both
 // passes call it.
 //
-// PR #71 round-2 #7: wrapped in `pass_internal::` sub-namespace so the
-// helper isn't an unintended public-API surface. The two consumers
-// (TIP::run, LJP::run) call `pass_internal::build_backward_euler_residual`;
-// future Phase 3a-2+ passes that need the same machinery move under
-// `pass_internal::` themselves (or explicitly opt into the internal
-// surface). Keeps `numsim::codegen::` clean for the recipe-builder API.
-namespace pass_internal {
+// PR #71 round-3 #1: lives under `detail::` (renamed from the earlier
+// `pass_internal::` proposal) so the helper matches the existing
+// codebase convention — `numsim::cas::detail::`,
+// `numsim::codegen::detail::` (also used elsewhere in this file for
+// `recipe_view_const_ptr` and `param_decl`), `testing_detail::`. Single
+// "implementation, please don't touch" idiom across the codebase; no
+// fourth name.
+namespace detail {
 
+// **Phase 3a-2 design hint (PR #71 round-3 #2):** this struct carries
+// the residual + the resolved `cur_expr` handle so LJP can call
+// `cas::diff` itself. When Phase 3a-2's `LocalNewtonLoweringPass` lands
+// it'll need BOTH the residual AND the Jacobian for `α_new = α − R/J`.
+// Decide then whether to (a) extend this struct to carry the Jacobian
+// too (computing `cas::diff` inside the helper, eliminating LJP's
+// independent diff call AND addressing #72's cross-pass CSE miss), or
+// (b) keep this struct residual-only and have 3a-2 pair the helper
+// with LJP's emitted `<sv>_jacobian` output via a Newton-pass-internal
+// helper. Option (a) is cleaner; option (b) preserves the
+// single-responsibility split between residual and Jacobian. Pin the
+// choice before 3a-2 starts.
 struct BackwardEulerResidual {
   cas::expression_holder<cas::scalar_expression> residual;
   cas::expression_holder<cas::scalar_expression> cur_expr;
@@ -1393,7 +1406,7 @@ inline auto build_backward_euler_residual(
   return {std::move(residual), std::move(cur_expr)};
 }
 
-} // namespace pass_internal
+} // namespace detail
 
 // Phase 2.2 (issue #68): backward-Euler lowering. For each evolution
 // equation `(state_var, rate)` declared on the recipe, synthesise a
@@ -1407,7 +1420,7 @@ inline void TimeIntegrationPass::run(PassContext &pctx) {
 
   for (auto const &eq : equations) {
     auto const &sv = svs[eq.state_variable_idx];
-    auto built = pass_internal::build_backward_euler_residual(
+    auto built = detail::build_backward_euler_residual(
         model_mut, eq, "TimeIntegrationPass");
     model_mut.add_output(sv.name + "_residual",
                          std::move(built.residual));
@@ -1432,7 +1445,7 @@ inline void LocalJacobianPass::run(PassContext &pctx) {
 
   for (auto const &eq : equations) {
     auto const &sv = svs[eq.state_variable_idx];
-    auto built = pass_internal::build_backward_euler_residual(
+    auto built = detail::build_backward_euler_residual(
         model_mut, eq, "LocalJacobianPass");
 
     // TODO(numsim-codegen#72): `cas::diff` produces a fresh expression
