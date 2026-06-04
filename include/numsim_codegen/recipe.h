@@ -8,6 +8,7 @@
 #include <numsim_codegen/code_emit/tensor_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_to_scalar_code_emit.h>
 #include <numsim_codegen/passes/code_emit_pass.h>
+#include <numsim_codegen/passes/local_jacobian_pass.h>
 #include <numsim_codegen/passes/pass.h>
 #include <numsim_codegen/passes/pass_manager.h>
 #include <numsim_codegen/passes/symbol_validation_pass.h>
@@ -15,7 +16,9 @@
 #include <numsim_codegen/passes/time_integration_pass.h>
 #include <numsim_codegen/recipe_render.h>
 
+#include <numsim_cas/core/diff.h>
 #include <numsim_cas/scalar/scalar_all.h>
+#include <numsim_cas/scalar/scalar_diff.h>
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 
@@ -569,6 +572,11 @@ public:
     // gating registration here we keep the elastic path unchanged.
     if (!m_evolution_equations.empty()) {
       pm.emplace<TimeIntegrationPass>();
+      // Phase 3a-1 (issue #70): emit `<sv>_jacobian` outputs alongside
+      // residuals so external Newton drivers (or Phase 3a-2's
+      // LocalNewtonLoweringPass once control-flow emit lands) can
+      // iterate `α ← α − R/J` without needing finite differences.
+      pm.emplace<LocalJacobianPass>();
     }
     pm.emplace<CodeEmitPass>();
     pm.run(pctx);
@@ -1360,6 +1368,65 @@ inline void TimeIntegrationPass::run(PassContext &pctx) {
 
     auto residual = (cur_expr - old_expr) / dt_expr - eq.rate;
     model_mut.add_output(sv.name + "_residual", std::move(residual));
+  }
+}
+
+// Phase 3a-1 (issue #70): symbolic-Jacobian emission. For each
+// evolution equation, computes `J = ∂R/∂α` via `cas::diff()` and adds
+// it as a `<sv>_jacobian` output. Runs AFTER TimeIntegrationPass (the
+// residual outputs must already be synthesised) and BEFORE CodeEmitPass.
+//
+// We don't read the pre-synthesised `<sv>_residual` output back — that
+// would require pattern-matching on `model.outputs()` by name. Instead,
+// we re-derive the residual expression from the evolution-equation
+// record + the current/old/dt handles, exactly as TimeIntegrationPass
+// did, then call `cas::diff` on the result. This keeps the two passes
+// algorithmically parallel (single source of truth: the EvolutionEquation
+// record) and avoids brittle output-name string matching.
+inline void LocalJacobianPass::run(PassContext &pctx) {
+  auto &model_mut = pctx.model.require_mutable_model("LocalJacobianPass");
+  auto const &equations = model_mut.evolution_equations();
+  auto const &svs = model_mut.state_variables();
+
+  cas::expression_holder<cas::scalar_expression> dt_expr;
+  for (auto const &[name, h] : model_mut.scalar_symbol_map()) {
+    if (name == state_time_step_name) {
+      dt_expr = h;
+      break;
+    }
+  }
+  if (!dt_expr.is_valid()) {
+    throw std::runtime_error(std::format(
+        "ConstitutiveModel '{}': LocalJacobianPass cannot find the '{}' "
+        "symbol; TimeIntegrationPass should have auto-registered it.",
+        model_mut.name(), state_time_step_name));
+  }
+
+  for (auto const &eq : equations) {
+    auto const &sv = svs[eq.state_variable_idx];
+    auto const &cur_name = model_mut.symbols()[sv.current_symbol_idx].name;
+    auto const &old_name = model_mut.symbols()[sv.old_symbol_idx].name;
+
+    cas::expression_holder<cas::scalar_expression> cur_expr;
+    cas::expression_holder<cas::scalar_expression> old_expr;
+    for (auto const &[name, h] : model_mut.scalar_symbol_map()) {
+      if (name == cur_name) cur_expr = h;
+      if (name == old_name) old_expr = h;
+    }
+    if (!cur_expr.is_valid() || !old_expr.is_valid()) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': LocalJacobianPass cannot resolve "
+          "current/old scalar handles for state variable '{}'.",
+          model_mut.name(), sv.name));
+    }
+
+    // Reconstruct the residual exactly as TimeIntegrationPass did, then
+    // differentiate wrt the state variable. cas::diff handles the chain
+    // rule through the rate sub-expression — `rate = K·α` yields `∂rate/∂α = K`;
+    // `rate = K` (constant) yields 0; etc.
+    auto residual = (cur_expr - old_expr) / dt_expr - eq.rate;
+    auto jacobian = cas::diff(residual, cur_expr);
+    model_mut.add_output(sv.name + "_jacobian", std::move(jacobian));
   }
 }
 

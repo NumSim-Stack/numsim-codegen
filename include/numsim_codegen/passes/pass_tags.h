@@ -81,6 +81,14 @@ inline constexpr std::string_view tensor_space_declarations_checked =
 // consume this tag as a precondition before iterating the residuals.
 inline constexpr std::string_view dt_lowered = "dt-lowered";
 
+// LocalJacobianPass postcondition (Phase 3a-1, issue #70). Advertises
+// that every evolution equation now has a `<sv>_jacobian` output
+// representing `∂<sv>_residual/∂<sv>` — computed symbolically at
+// codegen time via `cas::diff()`. Phase 3a-2's actual Newton-loop
+// emission pass will consume this tag as a precondition; external
+// Newton drivers can use the residual + Jacobian outputs directly.
+inline constexpr std::string_view jacobian_emitted = "jacobian-emitted";
+
 // CodeEmitPass postcondition.
 inline constexpr std::string_view compute_function_emitted =
     "compute-function-emitted";
