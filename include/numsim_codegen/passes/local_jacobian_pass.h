@@ -19,11 +19,18 @@ namespace numsim::codegen {
 // once the control-flow emission infrastructure lands) consume both
 // outputs to iterate `α_{k+1} = α_k − R/J`.
 //
+// **Driver contract (PR #71 round-1 #5):** the emitted `<sv>_jacobian`
+// references `dt` as a regular scalar input. A Newton driver MUST hold
+// `dt` constant across all iterations of the local solve — otherwise
+// the system being solved changes mid-iteration and convergence is
+// undefined. MOOSE's `_dt` is per-timestep so this happens naturally;
+// hand-written drivers must respect the same invariant.
+//
 // **Pipeline placement.** Registered AFTER `TimeIntegrationPass` (which
 // must have run to populate the synthesised `<sv>_residual` outputs)
 // and BEFORE `CodeEmitPass` (so the Jacobian outputs land in the same
-// emit sweep). Precondition: `dt_lowered`. Postcondition:
-// `jacobian_emitted`.
+// emit sweep). Precondition: `backward_euler_residual_emitted`.
+// Postcondition: `jacobian_emitted`.
 //
 // **Scalar-only.** Tensor evolution equations are out of Phase 3a-1
 // scope (and out of Phase 2.2 — they don't exist yet on the recipe
@@ -47,7 +54,7 @@ public:
             pass_tags::identifiers_valid,
             pass_tags::state_variables_checked,
             pass_tags::state_variables_non_empty,
-            pass_tags::dt_lowered};
+            pass_tags::backward_euler_residual_emitted};
   }
   [[nodiscard]] auto postconditions() const
       -> std::vector<std::string_view> override {

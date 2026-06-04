@@ -576,6 +576,15 @@ public:
       // residuals so external Newton drivers (or Phase 3a-2's
       // LocalNewtonLoweringPass once control-flow emit lands) can
       // iterate `α ← α − R/J` without needing finite differences.
+      //
+      // **Policy (PR #71 round-1 #6):** LocalJacobianPass runs
+      // unconditionally whenever there are evolution equations. This is
+      // the intended forever-default — every Newton-driven consumer
+      // wants the Jacobian, and external FD-based drivers can simply
+      // ignore the extra out-parameter. If a future consumer needs a
+      // residual-only emit (e.g. for runtime symbolic differentiation,
+      // or a hand-tuned hot path), introduce an `EmitFlags` builder
+      // parameter rather than changing this default.
       pm.emplace<LocalJacobianPass>();
     }
     pm.emplace<CodeEmitPass>();
@@ -1316,6 +1325,66 @@ inline void TensorSpaceConsistencyPass::run(PassContext &pctx) {
   }
 }
 
+// PR #71 round-1 #1: shared residual-construction helper. Before this
+// extraction, both `TimeIntegrationPass::run` and `LocalJacobianPass::run`
+// independently reconstructed `(α − α_old)/dt − rate` — a silent-drift
+// hazard if either pass's residual shape ever changed (sign convention,
+// scaling factor, BDF2 numerator, etc.). The helper is the single
+// source of truth for the backward-Euler discrete residual; both
+// passes call it.
+//
+// Returns the residual expression PLUS the resolved `cur_expr` handle
+// (needed by LJP to call `cas::diff` wrt the state variable). The
+// caller checks `dt_expr.is_valid()` indirectly via the throw paths
+// inside the helper.
+struct BackwardEulerResidual {
+  cas::expression_holder<cas::scalar_expression> residual;
+  cas::expression_holder<cas::scalar_expression> cur_expr;
+};
+
+inline auto build_backward_euler_residual(ConstitutiveModel &model_mut,
+                                          EvolutionEquation const &eq,
+                                          char const *calling_pass_name)
+    -> BackwardEulerResidual {
+  auto const &svs = model_mut.state_variables();
+  auto const &sv = svs[eq.state_variable_idx];
+
+  // Resolve `dt`, `<sv>`, `<sv>_old` scalar handles by walking the
+  // scalar symbol map. Single pass over the map captures all three.
+  // The `dt` symbol is auto-registered by
+  // `add_scalar_evolution_equation` → `ensure_dt_symbol_registered_`
+  // (PR #69 round-1 #7) so the lookup must succeed if the recipe was
+  // built through the public API.
+  cas::expression_holder<cas::scalar_expression> dt_expr;
+  cas::expression_holder<cas::scalar_expression> cur_expr;
+  cas::expression_holder<cas::scalar_expression> old_expr;
+  auto const &cur_name = model_mut.symbols()[sv.current_symbol_idx].name;
+  auto const &old_name = model_mut.symbols()[sv.old_symbol_idx].name;
+  for (auto const &[name, h] : model_mut.scalar_symbol_map()) {
+    if (name == state_time_step_name) dt_expr = h;
+    else if (name == cur_name) cur_expr = h;
+    else if (name == old_name) old_expr = h;
+  }
+  if (!dt_expr.is_valid()) {
+    throw std::runtime_error(std::format(
+        "ConstitutiveModel '{}': {} cannot find the '{}' symbol — "
+        "`ensure_dt_symbol_registered_()` should have auto-registered "
+        "it on the first add_scalar_evolution_equation call. State "
+        "variable / symbol vectors are out of sync.",
+        model_mut.name(), calling_pass_name, state_time_step_name));
+  }
+  if (!cur_expr.is_valid() || !old_expr.is_valid()) {
+    throw std::runtime_error(std::format(
+        "ConstitutiveModel '{}': {} cannot resolve current/old scalar "
+        "handles for state variable '{}'. State variable / symbol "
+        "vectors are out of sync.",
+        model_mut.name(), calling_pass_name, sv.name));
+  }
+
+  auto residual = (cur_expr - old_expr) / dt_expr - eq.rate;
+  return {std::move(residual), std::move(cur_expr)};
+}
+
 // Phase 2.2 (issue #68): backward-Euler lowering. For each evolution
 // equation `(state_var, rate)` declared on the recipe, synthesise a
 // new scalar output `<state_var>_residual` whose expression is the
@@ -1326,48 +1395,12 @@ inline void TimeIntegrationPass::run(PassContext &pctx) {
   auto const &equations = model_mut.evolution_equations();
   auto const &svs = model_mut.state_variables();
 
-  // The `dt` symbol must already be registered (auto-registered by
-  // add_scalar_evolution_equation). Build a cas handle for it by
-  // looking up the existing scalar map entry.
-  cas::expression_holder<cas::scalar_expression> dt_expr;
-  for (auto const &[name, h] : model_mut.scalar_symbol_map()) {
-    if (name == state_time_step_name) {
-      dt_expr = h;
-      break;
-    }
-  }
-  if (!dt_expr.is_valid()) {
-    throw std::runtime_error(std::format(
-        "ConstitutiveModel '{}': TimeIntegrationPass cannot find the "
-        "'{}' symbol that add_scalar_evolution_equation should have "
-        "auto-registered. State variable / symbol vectors are out of "
-        "sync.",
-        model_mut.name(), state_time_step_name));
-  }
-
-  // For each evolution equation, locate the current+old scalar handles
-  // and synthesise `(α − α_old)/dt − rate` as a new output.
   for (auto const &eq : equations) {
     auto const &sv = svs[eq.state_variable_idx];
-    auto const &cur_name = model_mut.symbols()[sv.current_symbol_idx].name;
-    auto const &old_name = model_mut.symbols()[sv.old_symbol_idx].name;
-
-    cas::expression_holder<cas::scalar_expression> cur_expr;
-    cas::expression_holder<cas::scalar_expression> old_expr;
-    for (auto const &[name, h] : model_mut.scalar_symbol_map()) {
-      if (name == cur_name) cur_expr = h;
-      if (name == old_name) old_expr = h;
-    }
-    if (!cur_expr.is_valid() || !old_expr.is_valid()) {
-      throw std::runtime_error(std::format(
-          "ConstitutiveModel '{}': TimeIntegrationPass cannot resolve "
-          "current/old scalar handles for state variable '{}'. State "
-          "variable / symbol vectors are out of sync.",
-          model_mut.name(), sv.name));
-    }
-
-    auto residual = (cur_expr - old_expr) / dt_expr - eq.rate;
-    model_mut.add_output(sv.name + "_residual", std::move(residual));
+    auto built = build_backward_euler_residual(
+        model_mut, eq, "TimeIntegrationPass");
+    model_mut.add_output(sv.name + "_residual",
+                         std::move(built.residual));
   }
 }
 
@@ -1376,56 +1409,31 @@ inline void TimeIntegrationPass::run(PassContext &pctx) {
 // it as a `<sv>_jacobian` output. Runs AFTER TimeIntegrationPass (the
 // residual outputs must already be synthesised) and BEFORE CodeEmitPass.
 //
-// We don't read the pre-synthesised `<sv>_residual` output back — that
-// would require pattern-matching on `model.outputs()` by name. Instead,
-// we re-derive the residual expression from the evolution-equation
-// record + the current/old/dt handles, exactly as TimeIntegrationPass
-// did, then call `cas::diff` on the result. This keeps the two passes
-// algorithmically parallel (single source of truth: the EvolutionEquation
-// record) and avoids brittle output-name string matching.
+// Re-derives the residual through the shared
+// `build_backward_euler_residual` helper — the single source of truth
+// for the discrete residual shape (PR #71 round-1 #1). If
+// TimeIntegrationPass ever changes its residual form (sign convention,
+// BDF2 numerator, scaling factor), LJP automatically picks up the same
+// change here.
 inline void LocalJacobianPass::run(PassContext &pctx) {
   auto &model_mut = pctx.model.require_mutable_model("LocalJacobianPass");
   auto const &equations = model_mut.evolution_equations();
   auto const &svs = model_mut.state_variables();
 
-  cas::expression_holder<cas::scalar_expression> dt_expr;
-  for (auto const &[name, h] : model_mut.scalar_symbol_map()) {
-    if (name == state_time_step_name) {
-      dt_expr = h;
-      break;
-    }
-  }
-  if (!dt_expr.is_valid()) {
-    throw std::runtime_error(std::format(
-        "ConstitutiveModel '{}': LocalJacobianPass cannot find the '{}' "
-        "symbol; TimeIntegrationPass should have auto-registered it.",
-        model_mut.name(), state_time_step_name));
-  }
-
   for (auto const &eq : equations) {
     auto const &sv = svs[eq.state_variable_idx];
-    auto const &cur_name = model_mut.symbols()[sv.current_symbol_idx].name;
-    auto const &old_name = model_mut.symbols()[sv.old_symbol_idx].name;
+    auto built = build_backward_euler_residual(
+        model_mut, eq, "LocalJacobianPass");
 
-    cas::expression_holder<cas::scalar_expression> cur_expr;
-    cas::expression_holder<cas::scalar_expression> old_expr;
-    for (auto const &[name, h] : model_mut.scalar_symbol_map()) {
-      if (name == cur_name) cur_expr = h;
-      if (name == old_name) old_expr = h;
-    }
-    if (!cur_expr.is_valid() || !old_expr.is_valid()) {
-      throw std::runtime_error(std::format(
-          "ConstitutiveModel '{}': LocalJacobianPass cannot resolve "
-          "current/old scalar handles for state variable '{}'.",
-          model_mut.name(), sv.name));
-    }
-
-    // Reconstruct the residual exactly as TimeIntegrationPass did, then
-    // differentiate wrt the state variable. cas::diff handles the chain
-    // rule through the rate sub-expression — `rate = K·α` yields `∂rate/∂α = K`;
-    // `rate = K` (constant) yields 0; etc.
-    auto residual = (cur_expr - old_expr) / dt_expr - eq.rate;
-    auto jacobian = cas::diff(residual, cur_expr);
+    // PR #71 round-1 #3 (TODO): `cas::diff` produces a fresh expression
+    // tree. Sub-terms structurally identical to those in the residual
+    // (parameter handles, `1/dt` factor) are pointer-distinct from
+    // TimeIntegrationPass's tree, so the CodeGenContext's pointer-keyed
+    // CSE misses them. Fine at single-SV scale; Phase 4's multi-SV +
+    // rank-4-tensor Jacobian path will benefit from either tighter
+    // residual/Jacobian co-emission OR a value-based CSE upgrade.
+    // Pinned here so the next person scaling this is forced to choose.
+    auto jacobian = cas::diff(built.residual, built.cur_expr);
     model_mut.add_output(sv.name + "_jacobian", std::move(jacobian));
   }
 }

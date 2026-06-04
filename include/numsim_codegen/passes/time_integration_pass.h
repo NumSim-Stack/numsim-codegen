@@ -28,7 +28,7 @@ namespace numsim::codegen {
 // **Newton iteration is out of scope.** The residual is emitted as a
 // regular output; the caller supplies the Newton driver externally.
 // Phase 3a (issue #34) introduces `LocalNewtonLoweringPass` which
-// consumes this pass's `dt_lowered` postcondition.
+// consumes this pass's `backward_euler_residual_emitted` postcondition.
 //
 // **Scalar-only.** Tensor evolution equations (rate-form plasticity,
 // `Dt(ε^p) = ...`) are common in mechanics but out of Phase 2.2 scope.
@@ -47,7 +47,7 @@ public:
   }
   [[nodiscard]] auto postconditions() const
       -> std::vector<std::string_view> override {
-    return {pass_tags::dt_lowered};
+    return {pass_tags::backward_euler_residual_emitted};
   }
   void run(PassContext &pctx) override; // defined in recipe.h after class.
 };

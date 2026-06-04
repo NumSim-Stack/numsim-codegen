@@ -28,6 +28,33 @@
 
 namespace numsim::codegen {
 
+namespace {
+// PR #71 round-1 #2: slice helper. The generated source emits all CSE
+// temps first, then the output writes (`<sv>_residual_out = tN;`,
+// `<sv>_jacobian_out = tM;`). Substring-matching the whole body can't
+// distinguish "K appears in the residual" from "K appears in the
+// Jacobian". This helper extracts the IMMEDIATE definition of the temp
+// referenced by `<output>_out = tN;` so tests can assert on that line.
+//
+// Doesn't recurse into chained temps — for that, a Jacobian's nested
+// `1/dt` factor lives in a separate `auto tK = std::pow(dt, -1.0)` line.
+// Recursive expansion is over-engineering for the assertion shapes we
+// care about today (presence/absence of K, alpha_old in the Jacobian's
+// top-level RHS). If that changes, swap to a full chain-walker.
+std::string immediate_def_for_output(std::string const &src,
+                                     std::string const &out_name) {
+  auto const out_idx = src.find(out_name + " = ");
+  if (out_idx == std::string::npos) return {};
+  auto const out_eq = src.find('=', out_idx);
+  auto const out_semi = src.find(';', out_eq);
+  auto const temp_id = src.substr(out_eq + 2, out_semi - out_eq - 2);
+  auto const def_idx = src.find("auto " + temp_id + " =");
+  if (def_idx == std::string::npos) return {};
+  auto const def_semi = src.find(';', def_idx);
+  return src.substr(def_idx, def_semi - def_idx);
+}
+} // namespace
+
 TEST(LocalJacobian, PassSynthesizesJacobianOutput) {
   // Direct invocation: SVPass → TIP → LJP. After LJP runs, the recipe
   // has BOTH `<sv>_residual` (from TIP) and `<sv>_jacobian` (from LJP)
@@ -54,9 +81,11 @@ TEST(LocalJacobian, PassSynthesizesJacobianOutput) {
 
 TEST(LocalJacobian, ConstantRateGivesPureInverseDt) {
   // rate = K (constant in α) ⇒ ∂rate/∂α = 0 ⇒ J = 1/dt.
-  // The emitted source must show that the jacobian output is
-  // independent of α — only `dt` should appear in the jacobian
-  // assignment line.
+  //
+  // PR #71 round-1 #2: slice to the Jacobian's immediate definition.
+  // The pattern is `alpha_jacobian_out = tN; auto tN = std::pow(dt, -1.0);`
+  // — the Jacobian's RHS temp must define `std::pow(dt, -1.0)` and
+  // NOT reference K (∂K/∂α = 0) nor alpha_old (independent leaf).
   ConstitutiveModel model("M");
   auto K = model.add_parameter("K", 1.0);
   auto alpha = model.add_scalar_state_variable(
@@ -64,14 +93,28 @@ TEST(LocalJacobian, ConstantRateGivesPureInverseDt) {
   model.add_scalar_evolution_equation(alpha, K);
 
   auto const src = model.emit_compute_function();
-  EXPECT_NE(src.find("alpha_jacobian_out"), std::string::npos) << src;
-  // Backward Euler ⇒ 1/dt term must appear.
-  EXPECT_NE(src.find("std::pow(dt, -1.0)"), std::string::npos) << src;
+  ASSERT_NE(src.find("alpha_jacobian_out"), std::string::npos) << src;
+
+  auto const jac_def = immediate_def_for_output(src, "alpha_jacobian_out");
+  ASSERT_FALSE(jac_def.empty())
+      << "couldn't extract Jacobian's immediate def from: " << src;
+  EXPECT_NE(jac_def.find("std::pow(dt, -1.0)"), std::string::npos)
+      << "constant-rate Jacobian must be 1/dt: " << jac_def;
+  EXPECT_EQ(jac_def.find("K"), std::string::npos)
+      << "constant-rate Jacobian must NOT reference K (∂K/∂α = 0): "
+      << jac_def;
+  EXPECT_EQ(jac_def.find("alpha_old"), std::string::npos)
+      << "Jacobian must be independent of alpha_old: " << jac_def;
 }
 
 TEST(LocalJacobian, LinearHardeningRateGivesInverseDtMinusK) {
-  // rate = K·α ⇒ ∂rate/∂α = K ⇒ J = 1/dt − K. The cas chain rule
-  // through the multiplication must surface K in the jacobian.
+  // rate = K·α ⇒ ∂rate/∂α = K ⇒ J = 1/dt − K.
+  //
+  // PR #71 round-1 #2: slice to the Jacobian's immediate def to PIN:
+  //   (a) `-K` appears (sign of the chain-rule term)
+  //   (b) The Jacobian's `+ <temp>` chains to a `std::pow(dt, -1.0)` temp
+  //   (c) The Jacobian's immediate def does NOT contain `alpha_old`
+  //       (cas::diff must treat current/old leaves as independent)
   ConstitutiveModel model("H");
   auto K = model.add_parameter("K", 1.0);
   auto alpha = model.add_scalar_state_variable(
@@ -79,11 +122,28 @@ TEST(LocalJacobian, LinearHardeningRateGivesInverseDtMinusK) {
   model.add_scalar_evolution_equation(alpha, K * alpha.current);
 
   auto const src = model.emit_compute_function();
-  EXPECT_NE(src.find("alpha_jacobian_out"), std::string::npos) << src;
+  ASSERT_NE(src.find("alpha_jacobian_out"), std::string::npos) << src;
   EXPECT_NE(src.find("std::pow(dt, -1.0)"), std::string::npos) << src;
-  // K must surface in the body — it's the only non-time-derivative
-  // contribution to J.
-  EXPECT_NE(src.find("K"), std::string::npos) << src;
+
+  auto const jac_def = immediate_def_for_output(src, "alpha_jacobian_out");
+  ASSERT_FALSE(jac_def.empty())
+      << "couldn't extract Jacobian's immediate def from: " << src;
+
+  // (a) Sign: J = −K + 1/dt. The leading `-K` is the signature.
+  EXPECT_NE(jac_def.find("-K"), std::string::npos)
+      << "linear-hardening Jacobian must contain `-K` (chain-rule sign): "
+      << jac_def;
+  // Negative pin: a sign-flip regression that emitted `+K` (no minus)
+  // would still find `K` in the slice. Pin the absence of the wrong shape:
+  EXPECT_EQ(jac_def.find("+K +"), std::string::npos)
+      << "Jacobian must NOT emit `+K` (would be sign-flip regression): "
+      << jac_def;
+
+  // (b) `alpha_old` MUST NOT appear in the Jacobian's immediate def —
+  // cas::diff treats the separate `alpha_old` leaf as independent of α.
+  EXPECT_EQ(jac_def.find("alpha_old"), std::string::npos)
+      << "Jacobian must be independent of alpha_old "
+      << "(cas::diff conflation regression?): " << jac_def;
 }
 
 TEST(LocalJacobian, MultipleEvolutionEquationsEachGetTheirJacobian) {
@@ -107,10 +167,11 @@ TEST(LocalJacobian, MultipleEvolutionEquationsEachGetTheirJacobian) {
   EXPECT_NE(src.find("c_jacobian_out"), std::string::npos) << src;
 }
 
-TEST(LocalJacobian, PassPreconditionRequiresDtLowered) {
-  // LJP declares dt_lowered as a precondition. Registering LJP
-  // WITHOUT TimeIntegrationPass having run first must fail at
-  // PassManager::run() time.
+TEST(LocalJacobian, PassPreconditionRequiresBackwardEulerResidualEmitted) {
+  // LJP declares backward_euler_residual_emitted as a precondition.
+  // Registering LJP WITHOUT TimeIntegrationPass having run first must
+  // fail at PassManager::run() time. (PR #71 round-1 #4: per-scheme
+  // tag, NOT the coarse legacy `dt_lowered`.)
   ConstitutiveModel model("M");
   auto K = model.add_parameter("K", 1.0);
   auto alpha = model.add_scalar_state_variable(
@@ -128,7 +189,9 @@ TEST(LocalJacobian, PassPreconditionRequiresDtLowered) {
   } catch (std::runtime_error const &e) {
     std::string const what = e.what();
     EXPECT_NE(what.find("LocalJacobian"), std::string::npos) << what;
-    EXPECT_NE(what.find("dt-lowered"), std::string::npos) << what;
+    EXPECT_NE(what.find("backward-euler-residual-emitted"),
+              std::string::npos)
+        << what;
   }
 }
 
