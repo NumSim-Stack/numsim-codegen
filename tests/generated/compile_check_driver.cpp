@@ -58,13 +58,12 @@ TEST(CompileCheckGenerated, AdaptorArgumentsAvoidCopy) {
   EXPECT_NEAR(sigma_buf[8], 10.0, 1e-12);
 }
 
-// PR #71 round-6: the headline contract of Phase 3a-1 is that
-// LocalJacobianPass emits a numerically-correct Jacobian via cas::diff.
-// Substring-matching in tests/LocalJacobianTest.cpp can't catch a
-// regression that emits a plausible-but-wrong expression. This test
-// closes the gap: build the generated hardening function, call it with
-// concrete inputs, verify both the residual and the Jacobian against
-// hand-computed values.
+// End-to-end check that `LocalJacobianPass` emits a numerically-correct
+// Jacobian via `cas::diff`. Substring-matching in
+// `tests/LocalJacobianTest.cpp` cannot catch a regression that emits a
+// plausible-but-wrong expression — this test compiles + calls the
+// generated hardening function and verifies both the residual and the
+// Jacobian against hand-computed values.
 TEST(CompileCheckGenerated, HardeningResidualAndJacobianAreNumericallyCorrect) {
   double const K = 2.0;
   double const alpha = 1.5;

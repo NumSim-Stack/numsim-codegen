@@ -6,12 +6,12 @@
 // Two recipes are emitted:
 //   1. **CompileCheck** — scalar/tensor inputs + parameters + outputs.
 //      Exercises the full elastic-recipe pipeline + adaptor zero-copy.
-//   2. **HardeningCheck** (Phase 3a-1, PR #71 round-6) — scalar state
-//      variable + linear-hardening evolution equation. The generated
-//      function gains paired `_residual_out` + `_jacobian_out` parameters,
-//      and the driver verifies their numerical values match `(α−α_old)/dt
-//      − K·α` and `1/dt − K` respectively. This is the round-trip test
-//      that catches `cas::diff` regressions which substring-matching in
+//   2. **HardeningCheck** (Phase 3a-1) — scalar state variable +
+//      linear-hardening evolution equation. The generated function gains
+//      paired `_residual_out` + `_jacobian_out` parameters, and the
+//      driver verifies their numerical values match `(α−α_old)/dt − K·α`
+//      and `1/dt − K` respectively. End-to-end check that catches
+//      `cas::diff` regressions which substring-matching in
 //      `tests/LocalJacobianTest.cpp` cannot.
 
 #include <numsim_codegen/numsim_codegen.h>
