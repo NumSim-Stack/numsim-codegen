@@ -204,12 +204,12 @@ TEST(TimeIntegration, PassPreconditionFailsOnPureElasticity) {
   }
 }
 
-TEST(TimeIntegration, PassAdvertisesDtLoweredPostcondition) {
+TEST(TimeIntegration, PassAdvertisesBackwardEulerResidualEmittedPostcondition) {
   TimeIntegrationPass pass;
   auto const post = pass.postconditions();
   bool found = false;
   for (auto const &tag : post) {
-    if (tag == pass_tags::dt_lowered) found = true;
+    if (tag == pass_tags::backward_euler_residual_emitted) found = true;
   }
   EXPECT_TRUE(found);
 }

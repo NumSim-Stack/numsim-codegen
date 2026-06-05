@@ -51,6 +51,7 @@ sequenceDiagram
     participant SVP as SymbolValidationPass
     participant TSP as TensorSpaceConsistencyPass
     participant TIP as TimeIntegrationPass
+    participant LJP as LocalJacobianPass
     participant CEP as CodeEmitPass
     participant SE as ScalarCodeEmit
     participant TE as TensorCodeEmit
@@ -81,7 +82,13 @@ sequenceDiagram
     PM->>TIP: run(pctx) [if evolution equations present]
     TIP->>TIP: require_mutable_model("TimeIntegrationPass")
     TIP->>TIP: for each EvolutionEquation:<br/>add_output(sv_residual, (sv − sv_old)/dt − rate)
-    TIP-->>PM: postconditions:<br/>{dt-lowered}
+    TIP-->>PM: postconditions:<br/>{backward-euler-residual-emitted}
+
+    Note over PM,LJP: Phase 3a-1: LocalJacobianPass registered<br/>alongside TIP (same non-empty gate).
+    PM->>LJP: run(pctx) [if evolution equations present]
+    LJP->>LJP: require_mutable_model("LocalJacobianPass")
+    LJP->>LJP: for each EvolutionEquation:<br/>add_output(sv_jacobian, cas::diff(residual, sv))
+    LJP-->>PM: postconditions:<br/>{jacobian-emitted}
 
     PM->>CEP: run(pctx)
     Note over CEP: Cycle-break via<br/>unique_ptr<T2sCodeEmit> indirection
@@ -244,7 +251,9 @@ Where future work plugs in (per epic #28 and follow-up issue #56):
 | Phase | Addition | Insertion point | Status |
 |---|---|---|---|
 | **2.1** | `StateVariable` IR + `add_*_state_variable` API + RecipeView delegate | `ConstitutiveModel`, `RecipeView`, `SymbolDecl::Category` | ✓ landed |
-| **2.2** | `EvolutionEquation` IR + `TimeIntegrationPass` lowering `Dt(α) → (α − α_old)/dt` via mutate-recipe (synthesises `<sv>_residual` outputs) | Between SymbolValidationPass and CodeEmitPass; advertises `dt-lowered` postcondition. Scalar-only; tensor evolutions deferred. | ✓ landed |
+| **2.2** | `EvolutionEquation` IR + `TimeIntegrationPass` lowering `Dt(α) → (α − α_old)/dt` via mutate-recipe (synthesises `<sv>_residual` outputs) | Between SymbolValidationPass and CodeEmitPass; advertises `backward-euler-residual-emitted` postcondition. Scalar-only; tensor evolutions deferred. | ✓ landed |
+| **3a-1** | `LocalJacobianPass` symbolic `∂<sv>_residual/∂<sv>` via `cas::diff` → `<sv>_jacobian` output | After TimeIntegrationPass, before CodeEmitPass; advertises `jacobian-emitted` postcondition. Scalar-only. | ✓ landed |
+| **3a-2** | `LocalNewtonLoweringPass` emitting the actual Newton iteration body (needs control-flow emit primitives) | After LocalJacobianPass, before CodeEmitPass | next |
 | **2.3** | `Equation` + `ComplementarityConstraint` IR types | `ConstitutiveModel` IR section | next |
 | **2.4** | `LocalNewtonSystem` IR (unknown state vars + residual expressions) | New section on `ConstitutiveModel` | next |
 | **2.5** | `KuhnTuckerLoweringPass` rewriting NCP constraints to Fischer-Burmeister | Between SymbolValidationPass and CodeEmitPass; advertises `kt-lowered` | next |

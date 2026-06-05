@@ -26,6 +26,7 @@ add_executable(numsim_codegen_tests
     PassFrameworkTest.cpp
     StateVariableTest.cpp
     TimeIntegrationTest.cpp
+    LocalJacobianTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests
@@ -52,19 +53,23 @@ add_executable(generate_compile_check_recipe
 target_link_libraries(generate_compile_check_recipe PRIVATE numsim::codegen)
 
 set(GENERATED_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/CompileCheck.h)
+set(GENERATED_HARDENING_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/HardeningCheck.h)
 
 add_custom_command(
-    OUTPUT ${GENERATED_HEADER}
+    OUTPUT ${GENERATED_HEADER} ${GENERATED_HARDENING_HEADER}
     COMMAND ${CMAKE_COMMAND} -E make_directory
             ${CMAKE_CURRENT_BINARY_DIR}/generated
-    COMMAND $<TARGET_FILE:generate_compile_check_recipe> ${GENERATED_HEADER}
+    COMMAND $<TARGET_FILE:generate_compile_check_recipe>
+            ${GENERATED_HEADER} ${GENERATED_HARDENING_HEADER}
     DEPENDS generate_compile_check_recipe
-    COMMENT "Generating CompileCheck.h via numsim-codegen"
+    COMMENT "Generating CompileCheck.h + HardeningCheck.h via numsim-codegen"
     VERBATIM)
 
 add_executable(compile_check_driver
     generated/compile_check_driver.cpp
-    ${GENERATED_HEADER})
+    ${GENERATED_HEADER}
+    ${GENERATED_HARDENING_HEADER})
 target_include_directories(compile_check_driver
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(compile_check_driver

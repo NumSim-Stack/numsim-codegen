@@ -74,12 +74,24 @@ inline constexpr std::string_view state_variables_non_empty =
 inline constexpr std::string_view tensor_space_declarations_checked =
     "tensor-space-declarations-checked";
 
-// TimeIntegrationPass postcondition (Phase 2.2, issue #68). Advertises
-// that every evolution equation `Dt(α) = rate` declared on the recipe
-// has been lowered to a backward-Euler residual output
-// `(α − α_old)/dt − rate`. Phase 3a's `LocalNewtonLoweringPass` will
-// consume this tag as a precondition before iterating the residuals.
-inline constexpr std::string_view dt_lowered = "dt-lowered";
+// TimeIntegrationPass postcondition (Phase 2.2, issue #68; renamed in
+// PR #71 round-1 review #4). Advertises that every evolution equation
+// `Dt(α) = rate` has been lowered to the **backward-Euler** discrete
+// residual `(α − α_old)/dt − rate`. The previous name `dt_lowered`
+// was too coarse — Phase 4's planned Forward-Euler / BDF2 integrators
+// would advertise the same tag and silently satisfy consumers
+// (`LocalJacobianPass` etc.) that emit backward-Euler-specific shapes.
+// Future integration schemes get their own per-scheme tags.
+inline constexpr std::string_view backward_euler_residual_emitted =
+    "backward-euler-residual-emitted";
+
+// LocalJacobianPass postcondition (Phase 3a-1, issue #70). Advertises
+// that every evolution equation now has a `<sv>_jacobian` output
+// representing `∂<sv>_residual/∂<sv>` — computed symbolically at
+// codegen time via `cas::diff()`. Phase 3a-2's actual Newton-loop
+// emission pass will consume this tag as a precondition; external
+// Newton drivers can use the residual + Jacobian outputs directly.
+inline constexpr std::string_view jacobian_emitted = "jacobian-emitted";
 
 // CodeEmitPass postcondition.
 inline constexpr std::string_view compute_function_emitted =
