@@ -42,10 +42,8 @@ public:
   }
   [[nodiscard]] auto preconditions() const
       -> std::vector<std::string_view> override {
-    return {pass_tags::symbols_declared,
-            pass_tags::identifiers_valid,
-            pass_tags::state_variables_checked,
-            pass_tags::state_variables_non_empty};
+    return pass_tags::bundles::with(
+        pass_tags::bundles::state_variable_lowering_inputs);
   }
   [[nodiscard]] auto postconditions() const
       -> std::vector<std::string_view> override {
