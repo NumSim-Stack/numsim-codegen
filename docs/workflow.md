@@ -259,9 +259,9 @@ Where future work plugs in (per epic #28 and follow-up issue #56):
 | **2.3** | `Equation` + `ComplementarityConstraint` IR types | `ConstitutiveModel` IR section | next |
 | **2.4** | `LocalNewtonSystem` IR (unknown state vars + residual expressions) | New section on `ConstitutiveModel` | next |
 | **2.5** | `KuhnTuckerLoweringPass` rewriting NCP constraints to Fischer-Burmeister | Between SymbolValidationPass and CodeEmitPass; advertises `kt-lowered` | next |
-| **2.6** | `LocalNewtonLoweringPass` emitting the Newton iteration body | Between lowering passes and CodeEmitPass | next |
-| **2.6** | MOOSE backend wiring (`getMaterialPropertyOld<>` / `declareProperty<>`) | `MooseMaterialTarget`; switches on `Category::StateVariable*` | next |
-| **2.7** | Standalone backend: state-variable buffer args | `StandaloneCxxTarget` | next |
+| **2.6** | MOOSE backend wiring: `declareProperty` (current) / `getMaterialPropertyOld` (old), `dt`→`_dt`, `initQpStatefulProperties`, compute call via `canonical_arguments` (issue #77) | `MooseMaterialTarget` | ✓ landed |
+| **infra** | `canonical_arguments` — single source of truth for the generated parameter order; backends iterate it instead of re-deriving (issue #77) | `recipe_render.h` / `recipe.h`; consumed by every target | ✓ landed |
+| **2.7** | Standalone backend: state-variable buffer args (already works via the generic compute function; dedicated buffer ergonomics deferred) | `StandaloneCxxTarget` | next |
 | **3a** | `AlgorithmicTangentPass` (consistent tangent via implicit diff) | After Newton lowering, before CodeEmitPass | future |
 | **3b** | `TangentEmitPass` / `MoosePropertyEmitPass` (additional emit targets) | After CodeEmitPass or replacing it depending on target | future |
 

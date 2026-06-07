@@ -92,46 +92,83 @@ TEST(Integration, MixedRecipeOutputOrderingIsStable) {
   EXPECT_LT(resid, jac) << src;
 }
 
-// ─── MAJOR 1: MOOSE backend does NOT yet wire state variables ─────────
+// ─── Phase 2.6 (issue #77): MOOSE backend wires state variables ───────
 
-// KNOWN LIMITATION (Phase 2.6, issues #34/#37): the MooseMaterialTarget
-// constructor + validParams iterate only parameters()/inputs()/outputs()
-// — they do NOT handle Category::StateVariableCurrent / StateVariableOld.
-// For an evolution recipe the generated MOOSE `.C` therefore:
-//   * declares no member for `<sv>` / `<sv>_old`,
-//   * never emits `getMaterialPropertyOld<>` for `<sv>_old`,
-//   * calls the generic compute function with the wrong arity (it omits
-//     the state-variable + synthesised residual/jacobian arguments).
-// i.e. the emitted MOOSE source does NOT compile for evolution recipes.
-//
-// This test PINS that broken-but-known state so:
-//   (a) the gap is documented + visible in the test suite, and
-//   (b) when Phase 2.6 wires state variables, whoever does it MUST flip
-//       these assertions — they can't land the wiring and leave the gap
-//       silently half-done.
-//
-// TODO(phase-2.6 / #37): replace the EXPECT_EQ(..., npos) assertions
-// below with positive checks that `getMaterialPropertyOld<Real>("alpha")`
-// is declared and the compute call passes alpha/alpha_old/residual/jacobian.
-TEST(Integration, MooseBackendDoesNotYetWireStateVariables_KNOWN_GAP) {
-  auto m = build_mixed_hardening();
-  MooseMaterialTarget target;
-  auto files = target.emit(m);
+namespace {
+// A scalar-Newton hardening recipe — the MOOSE-relevant mode (a MOOSE
+// material solves its local system internally and writes the state
+// property). enable_local_newton() makes the generated function solve for
+// the converged state.
+auto build_newton_hardening() -> ConstitutiveModel {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Hardening");
+  auto K = m.add_parameter("K", 1.0);
+  auto alpha = m.add_scalar_state_variable(
+      "alpha", make_expression<scalar_constant>(0.0));
+  m.add_output("sigma_y", K * alpha.current, roles::Stress);
+  m.add_scalar_evolution_equation(alpha, K * alpha.current);
+  m.enable_local_newton();
+  return m;
+}
+} // namespace
+
+TEST(Integration, MooseDeclaresStateVariableProperties) {
+  auto files = MooseMaterialTarget{}.emit(build_newton_hardening());
   ASSERT_EQ(files.size(), 2u);
   std::string const header = files[0].contents;
   std::string const source = files[1].contents;
 
-  // The auto-registered `dt` IS picked up (it's a Parameter, not a
-  // state-variable category) — sanity anchor that emission ran.
-  EXPECT_NE(header.find("_dt"), std::string::npos) << header;
-
-  // KNOWN GAP: no getMaterialPropertyOld wiring for the `_old` symbol.
-  EXPECT_EQ(source.find("getMaterialPropertyOld"), std::string::npos)
-      << "Phase 2.6 may have landed — flip this to a positive check: "
+  // Current state variable: a writable declared property.
+  EXPECT_NE(header.find("MaterialProperty<Real> & _alpha;"),
+            std::string::npos)
+      << header;
+  EXPECT_NE(source.find("declareProperty<Real>(\"Hardening_alpha\")"),
+            std::string::npos)
       << source;
-  // KNOWN GAP: no declared member for the state variable itself.
-  EXPECT_EQ(header.find("_alpha "), std::string::npos)
-      << "Phase 2.6 may have landed — flip this assertion: " << header;
+  // Old value: const property bound via getMaterialPropertyOld of the SAME
+  // declared property name (MOOSE versions it automatically).
+  EXPECT_NE(header.find("const MaterialProperty<Real> & _alpha_old;"),
+            std::string::npos)
+      << header;
+  EXPECT_NE(
+      source.find("getMaterialPropertyOld<Real>(\"Hardening_alpha\")"),
+      std::string::npos)
+      << source;
+}
+
+TEST(Integration, MooseMapsDtToFrameworkTimestep) {
+  auto files = MooseMaterialTarget{}.emit(build_newton_hardening());
+  std::string const source = files[1].contents;
+  // dt must come from MOOSE's framework `_dt`, NOT getParam — and it must
+  // NOT appear as an input-file parameter.
+  EXPECT_EQ(source.find("getParam<Real>(\"dt\")"), std::string::npos)
+      << source;
+  EXPECT_EQ(source.find("addParam<Real>(\"dt\""), std::string::npos)
+      << source;
+  EXPECT_NE(source.find("_dt"), std::string::npos) << source;
+}
+
+TEST(Integration, MooseComputeCallArityMatchesGeneratedSignature) {
+  auto files = MooseMaterialTarget{}.emit(build_newton_hardening());
+  std::string const source = files[1].contents;
+  // The call must thread the state-variable arguments in the canonical
+  // order — proving the historical arity bug (3-arg call into a 7-param
+  // function) is gone. Generated signature is
+  //   Hardening_compute(K, alpha_old, dt, sigma_y_out, alpha_out)
+  // so the call must pass _alpha_old[_qp], _dt, and _alpha[_qp].
+  EXPECT_NE(source.find("_alpha_old[_qp]"), std::string::npos) << source;
+  EXPECT_NE(source.find("_dt"), std::string::npos) << source;
+  EXPECT_NE(source.find("_alpha[_qp]"), std::string::npos) << source;
+}
+
+TEST(Integration, MooseInitialisesStateVariable) {
+  auto files = MooseMaterialTarget{}.emit(build_newton_hardening());
+  std::string const header = files[0].contents;
+  std::string const source = files[1].contents;
+  EXPECT_NE(header.find("virtual void initQpStatefulProperties() override;"),
+            std::string::npos)
+      << header;
+  EXPECT_NE(source.find("_alpha[_qp] = 0.0;"), std::string::npos) << source;
 }
 
 } // namespace numsim::codegen

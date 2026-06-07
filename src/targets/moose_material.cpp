@@ -96,10 +96,15 @@ auto emit_header(ConstitutiveModel const &model) -> std::string {
   os << "  static InputParameters validParams();\n";
   os << "  " << model.name() << "(const InputParameters & parameters);\n\n";
   os << "protected:\n";
-  os << "  virtual void computeQpProperties() override;\n\n";
+  os << "  virtual void computeQpProperties() override;\n";
+  if (!model.state_variables().empty()) {
+    os << "  virtual void initQpStatefulProperties() override;\n";
+  }
+  os << "\n";
 
-  // Parameter members
+  // Parameter members (dt → MOOSE's framework `_dt`, no member — issue #77).
   for (auto const &p : model.parameters()) {
+    if (p.name == state_time_step_name) continue;
     os << "  Real const _" << p.name << ";\n";
   }
   os << "\n";
@@ -109,6 +114,16 @@ auto emit_header(ConstitutiveModel const &model) -> std::string {
     os << "  " << input_member_type(i) << " const & _" << i.name << ";\n";
   }
   os << "\n";
+
+  // State-variable members (issue #77): current is a writable declared
+  // property; `_old` is the const previous-step property. Scalar only.
+  for (auto const &sv : model.state_variables()) {
+    os << "  MaterialProperty<Real> & _" << sv.name << ";\n";
+    os << "  const MaterialProperty<Real> & _" << sv.name << "_old;\n";
+  }
+  if (!model.state_variables().empty()) {
+    os << "\n";
+  }
 
   // Output members — declared MaterialProperty<...> refs
   for (auto const &o : model.outputs()) {
@@ -148,33 +163,54 @@ void emit_compute_qp_body(std::ostream &os, ConstitutiveModel const &model) {
     }
   }
 
-  // Call the Layer 2 compute function with adaptors / scalar refs.
+  // Call the Layer 2 compute function. Arguments are built by iterating
+  // the SAME canonical order the generated signature uses (issue #77), so
+  // the call-site and the function definition cannot drift — each ArgSpec
+  // role maps to the MOOSE-side actual argument.
   os << "\n  " << model.name() << "_compute(\n";
   bool first = true;
-  for (auto const &p : model.parameters()) {
+  for (auto const &a : canonical_arguments(RecipeView{model})) {
     if (!first) os << ",\n";
     first = false;
-    os << "      _" << p.name;
-  }
-  for (auto const &i : model.inputs()) {
-    if (!first) os << ",\n";
-    first = false;
-    if (i.kind == SymbolDecl::Kind::Tensor) {
-      os << "      " << i.name << "_ad";
-    } else {
-      os << "      _" << i.name << "[_qp]";
-    }
-  }
-  for (auto const &o : model.outputs()) {
-    if (!first) os << ",\n";
-    first = false;
-    if (o.kind == OutputDecl::Kind::Tensor) {
-      os << "      " << o.name << "_ad";
-    } else {
-      os << "      _" << o.name << "[_qp]";
+    switch (a.role) {
+    case ArgSpec::Role::ScalarParam:
+      os << "      _" << a.name; // getParam-backed Real member
+      break;
+    case ArgSpec::Role::TimeStep:
+      os << "      _dt"; // MOOSE framework timestep
+      break;
+    case ArgSpec::Role::TensorInput:
+    case ArgSpec::Role::TensorOutput:
+      os << "      " << a.name << "_ad"; // boundary adaptor
+      break;
+    default: // ScalarInput / StateOld / StateCurrentRead / ScalarOutput /
+             // NewtonStateOut — all MaterialProperty<Real> at this qp
+      os << "      _" << a.name << "[_qp]";
+      break;
     }
   }
   os << ");\n";
+}
+
+// Seed each state variable's declared property to its initial value
+// (issue #77). The initial value is a scalar expression — emit it through
+// the scalar pipeline so a non-constant initial (referencing parameters,
+// say) works too. Scalar state variables only in this slice.
+void emit_init_stateful_body(std::ostream &os, ConstitutiveModel const &model) {
+  CodeGenContext ctx;
+  CodeEmitPipeline pipeline(ctx);
+  for (auto const &[name, expr] : model.scalar_symbol_map()) {
+    ctx.register_symbol_scalar(expr, name);
+  }
+  for (auto const &sv : model.state_variables()) {
+    auto const &init =
+        std::get<cas::expression_holder<cas::scalar_expression>>(
+            sv.initial_value);
+    ctx.reset();
+    auto const rhs = pipeline.scalar().apply(init);
+    os << ctx.render_statements();
+    os << "  _" << sv.name << "[_qp] = " << rhs << ";\n";
+  }
 }
 
 // ─── Source (.C) emission ──────────────────────────────────────
@@ -204,6 +240,9 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
   os << "  params.addClassDescription(\"Auto-generated constitutive model "
      << model.name() << "\");\n";
   for (auto const &p : model.parameters()) {
+    // `dt` maps to MOOSE's framework timestep `_dt`, not an input-file
+    // parameter (issue #77).
+    if (p.name == state_time_step_name) continue;
     os << "  params.addParam<Real>(\"" << p.name << "\", " << *p.default_value
        << ", \"" << p.doc << "\");\n";
   }
@@ -220,11 +259,22 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
      << "(const InputParameters & parameters)\n";
   os << "  : Material(parameters)";
   for (auto const &p : model.parameters()) {
+    if (p.name == state_time_step_name) continue; // → _dt
     os << ",\n    _" << p.name << "(getParam<Real>(\"" << p.name << "\"))";
   }
   for (auto const &i : model.inputs()) {
     os << ",\n    _" << i.name << "(getMaterialProperty<"
        << input_storage_type(i) << ">(\"" << i.name << "\"))";
+  }
+  // State variables (issue #77, Phase 2.6): the current value is a declared
+  // (stateful) property; the `_old` member reads its previous-step value
+  // via getMaterialPropertyOld of the SAME property name (MOOSE versions it
+  // automatically). Scalar only in this slice.
+  for (auto const &sv : model.state_variables()) {
+    os << ",\n    _" << sv.name << "(declareProperty<Real>(\"" << model.name()
+       << "_" << sv.name << "\"))";
+    os << ",\n    _" << sv.name << "_old(getMaterialPropertyOld<Real>(\""
+       << model.name() << "_" << sv.name << "\"))";
   }
   for (auto const &o : model.outputs()) {
     os << ",\n    _" << o.name << "(declareProperty<"
@@ -232,6 +282,14 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
        << "\"))";
   }
   os << "\n{\n}\n\n";
+
+  // ── initQpStatefulProperties: seed each state variable to its initial
+  // value (MOOSE requires stateful properties to be initialised here).
+  if (!model.state_variables().empty()) {
+    os << "void\n" << model.name() << "::initQpStatefulProperties()\n{\n";
+    emit_init_stateful_body(os, model);
+    os << "}\n\n";
+  }
 
   // ── computeQpProperties
   os << "void\n" << model.name() << "::computeQpProperties()\n{\n";
