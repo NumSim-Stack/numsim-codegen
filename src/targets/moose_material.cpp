@@ -2,6 +2,8 @@
 
 #include <numsim_codegen/recipe.h>
 
+#include <cmath>
+#include <format>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -96,10 +98,15 @@ auto emit_header(ConstitutiveModel const &model) -> std::string {
   os << "  static InputParameters validParams();\n";
   os << "  " << model.name() << "(const InputParameters & parameters);\n\n";
   os << "protected:\n";
-  os << "  virtual void computeQpProperties() override;\n\n";
+  os << "  virtual void computeQpProperties() override;\n";
+  if (!model.state_variables().empty()) {
+    os << "  virtual void initQpStatefulProperties() override;\n";
+  }
+  os << "\n";
 
-  // Parameter members
+  // Parameter members (dt → MOOSE's framework `_dt`, no member — issue #77).
   for (auto const &p : model.parameters()) {
+    if (p.is_time_step) continue;
     os << "  Real const _" << p.name << ";\n";
   }
   os << "\n";
@@ -109,6 +116,16 @@ auto emit_header(ConstitutiveModel const &model) -> std::string {
     os << "  " << input_member_type(i) << " const & _" << i.name << ";\n";
   }
   os << "\n";
+
+  // State-variable members (issue #77): current is a writable declared
+  // property; `_old` is the const previous-step property. Scalar only.
+  for (auto const &sv : model.state_variables()) {
+    os << "  MaterialProperty<Real> & _" << sv.name << ";\n";
+    os << "  const MaterialProperty<Real> & _" << sv.name << "_old;\n";
+  }
+  if (!model.state_variables().empty()) {
+    os << "\n";
+  }
 
   // Output members — declared MaterialProperty<...> refs
   for (auto const &o : model.outputs()) {
@@ -148,33 +165,80 @@ void emit_compute_qp_body(std::ostream &os, ConstitutiveModel const &model) {
     }
   }
 
-  // Call the Layer 2 compute function with adaptors / scalar refs.
+  // Call the Layer 2 compute function. Arguments are built by iterating
+  // the SAME canonical order the generated signature uses (issue #77), so
+  // the call-site and the function definition cannot drift — each ArgSpec
+  // role maps to the MOOSE-side actual argument.
   os << "\n  " << model.name() << "_compute(\n";
   bool first = true;
-  for (auto const &p : model.parameters()) {
+  for (auto const &a : canonical_arguments(RecipeView{model})) {
     if (!first) os << ",\n";
     first = false;
-    os << "      _" << p.name;
-  }
-  for (auto const &i : model.inputs()) {
-    if (!first) os << ",\n";
-    first = false;
-    if (i.kind == SymbolDecl::Kind::Tensor) {
-      os << "      " << i.name << "_ad";
-    } else {
-      os << "      _" << i.name << "[_qp]";
-    }
-  }
-  for (auto const &o : model.outputs()) {
-    if (!first) os << ",\n";
-    first = false;
-    if (o.kind == OutputDecl::Kind::Tensor) {
-      os << "      " << o.name << "_ad";
-    } else {
-      os << "      _" << o.name << "[_qp]";
+    // Every role enumerated (PR #78 review #5): no `default:`, so a new
+    // ArgSpec::Role is a -Wswitch warning here — keeping read vs write
+    // roles from silently merging.
+    switch (a.role) {
+    case ArgSpec::Role::ScalarParam:
+      os << "      _" << a.name; // getParam-backed Real member
+      break;
+    case ArgSpec::Role::TimeStep:
+      os << "      _dt"; // MOOSE framework timestep
+      break;
+    case ArgSpec::Role::TensorInput:
+    case ArgSpec::Role::TensorOutput:
+      os << "      " << a.name << "_ad"; // boundary adaptor
+      break;
+    case ArgSpec::Role::ScalarInput:
+    case ArgSpec::Role::StateOld:
+    case ArgSpec::Role::StateCurrentRead:
+    case ArgSpec::Role::ScalarOutput:
+    case ArgSpec::Role::NewtonStateOut:
+      os << "      _" << a.name << "[_qp]"; // MaterialProperty<Real> at _qp
+      break;
     }
   }
   os << ");\n";
+}
+
+// Seed each state variable's declared property to its initial value
+// (issue #77).
+//
+// The initial value is inlined into `initQpStatefulProperties` with the
+// recipe's BARE symbol names — but MOOSE members are `_`-prefixed, so an
+// initial that references a parameter/input would emit an undefined name
+// (e.g. `_c[_qp] = 0.5 * K;` where the member is `_K`). Phase 2.6 therefore
+// supports CONSTANT initial values only and rejects anything referencing a
+// symbol — a loud failure rather than broken generated code (PR #78 review
+// #3). Scalar state variables only (#1). A non-constant-initial path
+// (routing through a generated `_init` function with `_`-prefixed args, the
+// same boundary `_compute` uses) is a tracked follow-up.
+void emit_init_stateful_body(std::ostream &os, ConstitutiveModel const &model) {
+  for (auto const &sv : model.state_variables()) {
+    if (sv.kind != SymbolDecl::Kind::Scalar) {
+      throw std::runtime_error(
+          "MooseMaterialTarget: tensor state variable '" + sv.name +
+          "' is not supported yet (scalar state variables only).");
+    }
+    auto const &init =
+        std::get<cas::expression_holder<cas::scalar_expression>>(
+            sv.initial_value);
+
+    LeafCollector lc;
+    lc.collect_scalar(init);
+    if (!lc.scalar_names().empty() || !lc.tensor_names().empty()) {
+      throw std::runtime_error(
+          "MooseMaterialTarget: state variable '" + sv.name +
+          "' has a non-constant initial value (it references a symbol). "
+          "MOOSE initialisation supports constant initial values only in "
+          "this release.");
+    }
+
+    CodeGenContext ctx;
+    CodeEmitPipeline pipeline(ctx);
+    auto const rhs = pipeline.scalar().apply(init);
+    os << ctx.render_statements();
+    os << "  _" << sv.name << "[_qp] = " << rhs << ";\n";
+  }
 }
 
 // ─── Source (.C) emission ──────────────────────────────────────
@@ -204,8 +268,24 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
   os << "  params.addClassDescription(\"Auto-generated constitutive model "
      << model.name() << "\");\n";
   for (auto const &p : model.parameters()) {
-    os << "  params.addParam<Real>(\"" << p.name << "\", " << *p.default_value
-       << ", \"" << p.doc << "\");\n";
+    // `dt` maps to MOOSE's framework timestep `_dt`, not an input-file
+    // parameter (issue #77).
+    if (p.is_time_step) continue;
+    // Security (PR #78 round-5): a non-finite default streams as `nan`/`inf`
+    // — not a valid C++ literal — so the generated source wouldn't compile.
+    // Fail loudly at emit. (`std::format` also gives shortest round-trip
+    // precision vs. ostream's default.)
+    if (!std::isfinite(*p.default_value)) {
+      throw std::runtime_error(
+          "MooseMaterialTarget: parameter '" + p.name +
+          "' has a non-finite default value (NaN/inf), which is not a valid "
+          "C++ literal. Provide a finite default.");
+    }
+    // `p.doc` is escaped (it flows into a string literal); a raw `"` would
+    // terminate the literal early.
+    os << "  params.addParam<Real>(\"" << p.name << "\", "
+       << std::format("{}", *p.default_value) << ", \""
+       << escape_for_cpp_literal(p.doc) << "\");\n";
   }
   for (auto const &i : model.inputs()) {
     os << "  params.addRequiredParam<MaterialPropertyName>(\"" << i.name
@@ -220,11 +300,22 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
      << "(const InputParameters & parameters)\n";
   os << "  : Material(parameters)";
   for (auto const &p : model.parameters()) {
+    if (p.is_time_step) continue; // → _dt
     os << ",\n    _" << p.name << "(getParam<Real>(\"" << p.name << "\"))";
   }
   for (auto const &i : model.inputs()) {
     os << ",\n    _" << i.name << "(getMaterialProperty<"
        << input_storage_type(i) << ">(\"" << i.name << "\"))";
+  }
+  // State variables (issue #77, Phase 2.6): the current value is a declared
+  // (stateful) property; the `_old` member reads its previous-step value
+  // via getMaterialPropertyOld of the SAME property name (MOOSE versions it
+  // automatically). Scalar only in this slice.
+  for (auto const &sv : model.state_variables()) {
+    os << ",\n    _" << sv.name << "(declareProperty<Real>(\"" << model.name()
+       << "_" << sv.name << "\"))";
+    os << ",\n    _" << sv.name << "_old(getMaterialPropertyOld<Real>(\""
+       << model.name() << "_" << sv.name << "\"))";
   }
   for (auto const &o : model.outputs()) {
     os << ",\n    _" << o.name << "(declareProperty<"
@@ -232,6 +323,14 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
        << "\"))";
   }
   os << "\n{\n}\n\n";
+
+  // ── initQpStatefulProperties: seed each state variable to its initial
+  // value (MOOSE requires stateful properties to be initialised here).
+  if (!model.state_variables().empty()) {
+    os << "void\n" << model.name() << "::initQpStatefulProperties()\n{\n";
+    emit_init_stateful_body(os, model);
+    os << "}\n\n";
+  }
 
   // ── computeQpProperties
   os << "void\n" << model.name() << "::computeQpProperties()\n{\n";
@@ -265,6 +364,23 @@ auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
           "stateful initialisation) which is not implemented in this phase. "
           "See the numsim-codegen Phase B roadmap.");
     }
+  }
+
+  // PR #78 round-3: a MOOSE Material solves its local constitutive system
+  // INTERNALLY — there is no outer Newton loop at the material level. An
+  // evolution recipe that doesn't `enable_local_newton()` would emit
+  // `<sv>_residual`/`<sv>_jacobian` as MOOSE properties that nothing
+  // solves, with the state property never advancing: valid-but-dead code.
+  // Fail loudly (matching the tensor / non-constant-init guards) — the
+  // residual/Jacobian-output mode is for external drivers via the
+  // standalone target.
+  if (!model.evolution_equations().empty() && !model.local_newton_enabled()) {
+    throw std::runtime_error(
+        "MooseMaterialTarget: recipe '" + model.name() +
+        "' has evolution equations but local Newton solving is not enabled. "
+        "Call enable_local_newton() so the generated MOOSE Material solves "
+        "its state variables internally. (The residual/Jacobian-output mode "
+        "is for external drivers — use StandaloneCxxTarget for that.)");
   }
   return {
       EmittedFile{model.name() + ".h", emit_header(model),

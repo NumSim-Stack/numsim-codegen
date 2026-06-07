@@ -134,6 +134,12 @@ struct SymbolDecl {
   std::optional<double> default_value; // parameter only
   std::string doc;
   Role role = roles::Other;  // semantic tag; Other for parameters
+  // Phase 2.6 (issue #77 / PR #78 review #4): set only on the `dt` symbol
+  // auto-registered by `ensure_dt_symbol_registered_`. Backends route a
+  // time-step symbol specially (MOOSE → framework `_dt`); matching on this
+  // flag rather than the name avoids hijacking a user-declared `dt`
+  // parameter that isn't the framework timestep.
+  bool is_time_step = false;
 };
 
 // Phase 2.1: suffix appended to a state variable's name to form the
@@ -250,7 +256,22 @@ struct state_variable_alignment_access;
 // etc., by passing it through the appropriate Target backend.
 class ConstitutiveModel {
 public:
-  explicit ConstitutiveModel(std::string name) : m_name(std::move(name)) {}
+  explicit ConstitutiveModel(std::string name) : m_name(std::move(name)) {
+    // Security (PR #78 round-5): the model name flows UNESCAPED into
+    // generated C++ — the `<name>_compute` function name, the MOOSE
+    // `class <name> : public Material`, `registerMooseObject(...)`, and
+    // `declareProperty("<name>_...")` string literals. An invalid name
+    // (spaces, `"`, `;`, `)`) is a malformed-output / code-injection
+    // vector. SymbolValidationPass already validates *symbol* identifiers;
+    // the model name had no such guard. Reject it at construction.
+    if (!SymbolValidationPass::is_valid_cxx_identifier(m_name)) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel: model name '{}' is not a valid C++ identifier "
+          "(it becomes the generated function/class name). Use a "
+          "[A-Za-z_][A-Za-z0-9_]* name that is not a C++ keyword.",
+          m_name));
+    }
+  }
 
   [[nodiscard]] auto name() const -> std::string const & { return m_name; }
 
@@ -506,6 +527,7 @@ public:
                   cas::expression_holder<cas::scalar_expression> expr,
                   Role role = roles::Other) {
     validate_role_attributes(role);
+    assert_output_name_available(name); // PR #78 review #2
     OutputDecl decl{name, OutputDecl::Kind::Scalar, expr, 0, 0,
                     std::move(role)};
     m_outputs.push_back(std::move(decl));
@@ -515,6 +537,7 @@ public:
                   cas::expression_holder<cas::tensor_expression> expr,
                   Role role = roles::Other) {
     validate_role_attributes(role);
+    assert_output_name_available(name); // PR #78 review #2
     OutputDecl decl{name, OutputDecl::Kind::Tensor, expr, expr.get().dim(),
                     expr.get().rank(), std::move(role)};
     m_outputs.push_back(std::move(decl));
@@ -769,6 +792,46 @@ private:
             m_name, name, state_variable_old_suffix));
       }
     }
+    // Symmetric with assert_output_name_available (PR #78 round-2): a
+    // symbol must also not clash with an already-declared output, else a
+    // state var / output declared in EITHER order collides on the MOOSE
+    // property name `<Model>_<name>` + the `_<name>` member.
+    for (auto const &o : m_outputs) {
+      if (o.name == name) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': name '{}' is already declared as an "
+            "output; a symbol (parameter / input / state variable) cannot "
+            "reuse it. Backends derive member + MOOSE property names from "
+            "both.",
+            m_name, name));
+      }
+    }
+  }
+
+  // PR #78 review #2: an output's name must not clash with a symbol (param,
+  // input, or state variable) or another output — backends derive both
+  // C++ member names and MOOSE property names (`<Model>_<name>`) from these,
+  // so a clash produces a duplicate-property / redefinition in generated
+  // code. e.g. a state variable `alpha` + an output `alpha` would both emit
+  // `declareProperty<Real>("<Model>_alpha")`.
+  void assert_output_name_available(std::string_view name) const {
+    for (auto const &s : m_symbols) {
+      if (s.name == name) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': output name '{}' clashes with an "
+            "existing symbol (parameter / input / state variable). Backends "
+            "derive member + MOOSE property names from both; pick a unique "
+            "output name.",
+            m_name, name));
+      }
+    }
+    for (auto const &o : m_outputs) {
+      if (o.name == name) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': output '{}' is already declared.",
+            m_name, name));
+      }
+    }
   }
 
   // Reject a user-defined Role that shares a name with a `roles::` catalogue
@@ -820,6 +883,11 @@ private:
                   "time step (framework-supplied; auto-registered "
                   "by the first add_*_evolution_equation call). "
                   "Default is NaN — the framework must overwrite it.");
+    // Mark the auto-registered symbol as the time step (PR #78 review #4):
+    // backends route it specially (MOOSE → `_dt`). add_parameter pushed
+    // the decl to both m_symbols and m_parameters_cache.
+    m_symbols.back().is_time_step = true;
+    m_parameters_cache.back().is_time_step = true;
   }
 
   // PR #69 round-1 #4: validate that the leaves of a rate expression
@@ -1125,33 +1193,94 @@ inline auto tensor_arg_count(RecipeView model) -> int {
 
 } // namespace detail
 
-// Phase 3a-2 (issue #75): a Newton segment after CodeEmitPass has rendered
-// its loop-local CSE temps + the residual/Jacobian right-hand sides to
-// text. `render_compute_function` assembles these into the iteration body.
-// (The unrendered form — expression handles — is `NewtonSegment` in
-// pass.h; CodeEmitPass turns one into the other using its emit pipeline.)
-struct RenderedNewtonSegment {
-  std::string state_var_name;  // the current symbol, e.g. "alpha"
-  std::string loop_local_decls; // `    auto tN = ...;\n` lines (4-indented)
-  std::string residual_rhs;     // expression for the residual R
-  std::string jacobian_rhs;     // expression for the Jacobian J = dR/dsv
-  double tol;
-  int max_iter;
-};
+// Phase 2.6 (issue #77): the single source of truth for the generated
+// function's parameter order. Both `render_compute_function` (signature)
+// and every backend call-site iterate this so they cannot drift. See
+// `ArgSpec` in recipe_render.h for the role → declaration / MOOSE-argument
+// mapping.
+inline auto canonical_arguments(RecipeView model) -> std::vector<ArgSpec> {
+  auto const &m = model.raw_model();
+
+  // State variables solved in-function (local-Newton) become out-params,
+  // not inputs (issue #60): the function returns the converged value.
+  std::set<std::string> newton_owned;
+  if (m.local_newton_enabled()) {
+    for (auto const &eq : m.evolution_equations()) {
+      newton_owned.insert(
+          m.symbols()[m.state_variables()[eq.state_variable_idx]
+                          .current_symbol_idx]
+              .name);
+    }
+  }
+
+  std::vector<ArgSpec> args;
+  for (auto const &s : m.symbols()) {
+    if (newton_owned.contains(s.name)) {
+      continue; // emitted as NewtonStateOut below
+    }
+    // Classify by CATEGORY first, then kind (PR #78 review #1) — so a
+    // tensor that is a state variable / time step isn't mis-read as a
+    // tensor input. Tensor state variables are out of Phase 2.x scope;
+    // fail loudly rather than silently emit scalar wiring for them.
+    ArgSpec::Role role;
+    if (s.is_time_step) {
+      role = ArgSpec::Role::TimeStep;
+    } else if (s.category == SymbolDecl::Category::StateVariableOld) {
+      if (s.kind == SymbolDecl::Kind::Tensor) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': tensor state variable '{}' is not "
+            "supported yet (scalar state variables only).",
+            m.name(), s.name));
+      }
+      role = ArgSpec::Role::StateOld;
+    } else if (s.category == SymbolDecl::Category::StateVariableCurrent) {
+      if (s.kind == SymbolDecl::Kind::Tensor) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': tensor state variable '{}' is not "
+            "supported yet (scalar state variables only).",
+            m.name(), s.name));
+      }
+      role = ArgSpec::Role::StateCurrentRead; // non-Newton current
+    } else if (s.category == SymbolDecl::Category::Parameter) {
+      if (s.kind == SymbolDecl::Kind::Tensor) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': tensor parameter '{}' is not "
+            "supported (parameters are scalar).",
+            m.name(), s.name));
+      }
+      role = ArgSpec::Role::ScalarParam;
+    } else { // Category::Input
+      role = s.kind == SymbolDecl::Kind::Tensor ? ArgSpec::Role::TensorInput
+                                                : ArgSpec::Role::ScalarInput;
+    }
+    args.push_back({s.name, role, s.dim, s.rank});
+  }
+  for (auto const &o : m.outputs()) {
+    args.push_back({o.name,
+                    o.kind == OutputDecl::Kind::Tensor
+                        ? ArgSpec::Role::TensorOutput
+                        : ArgSpec::Role::ScalarOutput,
+                    o.dim, o.rank});
+  }
+  // In-function-solved state variables, in evolution-equation order (the
+  // same order render_compute_function emits the loops + writebacks).
+  if (m.local_newton_enabled()) {
+    for (auto const &eq : m.evolution_equations()) {
+      auto const &name =
+          m.symbols()[m.state_variables()[eq.state_variable_idx]
+                          .current_symbol_idx]
+              .name;
+      args.push_back({name, ArgSpec::Role::NewtonStateOut, 0, 0});
+    }
+  }
+  return args;
+}
 
 inline auto render_compute_function(
     RecipeView model, CodeGenContext const &ctx,
     std::vector<std::string> const &output_rhs,
-    std::vector<RenderedNewtonSegment> const &newton = {}) -> std::string {
+    std::vector<RenderedNewtonSegment> const &newton) -> std::string {
   std::ostringstream os;
-
-  // State variables solved in-function become out-parameters, not inputs
-  // (issue #60): the function returns the converged value rather than
-  // taking the current iterate as a `double const` input.
-  std::set<std::string> newton_owned;
-  for (auto const &seg : newton) {
-    newton_owned.insert(seg.state_var_name);
-  }
 
   os << "// Auto-generated by numsim-codegen. Do not edit.\n";
   os << "// Model: " << model.name() << "\n\n";
@@ -1171,35 +1300,37 @@ inline auto render_compute_function(
   }
   os << "inline void " << model.name() << "_compute(\n";
 
+  // Signature built from the canonical argument list (issue #77) — the
+  // exact order backends must reproduce in their call-sites.
   int tmpl_counter = 0;
   bool first = true;
-  for (auto const &s : model.symbols()) {
-    // Newton-owned current symbols are emitted as out-params below, not
-    // as `double const` inputs.
-    if (newton_owned.contains(s.name)) {
-      continue;
-    }
+  for (auto const &a : canonical_arguments(model)) {
     if (!first) {
       os << ",\n";
     }
     first = false;
-    os << "    " << detail::param_decl(s, tmpl_counter);
-  }
-
-  for (auto const &out : model.outputs()) {
-    if (!first) {
-      os << ",\n";
+    os << "    ";
+    // Every role enumerated explicitly (PR #78 review #5): no `default:`,
+    // so adding an ArgSpec::Role is a -Wswitch compile warning here.
+    switch (a.role) {
+    case ArgSpec::Role::TensorInput:
+      os << "T" << tmpl_counter++ << " const &" << a.name;
+      break;
+    case ArgSpec::Role::TensorOutput:
+      os << "T" << tmpl_counter++ << " &" << a.name << "_out";
+      break;
+    case ArgSpec::Role::ScalarOutput:
+    case ArgSpec::Role::NewtonStateOut:
+      os << "double &" << a.name << "_out";
+      break;
+    case ArgSpec::Role::ScalarParam:
+    case ArgSpec::Role::ScalarInput:
+    case ArgSpec::Role::StateOld:
+    case ArgSpec::Role::StateCurrentRead:
+    case ArgSpec::Role::TimeStep:
+      os << "double const " << a.name;
+      break;
     }
-    first = false;
-    os << "    " << detail::output_decl(out, tmpl_counter);
-  }
-  // Newton-solved state variables as out-params (scalar only in 3a-2).
-  for (auto const &seg : newton) {
-    if (!first) {
-      os << ",\n";
-    }
-    first = false;
-    os << "    double &" << seg.state_var_name << "_out";
   }
   os << ") {\n";
 

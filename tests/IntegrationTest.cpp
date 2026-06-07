@@ -15,6 +15,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <limits>
 #include <string>
 
 namespace numsim::codegen {
@@ -92,46 +94,313 @@ TEST(Integration, MixedRecipeOutputOrderingIsStable) {
   EXPECT_LT(resid, jac) << src;
 }
 
-// ─── MAJOR 1: MOOSE backend does NOT yet wire state variables ─────────
+// ─── Phase 2.6 (issue #77): MOOSE backend wires state variables ───────
 
-// KNOWN LIMITATION (Phase 2.6, issues #34/#37): the MooseMaterialTarget
-// constructor + validParams iterate only parameters()/inputs()/outputs()
-// — they do NOT handle Category::StateVariableCurrent / StateVariableOld.
-// For an evolution recipe the generated MOOSE `.C` therefore:
-//   * declares no member for `<sv>` / `<sv>_old`,
-//   * never emits `getMaterialPropertyOld<>` for `<sv>_old`,
-//   * calls the generic compute function with the wrong arity (it omits
-//     the state-variable + synthesised residual/jacobian arguments).
-// i.e. the emitted MOOSE source does NOT compile for evolution recipes.
-//
-// This test PINS that broken-but-known state so:
-//   (a) the gap is documented + visible in the test suite, and
-//   (b) when Phase 2.6 wires state variables, whoever does it MUST flip
-//       these assertions — they can't land the wiring and leave the gap
-//       silently half-done.
-//
-// TODO(phase-2.6 / #37): replace the EXPECT_EQ(..., npos) assertions
-// below with positive checks that `getMaterialPropertyOld<Real>("alpha")`
-// is declared and the compute call passes alpha/alpha_old/residual/jacobian.
-TEST(Integration, MooseBackendDoesNotYetWireStateVariables_KNOWN_GAP) {
-  auto m = build_mixed_hardening();
-  MooseMaterialTarget target;
-  auto files = target.emit(m);
+namespace {
+// A scalar-Newton hardening recipe — the MOOSE-relevant mode (a MOOSE
+// material solves its local system internally and writes the state
+// property). enable_local_newton() makes the generated function solve for
+// the converged state.
+auto build_newton_hardening() -> ConstitutiveModel {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Hardening");
+  auto K = m.add_parameter("K", 1.0);
+  auto alpha = m.add_scalar_state_variable(
+      "alpha", make_expression<scalar_constant>(0.0));
+  m.add_output("sigma_y", K * alpha.current, roles::Stress);
+  m.add_scalar_evolution_equation(alpha, K * alpha.current);
+  m.enable_local_newton();
+  return m;
+}
+} // namespace
+
+TEST(Integration, MooseDeclaresStateVariableProperties) {
+  auto files = MooseMaterialTarget{}.emit(build_newton_hardening());
   ASSERT_EQ(files.size(), 2u);
   std::string const header = files[0].contents;
   std::string const source = files[1].contents;
 
-  // The auto-registered `dt` IS picked up (it's a Parameter, not a
-  // state-variable category) — sanity anchor that emission ran.
-  EXPECT_NE(header.find("_dt"), std::string::npos) << header;
-
-  // KNOWN GAP: no getMaterialPropertyOld wiring for the `_old` symbol.
-  EXPECT_EQ(source.find("getMaterialPropertyOld"), std::string::npos)
-      << "Phase 2.6 may have landed — flip this to a positive check: "
+  // Current state variable: a writable declared property.
+  EXPECT_NE(header.find("MaterialProperty<Real> & _alpha;"),
+            std::string::npos)
+      << header;
+  EXPECT_NE(source.find("declareProperty<Real>(\"Hardening_alpha\")"),
+            std::string::npos)
       << source;
-  // KNOWN GAP: no declared member for the state variable itself.
-  EXPECT_EQ(header.find("_alpha "), std::string::npos)
-      << "Phase 2.6 may have landed — flip this assertion: " << header;
+  // Old value: const property bound via getMaterialPropertyOld of the SAME
+  // declared property name (MOOSE versions it automatically).
+  EXPECT_NE(header.find("const MaterialProperty<Real> & _alpha_old;"),
+            std::string::npos)
+      << header;
+  EXPECT_NE(
+      source.find("getMaterialPropertyOld<Real>(\"Hardening_alpha\")"),
+      std::string::npos)
+      << source;
+}
+
+TEST(Integration, MooseMapsDtToFrameworkTimestep) {
+  auto files = MooseMaterialTarget{}.emit(build_newton_hardening());
+  std::string const source = files[1].contents;
+  // dt must come from MOOSE's framework `_dt`, NOT getParam — and it must
+  // NOT appear as an input-file parameter.
+  EXPECT_EQ(source.find("getParam<Real>(\"dt\")"), std::string::npos)
+      << source;
+  EXPECT_EQ(source.find("addParam<Real>(\"dt\""), std::string::npos)
+      << source;
+  EXPECT_NE(source.find("_dt"), std::string::npos) << source;
+}
+
+TEST(Integration, MooseComputeCallThreadsStateAndDtInCanonicalOrder) {
+  auto files = MooseMaterialTarget{}.emit(build_newton_hardening());
+  std::string const source = files[1].contents;
+  // The call must thread the state-variable arguments in the canonical
+  // order — proving the historical arity bug (3-arg call into a 7-param
+  // function) is gone. Generated signature is
+  //   Hardening_compute(K, alpha_old, dt, sigma_y_out, alpha_out)
+  // so the actuals must appear in that order at the call-site. (Round-6
+  // review: the previous form only asserted each substring was present
+  // *somewhere*, so a reordered/mis-wired call would still pass green.
+  // Pin the relative order instead.)
+  auto const call = source.find("Hardening_compute(");
+  ASSERT_NE(call, std::string::npos) << source;
+  auto const old_pos = source.find("_alpha_old[_qp]", call);
+  auto const dt_pos = source.find("_dt", call);
+  // `_alpha[_qp]` is a prefix of `_alpha_old[_qp]`; search past the old
+  // occurrence so we match the distinct current-state actual.
+  auto const cur_pos = source.find("_alpha[_qp]", old_pos + 1);
+  ASSERT_NE(old_pos, std::string::npos) << source;
+  ASSERT_NE(dt_pos, std::string::npos) << source;
+  ASSERT_NE(cur_pos, std::string::npos) << source;
+  EXPECT_LT(old_pos, dt_pos) << "alpha_old must precede dt\n" << source;
+  EXPECT_LT(dt_pos, cur_pos) << "dt must precede alpha (NewtonStateOut)\n"
+                             << source;
+}
+
+TEST(Integration, MooseInitialisesStateVariable) {
+  auto files = MooseMaterialTarget{}.emit(build_newton_hardening());
+  std::string const header = files[0].contents;
+  std::string const source = files[1].contents;
+  EXPECT_NE(header.find("virtual void initQpStatefulProperties() override;"),
+            std::string::npos)
+      << header;
+  EXPECT_NE(source.find("_alpha[_qp] = 0.0;"), std::string::npos) << source;
+}
+
+// ─── PR #78 review fixups ─────────────────────────────────────────────
+
+// #7: direct test of the canonical_arguments contract — the single source
+// of truth both the signature and the backend call-sites iterate.
+TEST(Integration, CanonicalArgumentsOrderAndRoles) {
+  auto m = build_newton_hardening();
+  auto const args = canonical_arguments(RecipeView{m});
+  using R = ArgSpec::Role;
+  ASSERT_EQ(args.size(), 5u);
+  EXPECT_EQ(args[0].name, "K");         EXPECT_EQ(args[0].role, R::ScalarParam);
+  EXPECT_EQ(args[1].name, "alpha_old"); EXPECT_EQ(args[1].role, R::StateOld);
+  EXPECT_EQ(args[2].name, "dt");        EXPECT_EQ(args[2].role, R::TimeStep);
+  EXPECT_EQ(args[3].name, "sigma_y");   EXPECT_EQ(args[3].role, R::ScalarOutput);
+  EXPECT_EQ(args[4].name, "alpha");     EXPECT_EQ(args[4].role, R::NewtonStateOut);
+}
+
+// Round-6 review coverage gap: a current state variable on a recipe that
+// does NOT enable local-Newton is classified `StateCurrentRead` (a plain
+// read-in arg), not `NewtonStateOut`. That branch (recipe.h canonical_
+// arguments) was previously unexercised — only the Newton-owned case had
+// a test. The standalone target accepts such a recipe (external-driver
+// mode); MOOSE rejects it, so assert on canonical_arguments directly.
+TEST(Integration, CanonicalArgumentsClassifiesNonNewtonCurrentStateAsRead) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  (void)m.add_parameter("K", 1.0);
+  (void)m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_output("out", make_expression<scalar_constant>(1.0));
+  // No enable_local_newton() and no evolution equation → `a` is a plain
+  // current state read, `a_old` the previous-step read.
+  auto const args = canonical_arguments(RecipeView{m});
+  using R = ArgSpec::Role;
+  auto role_of = [&](std::string_view n) -> R {
+    for (auto const &a : args)
+      if (a.name == n) return a.role;
+    ADD_FAILURE() << "arg '" << n << "' not found";
+    return R::ScalarParam;
+  };
+  EXPECT_EQ(role_of("a"), R::StateCurrentRead);
+  EXPECT_EQ(role_of("a_old"), R::StateOld);
+  EXPECT_EQ(role_of("K"), R::ScalarParam);
+  EXPECT_EQ(role_of("out"), R::ScalarOutput);
+}
+
+namespace {
+// Count comma-separated arguments inside the first `<Model>_compute(` call.
+auto count_compute_call_args(std::string const &src, std::string const &model)
+    -> std::size_t {
+  auto const open = src.find(model + "_compute(");
+  if (open == std::string::npos) return 0;
+  auto const lp = src.find('(', open);
+  auto const rp = src.find(')', lp);
+  auto const inner = src.substr(lp + 1, rp - lp - 1);
+  if (inner.find_first_not_of(" \t\n") == std::string::npos) return 0;
+  return std::size_t{1} +
+         static_cast<std::size_t>(std::count(inner.begin(), inner.end(), ','));
+}
+} // namespace
+
+// #6: real arity check — the MOOSE call must pass exactly as many arguments
+// as canonical_arguments (the historical bug was a count mismatch, 3 vs 7).
+TEST(Integration, MooseComputeCallArgCountEqualsCanonical) {
+  auto m = build_newton_hardening();
+  auto const source = MooseMaterialTarget{}.emit(m).at(1).contents;
+  EXPECT_EQ(count_compute_call_args(source, "Hardening"),
+            canonical_arguments(RecipeView{m}).size());
+}
+
+// #7: multi-state-variable MOOSE — the member/ctor/initQp/call loops are the
+// generalisation that can break (ordering, threading both vars).
+TEST(Integration, MooseWiresMultipleStateVariables) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Multi");
+  auto K = m.add_parameter("K", 1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  auto b = m.add_scalar_state_variable("b", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  m.add_scalar_evolution_equation(b, K * b.current);
+  m.enable_local_newton();
+  auto files = MooseMaterialTarget{}.emit(m);
+  auto const &h = files[0].contents;
+  auto const &c = files[1].contents;
+  for (auto const *sv : {"a", "b"}) {
+    EXPECT_NE(c.find(std::string("declareProperty<Real>(\"Multi_") + sv + "\")"),
+              std::string::npos) << c;
+    EXPECT_NE(c.find(std::string("getMaterialPropertyOld<Real>(\"Multi_") + sv + "\")"),
+              std::string::npos) << c;
+    EXPECT_NE(c.find(std::string("_") + sv + "[_qp] = 0.0;"), std::string::npos)
+        << c;
+    EXPECT_NE(h.find(std::string("MaterialProperty<Real> & _") + sv + ";"),
+              std::string::npos) << h;
+  }
+  // Both state vars threaded into the call in canonical order.
+  EXPECT_EQ(count_compute_call_args(c, "Multi"),
+            canonical_arguments(RecipeView{m}).size());
+}
+
+// PR #78 round-3: MOOSE requires local-Newton for evolution recipes (a
+// MOOSE Material has no outer Newton loop; without enable_local_newton the
+// residual/Jacobian would be emitted as properties nothing solves).
+TEST(Integration, MooseRejectsEvolutionRecipeWithoutLocalNewton) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  auto K = m.add_parameter("K", 1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  // deliberately NOT calling enable_local_newton()
+  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+  // Standalone accepts it (external-driver mode) — same recipe, no throw.
+  EXPECT_NO_THROW((void)StandaloneCxxTarget{}.emit(m));
+}
+
+// #3: non-constant initial value → MOOSE emit fails loudly (rather than
+// emitting an undefined bare symbol name).
+TEST(Integration, MooseRejectsNonConstantStateVarInitial) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  auto K = m.add_parameter("K", 2.0);
+  // initial = K * 0.5 references parameter K → not a constant.
+  auto c = m.add_scalar_state_variable(
+      "c", K * make_expression<scalar_constant>(0.5));
+  m.add_scalar_evolution_equation(c, K * c.current);
+  m.enable_local_newton();
+  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+}
+
+// #2: output name clashing with a state variable is rejected at build time
+// (would otherwise emit duplicate MOOSE properties + a duplicate member).
+// Both declaration orders must be guarded (PR #78 round-2 CRITICAL: the
+// reverse order initially slipped through assert_symbol_name_available).
+TEST(Integration, OutputStateVarNameClashThrowsEitherOrder) {
+  using namespace numsim::cas;
+  // Forward: state var first, then output.
+  {
+    ConstitutiveModel m("M");
+    (void)m.add_scalar_state_variable("alpha",
+                                      make_expression<scalar_constant>(0.0));
+    EXPECT_THROW(
+        m.add_output("alpha", make_expression<scalar_constant>(1.0)),
+        std::runtime_error);
+  }
+  // Reverse: output first, then state var.
+  {
+    ConstitutiveModel m("M");
+    m.add_output("alpha", make_expression<scalar_constant>(1.0));
+    EXPECT_THROW(
+        m.add_scalar_state_variable("alpha",
+                                    make_expression<scalar_constant>(0.0)),
+        std::runtime_error);
+  }
+  // Also a plain parameter vs output, reverse order.
+  {
+    ConstitutiveModel m("M");
+    m.add_output("beta", make_expression<scalar_constant>(1.0));
+    EXPECT_THROW((void)m.add_parameter("beta", 1.0), std::runtime_error);
+  }
+}
+
+// ─── PR #78 round-5 security regressions ──────────────────────────
+//
+// The model name flows verbatim into the generated function name
+// (`<name>_compute`), the MOOSE class declaration (`class <name> :
+// public Material`), `registerMooseObject("<name>")`, and the
+// declared-property literals (`declareProperty<Real>("<name>_...")`).
+// An invalid identifier would emit syntactically broken — or, for a
+// crafted name, code-injecting — C++. The ConstitutiveModel
+// constructor must reject any name that is not a valid C++ identifier.
+TEST(Integration, ModelNameMustBeValidIdentifier) {
+  // A name carrying a statement separator would inject a declaration
+  // into the emitted source if it reached emit. Rejected at construction.
+  EXPECT_THROW(ConstitutiveModel{"Foo; struct Evil {};"}, std::runtime_error);
+  // Leading digit, embedded space, and an empty name are equally invalid.
+  EXPECT_THROW(ConstitutiveModel{"9Model"}, std::runtime_error);
+  EXPECT_THROW(ConstitutiveModel{"My Model"}, std::runtime_error);
+  EXPECT_THROW(ConstitutiveModel{""}, std::runtime_error);
+  // A C++ keyword is not usable as a class/function name either.
+  EXPECT_THROW(ConstitutiveModel{"class"}, std::runtime_error);
+  // Sanity: a plain valid identifier still constructs.
+  EXPECT_NO_THROW(ConstitutiveModel{"ResinCuring"});
+}
+
+// A parameter doc string is user-supplied free text streamed into a C++
+// string literal inside validParams(). An embedded `"` would terminate
+// the literal early (and the remainder could form arbitrary tokens). The
+// MOOSE backend must escape it so the emitted literal stays well-formed.
+TEST(Integration, MooseEscapesParameterDocString) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  m.add_parameter("K", 1.0, "bad \" doc with \\ and newline\n");
+  auto files = MooseMaterialTarget{}.emit(m);
+  std::string const source = files[1].contents;
+  // The raw unescaped quote must NOT appear right after the doc opens;
+  // the escaped forms must be present instead.
+  EXPECT_NE(source.find("\\\" doc"), std::string::npos)
+      << "embedded quote should be backslash-escaped";
+  EXPECT_NE(source.find("\\\\ and"), std::string::npos)
+      << "embedded backslash should be doubled";
+  EXPECT_NE(source.find("newline\\n"), std::string::npos)
+      << "embedded newline should be escaped, not raw";
+  // And no raw newline should leak into the literal.
+  EXPECT_EQ(source.find("newline\n\""), std::string::npos)
+      << "a raw newline inside the doc literal is ill-formed C++";
+}
+
+// A non-finite parameter default (NaN/inf) streams as `nan`/`inf`, which
+// is not a valid C++ floating literal. The MOOSE backend must reject it
+// loudly rather than emit code that fails to compile downstream.
+TEST(Integration, MooseRejectsNonFiniteParameterDefault) {
+  ConstitutiveModel m("M");
+  m.add_parameter("bad", std::numeric_limits<double>::quiet_NaN());
+  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+
+  ConstitutiveModel m2("M2");
+  m2.add_parameter("worse", std::numeric_limits<double>::infinity());
+  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m2), std::runtime_error);
 }
 
 } // namespace numsim::codegen
