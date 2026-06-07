@@ -134,6 +134,12 @@ struct SymbolDecl {
   std::optional<double> default_value; // parameter only
   std::string doc;
   Role role = roles::Other;  // semantic tag; Other for parameters
+  // Phase 2.6 (issue #77 / PR #78 review #4): set only on the `dt` symbol
+  // auto-registered by `ensure_dt_symbol_registered_`. Backends route a
+  // time-step symbol specially (MOOSE → framework `_dt`); matching on this
+  // flag rather than the name avoids hijacking a user-declared `dt`
+  // parameter that isn't the framework timestep.
+  bool is_time_step = false;
 };
 
 // Phase 2.1: suffix appended to a state variable's name to form the
@@ -506,6 +512,7 @@ public:
                   cas::expression_holder<cas::scalar_expression> expr,
                   Role role = roles::Other) {
     validate_role_attributes(role);
+    assert_output_name_available(name); // PR #78 review #2
     OutputDecl decl{name, OutputDecl::Kind::Scalar, expr, 0, 0,
                     std::move(role)};
     m_outputs.push_back(std::move(decl));
@@ -515,6 +522,7 @@ public:
                   cas::expression_holder<cas::tensor_expression> expr,
                   Role role = roles::Other) {
     validate_role_attributes(role);
+    assert_output_name_available(name); // PR #78 review #2
     OutputDecl decl{name, OutputDecl::Kind::Tensor, expr, expr.get().dim(),
                     expr.get().rank(), std::move(role)};
     m_outputs.push_back(std::move(decl));
@@ -771,6 +779,32 @@ private:
     }
   }
 
+  // PR #78 review #2: an output's name must not clash with a symbol (param,
+  // input, or state variable) or another output — backends derive both
+  // C++ member names and MOOSE property names (`<Model>_<name>`) from these,
+  // so a clash produces a duplicate-property / redefinition in generated
+  // code. e.g. a state variable `alpha` + an output `alpha` would both emit
+  // `declareProperty<Real>("<Model>_alpha")`.
+  void assert_output_name_available(std::string_view name) const {
+    for (auto const &s : m_symbols) {
+      if (s.name == name) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': output name '{}' clashes with an "
+            "existing symbol (parameter / input / state variable). Backends "
+            "derive member + MOOSE property names from both; pick a unique "
+            "output name.",
+            m_name, name));
+      }
+    }
+    for (auto const &o : m_outputs) {
+      if (o.name == name) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': output '{}' is already declared.",
+            m_name, name));
+      }
+    }
+  }
+
   // Reject a user-defined Role that shares a name with a `roles::` catalogue
   // entry but carries different attribute values. Name-only equality means
   // such a mismatch would otherwise silently mis-route through
@@ -820,6 +854,11 @@ private:
                   "time step (framework-supplied; auto-registered "
                   "by the first add_*_evolution_equation call). "
                   "Default is NaN — the framework must overwrite it.");
+    // Mark the auto-registered symbol as the time step (PR #78 review #4):
+    // backends route it specially (MOOSE → `_dt`). add_parameter pushed
+    // the decl to both m_symbols and m_parameters_cache.
+    m_symbols.back().is_time_step = true;
+    m_parameters_cache.back().is_time_step = true;
   }
 
   // PR #69 round-1 #4: validate that the leaves of a rate expression
@@ -1150,19 +1189,40 @@ inline auto canonical_arguments(RecipeView model) -> std::vector<ArgSpec> {
     if (newton_owned.contains(s.name)) {
       continue; // emitted as NewtonStateOut below
     }
+    // Classify by CATEGORY first, then kind (PR #78 review #1) — so a
+    // tensor that is a state variable / time step isn't mis-read as a
+    // tensor input. Tensor state variables are out of Phase 2.x scope;
+    // fail loudly rather than silently emit scalar wiring for them.
     ArgSpec::Role role;
-    if (s.name == state_time_step_name) {
+    if (s.is_time_step) {
       role = ArgSpec::Role::TimeStep;
     } else if (s.category == SymbolDecl::Category::StateVariableOld) {
+      if (s.kind == SymbolDecl::Kind::Tensor) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': tensor state variable '{}' is not "
+            "supported yet (scalar state variables only).",
+            m.name(), s.name));
+      }
       role = ArgSpec::Role::StateOld;
     } else if (s.category == SymbolDecl::Category::StateVariableCurrent) {
+      if (s.kind == SymbolDecl::Kind::Tensor) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': tensor state variable '{}' is not "
+            "supported yet (scalar state variables only).",
+            m.name(), s.name));
+      }
       role = ArgSpec::Role::StateCurrentRead; // non-Newton current
-    } else if (s.kind == SymbolDecl::Kind::Tensor) {
-      role = ArgSpec::Role::TensorInput;
-    } else if (s.category == SymbolDecl::Category::Input) {
-      role = ArgSpec::Role::ScalarInput;
-    } else {
+    } else if (s.category == SymbolDecl::Category::Parameter) {
+      if (s.kind == SymbolDecl::Kind::Tensor) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': tensor parameter '{}' is not "
+            "supported (parameters are scalar).",
+            m.name(), s.name));
+      }
       role = ArgSpec::Role::ScalarParam;
+    } else { // Category::Input
+      role = s.kind == SymbolDecl::Kind::Tensor ? ArgSpec::Role::TensorInput
+                                                : ArgSpec::Role::ScalarInput;
     }
     args.push_back({s.name, role, s.dim, s.rank});
   }
@@ -1221,6 +1281,8 @@ inline auto render_compute_function(
     }
     first = false;
     os << "    ";
+    // Every role enumerated explicitly (PR #78 review #5): no `default:`,
+    // so adding an ArgSpec::Role is a -Wswitch compile warning here.
     switch (a.role) {
     case ArgSpec::Role::TensorInput:
       os << "T" << tmpl_counter++ << " const &" << a.name;
@@ -1229,12 +1291,14 @@ inline auto render_compute_function(
       os << "T" << tmpl_counter++ << " &" << a.name << "_out";
       break;
     case ArgSpec::Role::ScalarOutput:
-      os << "double &" << a.name << "_out";
-      break;
     case ArgSpec::Role::NewtonStateOut:
       os << "double &" << a.name << "_out";
       break;
-    default: // all scalar-input-like roles
+    case ArgSpec::Role::ScalarParam:
+    case ArgSpec::Role::ScalarInput:
+    case ArgSpec::Role::StateOld:
+    case ArgSpec::Role::StateCurrentRead:
+    case ArgSpec::Role::TimeStep:
       os << "double const " << a.name;
       break;
     }

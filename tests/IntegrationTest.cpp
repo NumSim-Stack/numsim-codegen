@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 
 namespace numsim::codegen {
@@ -169,6 +170,101 @@ TEST(Integration, MooseInitialisesStateVariable) {
             std::string::npos)
       << header;
   EXPECT_NE(source.find("_alpha[_qp] = 0.0;"), std::string::npos) << source;
+}
+
+// ─── PR #78 review fixups ─────────────────────────────────────────────
+
+// #7: direct test of the canonical_arguments contract — the single source
+// of truth both the signature and the backend call-sites iterate.
+TEST(Integration, CanonicalArgumentsOrderAndRoles) {
+  auto m = build_newton_hardening();
+  auto const args = canonical_arguments(RecipeView{m});
+  using R = ArgSpec::Role;
+  ASSERT_EQ(args.size(), 5u);
+  EXPECT_EQ(args[0].name, "K");         EXPECT_EQ(args[0].role, R::ScalarParam);
+  EXPECT_EQ(args[1].name, "alpha_old"); EXPECT_EQ(args[1].role, R::StateOld);
+  EXPECT_EQ(args[2].name, "dt");        EXPECT_EQ(args[2].role, R::TimeStep);
+  EXPECT_EQ(args[3].name, "sigma_y");   EXPECT_EQ(args[3].role, R::ScalarOutput);
+  EXPECT_EQ(args[4].name, "alpha");     EXPECT_EQ(args[4].role, R::NewtonStateOut);
+}
+
+namespace {
+// Count comma-separated arguments inside the first `<Model>_compute(` call.
+auto count_compute_call_args(std::string const &src, std::string const &model)
+    -> std::size_t {
+  auto const open = src.find(model + "_compute(");
+  if (open == std::string::npos) return 0;
+  auto const lp = src.find('(', open);
+  auto const rp = src.find(')', lp);
+  auto const inner = src.substr(lp + 1, rp - lp - 1);
+  if (inner.find_first_not_of(" \t\n") == std::string::npos) return 0;
+  return std::size_t{1} +
+         static_cast<std::size_t>(std::count(inner.begin(), inner.end(), ','));
+}
+} // namespace
+
+// #6: real arity check — the MOOSE call must pass exactly as many arguments
+// as canonical_arguments (the historical bug was a count mismatch, 3 vs 7).
+TEST(Integration, MooseComputeCallArgCountEqualsCanonical) {
+  auto m = build_newton_hardening();
+  auto const source = MooseMaterialTarget{}.emit(m).at(1).contents;
+  EXPECT_EQ(count_compute_call_args(source, "Hardening"),
+            canonical_arguments(RecipeView{m}).size());
+}
+
+// #7: multi-state-variable MOOSE — the member/ctor/initQp/call loops are the
+// generalisation that can break (ordering, threading both vars).
+TEST(Integration, MooseWiresMultipleStateVariables) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Multi");
+  auto K = m.add_parameter("K", 1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  auto b = m.add_scalar_state_variable("b", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  m.add_scalar_evolution_equation(b, K * b.current);
+  m.enable_local_newton();
+  auto files = MooseMaterialTarget{}.emit(m);
+  auto const &h = files[0].contents;
+  auto const &c = files[1].contents;
+  for (auto const *sv : {"a", "b"}) {
+    EXPECT_NE(c.find(std::string("declareProperty<Real>(\"Multi_") + sv + "\")"),
+              std::string::npos) << c;
+    EXPECT_NE(c.find(std::string("getMaterialPropertyOld<Real>(\"Multi_") + sv + "\")"),
+              std::string::npos) << c;
+    EXPECT_NE(c.find(std::string("_") + sv + "[_qp] = 0.0;"), std::string::npos)
+        << c;
+    EXPECT_NE(h.find(std::string("MaterialProperty<Real> & _") + sv + ";"),
+              std::string::npos) << h;
+  }
+  // Both state vars threaded into the call in canonical order.
+  EXPECT_EQ(count_compute_call_args(c, "Multi"),
+            canonical_arguments(RecipeView{m}).size());
+}
+
+// #3: non-constant initial value → MOOSE emit fails loudly (rather than
+// emitting an undefined bare symbol name).
+TEST(Integration, MooseRejectsNonConstantStateVarInitial) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  auto K = m.add_parameter("K", 2.0);
+  // initial = K * 0.5 references parameter K → not a constant.
+  auto c = m.add_scalar_state_variable(
+      "c", K * make_expression<scalar_constant>(0.5));
+  m.add_scalar_evolution_equation(c, K * c.current);
+  m.enable_local_newton();
+  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+}
+
+// #2: output name clashing with a state variable is rejected at build time
+// (would otherwise emit duplicate MOOSE properties + a duplicate member).
+TEST(Integration, OutputNameClashingWithStateVariableThrows) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  (void)m.add_scalar_state_variable("alpha",
+                                    make_expression<scalar_constant>(0.0));
+  EXPECT_THROW(
+      m.add_output("alpha", make_expression<scalar_constant>(1.0)),
+      std::runtime_error);
 }
 
 } // namespace numsim::codegen

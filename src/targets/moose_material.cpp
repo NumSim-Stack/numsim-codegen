@@ -104,7 +104,7 @@ auto emit_header(ConstitutiveModel const &model) -> std::string {
 
   // Parameter members (dt → MOOSE's framework `_dt`, no member — issue #77).
   for (auto const &p : model.parameters()) {
-    if (p.name == state_time_step_name) continue;
+    if (p.is_time_step) continue;
     os << "  Real const _" << p.name << ";\n";
   }
   os << "\n";
@@ -172,6 +172,9 @@ void emit_compute_qp_body(std::ostream &os, ConstitutiveModel const &model) {
   for (auto const &a : canonical_arguments(RecipeView{model})) {
     if (!first) os << ",\n";
     first = false;
+    // Every role enumerated (PR #78 review #5): no `default:`, so a new
+    // ArgSpec::Role is a -Wswitch warning here — keeping read vs write
+    // roles from silently merging.
     switch (a.role) {
     case ArgSpec::Role::ScalarParam:
       os << "      _" << a.name; // getParam-backed Real member
@@ -183,9 +186,12 @@ void emit_compute_qp_body(std::ostream &os, ConstitutiveModel const &model) {
     case ArgSpec::Role::TensorOutput:
       os << "      " << a.name << "_ad"; // boundary adaptor
       break;
-    default: // ScalarInput / StateOld / StateCurrentRead / ScalarOutput /
-             // NewtonStateOut — all MaterialProperty<Real> at this qp
-      os << "      _" << a.name << "[_qp]";
+    case ArgSpec::Role::ScalarInput:
+    case ArgSpec::Role::StateOld:
+    case ArgSpec::Role::StateCurrentRead:
+    case ArgSpec::Role::ScalarOutput:
+    case ArgSpec::Role::NewtonStateOut:
+      os << "      _" << a.name << "[_qp]"; // MaterialProperty<Real> at _qp
       break;
     }
   }
@@ -193,20 +199,40 @@ void emit_compute_qp_body(std::ostream &os, ConstitutiveModel const &model) {
 }
 
 // Seed each state variable's declared property to its initial value
-// (issue #77). The initial value is a scalar expression — emit it through
-// the scalar pipeline so a non-constant initial (referencing parameters,
-// say) works too. Scalar state variables only in this slice.
+// (issue #77).
+//
+// The initial value is inlined into `initQpStatefulProperties` with the
+// recipe's BARE symbol names — but MOOSE members are `_`-prefixed, so an
+// initial that references a parameter/input would emit an undefined name
+// (e.g. `_c[_qp] = 0.5 * K;` where the member is `_K`). Phase 2.6 therefore
+// supports CONSTANT initial values only and rejects anything referencing a
+// symbol — a loud failure rather than broken generated code (PR #78 review
+// #3). Scalar state variables only (#1). A non-constant-initial path
+// (routing through a generated `_init` function with `_`-prefixed args, the
+// same boundary `_compute` uses) is a tracked follow-up.
 void emit_init_stateful_body(std::ostream &os, ConstitutiveModel const &model) {
-  CodeGenContext ctx;
-  CodeEmitPipeline pipeline(ctx);
-  for (auto const &[name, expr] : model.scalar_symbol_map()) {
-    ctx.register_symbol_scalar(expr, name);
-  }
   for (auto const &sv : model.state_variables()) {
+    if (sv.kind != SymbolDecl::Kind::Scalar) {
+      throw std::runtime_error(
+          "MooseMaterialTarget: tensor state variable '" + sv.name +
+          "' is not supported yet (scalar state variables only).");
+    }
     auto const &init =
         std::get<cas::expression_holder<cas::scalar_expression>>(
             sv.initial_value);
-    ctx.reset();
+
+    LeafCollector lc;
+    lc.collect_scalar(init);
+    if (!lc.scalar_names().empty() || !lc.tensor_names().empty()) {
+      throw std::runtime_error(
+          "MooseMaterialTarget: state variable '" + sv.name +
+          "' has a non-constant initial value (it references a symbol). "
+          "MOOSE initialisation supports constant initial values only in "
+          "this release.");
+    }
+
+    CodeGenContext ctx;
+    CodeEmitPipeline pipeline(ctx);
     auto const rhs = pipeline.scalar().apply(init);
     os << ctx.render_statements();
     os << "  _" << sv.name << "[_qp] = " << rhs << ";\n";
@@ -242,7 +268,7 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
   for (auto const &p : model.parameters()) {
     // `dt` maps to MOOSE's framework timestep `_dt`, not an input-file
     // parameter (issue #77).
-    if (p.name == state_time_step_name) continue;
+    if (p.is_time_step) continue;
     os << "  params.addParam<Real>(\"" << p.name << "\", " << *p.default_value
        << ", \"" << p.doc << "\");\n";
   }
@@ -259,7 +285,7 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
      << "(const InputParameters & parameters)\n";
   os << "  : Material(parameters)";
   for (auto const &p : model.parameters()) {
-    if (p.name == state_time_step_name) continue; // → _dt
+    if (p.is_time_step) continue; // → _dt
     os << ",\n    _" << p.name << "(getParam<Real>(\"" << p.name << "\"))";
   }
   for (auto const &i : model.inputs()) {

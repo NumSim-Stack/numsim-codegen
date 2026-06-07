@@ -63,7 +63,9 @@ struct ArgSpec {
 
 // Compute the canonical argument list for a recipe. Defined inline at the
 // bottom of recipe.h (needs the complete ConstitutiveModel + IR types).
-[[nodiscard]] auto canonical_arguments(RecipeView model)
+// `inline` on the declaration makes the linkage explicit — the definition
+// is inline and only reachable via recipe.h's bottom include.
+[[nodiscard]] inline auto canonical_arguments(RecipeView model)
     -> std::vector<ArgSpec>;
 
 // A Newton segment after CodeEmitPass has rendered its loop-local CSE temps
