@@ -9,6 +9,7 @@
 #include <numsim_codegen/code_emit/tensor_to_scalar_code_emit.h>
 #include <numsim_codegen/passes/code_emit_pass.h>
 #include <numsim_codegen/passes/local_jacobian_pass.h>
+#include <numsim_codegen/passes/local_newton_lowering_pass.h>
 #include <numsim_codegen/passes/pass.h>
 #include <numsim_codegen/passes/pass_manager.h>
 #include <numsim_codegen/passes/symbol_validation_pass.h>
@@ -207,6 +208,17 @@ struct EvolutionEquation {
   std::size_t state_variable_idx;
   cas::expression_holder<cas::scalar_expression> rate;
   std::string doc;
+};
+
+// Phase 3a-2 (issue #75): tuning for the in-function Newton solve emitted
+// by LocalNewtonLoweringPass. `tol` is the absolute residual threshold for
+// convergence; `max_iter` caps the iteration count (no line search /
+// divergence detection in 3a-2 — a plain max-iter guard). Recipe-level for
+// now (uniform across all evolution equations); per-equation tuning can be
+// added when a real consumer needs it.
+struct NewtonOptions {
+  double tol = 1e-10;
+  int max_iter = 50;
 };
 
 // Declaration of a computed output that the generated function emits.
@@ -578,26 +590,24 @@ public:
     PassManager pm;
     pm.emplace<SymbolValidationPass>();
     pm.emplace<TensorSpaceConsistencyPass>();
-    // TimeIntegrationPass is registered only when the recipe has
-    // evolution equations. Its `state_variables_non_empty` precondition
-    // would otherwise fail at run() on pure-elasticity recipes — by
-    // gating registration here we keep the elastic path unchanged.
+    // State-variable lowering is registered only when the recipe has
+    // evolution equations (the `state_variables_non_empty` precondition
+    // would otherwise fail at run() on pure-elasticity recipes). Two
+    // mutually-exclusive shapes:
+    //   * default — TimeIntegrationPass + LocalJacobianPass emit
+    //     `<sv>_residual` / `<sv>_jacobian` as outputs for an external
+    //     Newton driver.
+    //   * local-newton (issue #75, opt-in via `enable_local_newton`) —
+    //     LocalNewtonLoweringPass records an in-function Newton solve;
+    //     CodeEmitPass renders the loop and the state variable becomes
+    //     a `<sv>_out` parameter instead of R/J outputs.
     if (!m_evolution_equations.empty()) {
-      pm.emplace<TimeIntegrationPass>();
-      // Phase 3a-1 (issue #70): emit `<sv>_jacobian` outputs alongside
-      // residuals so external Newton drivers (or Phase 3a-2's
-      // LocalNewtonLoweringPass once control-flow emit lands) can
-      // iterate `α ← α − R/J` without needing finite differences.
-      //
-      // **Policy:** LocalJacobianPass runs
-      // unconditionally whenever there are evolution equations. This is
-      // the intended forever-default — every Newton-driven consumer
-      // wants the Jacobian, and external FD-based drivers can simply
-      // ignore the extra out-parameter. If a future consumer needs a
-      // residual-only emit (e.g. for runtime symbolic differentiation,
-      // or a hand-tuned hot path), introduce an `EmitFlags` builder
-      // parameter rather than changing this default.
-      pm.emplace<LocalJacobianPass>();
+      if (m_local_newton) {
+        pm.emplace<LocalNewtonLoweringPass>();
+      } else {
+        pm.emplace<TimeIntegrationPass>();
+        pm.emplace<LocalJacobianPass>();
+      }
     }
     pm.emplace<CodeEmitPass>();
     pm.run(pctx);
@@ -681,6 +691,26 @@ public:
   [[nodiscard]] auto evolution_equations() const noexcept
       -> std::span<EvolutionEquation const> {
     return m_evolution_equations;
+  }
+
+  // Phase 3a-2 (issue #75): opt into in-function local Newton solving.
+  // When enabled (and the recipe has evolution equations),
+  // `emit_compute_function` registers `LocalNewtonLoweringPass` instead
+  // of the residual/Jacobian-output passes (TimeIntegration + LocalJacobian):
+  // the generated function solves each scalar state variable internally
+  // and exposes it as a `<sv>_out` parameter, rather than emitting
+  // `<sv>_residual` / `<sv>_jacobian` outputs for an external driver.
+  // Default OFF — recipes keep the external-driver (R/J-output) shape
+  // unless they ask for the solve.
+  void enable_local_newton(NewtonOptions opts = {}) {
+    m_local_newton = true;
+    m_newton_options = opts;
+  }
+  [[nodiscard]] auto local_newton_enabled() const noexcept -> bool {
+    return m_local_newton;
+  }
+  [[nodiscard]] auto newton_options() const noexcept -> NewtonOptions {
+    return m_newton_options;
   }
 
   // Symbol → expression maps. Exposed for the Phase 1.2 pass framework so
@@ -841,6 +871,8 @@ private:
   std::vector<OutputDecl> m_outputs;
   std::vector<StateVariable> m_state_variables; // Phase 2.1
   std::vector<EvolutionEquation> m_evolution_equations; // Phase 2.2
+  bool m_local_newton = false;          // Phase 3a-2 (issue #75)
+  NewtonOptions m_newton_options{};     // Phase 3a-2 (issue #75)
 
   std::vector<
       std::pair<std::string, cas::expression_holder<cas::scalar_expression>>>
@@ -1093,10 +1125,33 @@ inline auto tensor_arg_count(RecipeView model) -> int {
 
 } // namespace detail
 
+// Phase 3a-2 (issue #75): a Newton segment after CodeEmitPass has rendered
+// its loop-local CSE temps + the residual/Jacobian right-hand sides to
+// text. `render_compute_function` assembles these into the iteration body.
+// (The unrendered form — expression handles — is `NewtonSegment` in
+// pass.h; CodeEmitPass turns one into the other using its emit pipeline.)
+struct RenderedNewtonSegment {
+  std::string state_var_name;  // the current symbol, e.g. "alpha"
+  std::string loop_local_decls; // `    auto tN = ...;\n` lines (4-indented)
+  std::string residual_rhs;     // expression for the residual R
+  std::string jacobian_rhs;     // expression for the Jacobian J = dR/dsv
+  double tol;
+  int max_iter;
+};
+
 inline auto render_compute_function(
     RecipeView model, CodeGenContext const &ctx,
-    std::vector<std::string> const &output_rhs) -> std::string {
+    std::vector<std::string> const &output_rhs,
+    std::vector<RenderedNewtonSegment> const &newton = {}) -> std::string {
   std::ostringstream os;
+
+  // State variables solved in-function become out-parameters, not inputs
+  // (issue #60): the function returns the converged value rather than
+  // taking the current iterate as a `double const` input.
+  std::set<std::string> newton_owned;
+  for (auto const &seg : newton) {
+    newton_owned.insert(seg.state_var_name);
+  }
 
   os << "// Auto-generated by numsim-codegen. Do not edit.\n";
   os << "// Model: " << model.name() << "\n\n";
@@ -1119,6 +1174,11 @@ inline auto render_compute_function(
   int tmpl_counter = 0;
   bool first = true;
   for (auto const &s : model.symbols()) {
+    // Newton-owned current symbols are emitted as out-params below, not
+    // as `double const` inputs.
+    if (newton_owned.contains(s.name)) {
+      continue;
+    }
     if (!first) {
       os << ",\n";
     }
@@ -1133,12 +1193,46 @@ inline auto render_compute_function(
     first = false;
     os << "    " << detail::output_decl(out, tmpl_counter);
   }
+  // Newton-solved state variables as out-params (scalar only in 3a-2).
+  for (auto const &seg : newton) {
+    if (!first) {
+      os << ",\n";
+    }
+    first = false;
+    os << "    double &" << seg.state_var_name << "_out";
+  }
   os << ") {\n";
+
+  // Newton iteration segments first — they declare + solve the local
+  // state-variable iterates that downstream output expressions reference.
+  for (auto const &seg : newton) {
+    os << "  double " << seg.state_var_name << " = " << seg.state_var_name
+       << "_old;\n";
+    os << "  for (int " << seg.state_var_name << "_iter = 0; "
+       << seg.state_var_name << "_iter < " << seg.max_iter << "; ++"
+       << seg.state_var_name << "_iter) {\n";
+    os << seg.loop_local_decls; // already 4-indented, trailing newline
+    os << "    double " << seg.state_var_name << "_R = " << seg.residual_rhs
+       << ";\n";
+    os << "    double " << seg.state_var_name << "_J = " << seg.jacobian_rhs
+       << ";\n";
+    os << "    if (std::abs(" << seg.state_var_name << "_R) < " << seg.tol
+       << ") {\n      break;\n    }\n";
+    os << "    " << seg.state_var_name << " -= " << seg.state_var_name
+       << "_R / " << seg.state_var_name << "_J;\n";
+    os << "  }\n";
+  }
 
   os << ctx.render_statements();
 
   for (std::size_t i = 0; i < model.outputs().size(); ++i) {
     os << "  " << model.outputs()[i].name << "_out = " << output_rhs[i]
+       << ";\n";
+  }
+
+  // Write converged state-variable values back to their out-params.
+  for (auto const &seg : newton) {
+    os << "  " << seg.state_var_name << "_out = " << seg.state_var_name
        << ";\n";
   }
 

@@ -6,8 +6,11 @@
 //      tmech::adaptor without copying.
 //   3. The math is correct (verified against hand-computed values).
 
+#include "AutocatalyticCheck.h"
 #include "CompileCheck.h"
 #include "HardeningCheck.h"
+#include "NewtonCheck.h"
+#include <cmath>
 #include <gtest/gtest.h>
 #include <tmech/tmech.h>
 
@@ -109,4 +112,82 @@ TEST(CompileCheckGenerated, HardeningJacobianIndependentOfAlphaOld) {
   EXPECT_NEAR(j1, j2, 1e-12)
       << "Jacobian must be independent of alpha_old";
   EXPECT_NEAR(j1, 1.0 / dt - K, 1e-12);
+}
+
+// Phase 3a-2 (issue #75) — the realised Phase 1.3 de-risk spike. The
+// NewtonCheck recipe enables in-function local Newton solving, so the
+// generated function solves for the converged state variable internally
+// and exposes it as `alpha_out` (no R/J outputs). We compile + call it
+// and verify convergence to the analytic fixed point.
+//
+// Linear hardening residual R = (alpha - alpha_old)/dt - K*alpha = 0
+//   ⇒ alpha* = alpha_old / (1 - K*dt)
+// The residual is linear in alpha, so Newton reaches the root in one step.
+TEST(CompileCheckGenerated, NewtonSolveConvergesToAnalyticFixedPoint) {
+  double const K = 2.0;
+  double const alpha_old = 1.0;
+  double const dt = 0.1;            // 1 - K*dt = 0.8 > 0, well-posed
+  double sigma_y_out = 0.0;
+  double alpha_out = 0.0;
+
+  // Generated signature: (K, alpha_old, dt, sigma_y_out, alpha_out).
+  NewtonCheck_compute(K, alpha_old, dt, sigma_y_out, alpha_out);
+
+  double const alpha_star = alpha_old / (1.0 - K * dt);  // = 1.25
+  EXPECT_NEAR(alpha_out, alpha_star, 1e-10);
+  EXPECT_NEAR(alpha_out, 1.25, 1e-10);
+
+  // The downstream output sees the CONVERGED state, not the initial guess.
+  EXPECT_NEAR(sigma_y_out, K * alpha_star, 1e-10);  // = 2.5
+  EXPECT_NEAR(sigma_y_out, 2.5, 1e-10);
+}
+
+TEST(CompileCheckGenerated, NewtonSolveHandlesZeroOldState) {
+  // alpha_old = 0 ⇒ residual root is alpha* = 0; the initial guess IS the
+  // root, so the convergence check breaks on iteration 0.
+  double const K = 5.0;
+  double const dt = 0.01;
+  double sigma_y_out = 1.0, alpha_out = 1.0;
+  NewtonCheck_compute(K, /*alpha_old=*/0.0, dt, sigma_y_out, alpha_out);
+  EXPECT_NEAR(alpha_out, 0.0, 1e-12);
+  EXPECT_NEAR(sigma_y_out, 0.0, 1e-12);
+}
+
+// Phase 3a-2: NONLINEAR Newton convergence. The autocatalytic Kamal rate
+// dα/dt = (K1 + K2·α)·(1−α)^1.5 makes the per-step residual nonlinear, so
+// the generated Newton loop must genuinely ITERATE (the linear NewtonCheck
+// converges in one step and would not catch a broken loop). We step
+// backward-Euler through a cure history and verify, at every converged
+// point, that the residual is ~0 — re-derived here independently of the
+// generated code.
+namespace {
+double autocat_residual(double c, double c_old, double dt, double K1,
+                        double K2) {
+  return (c - c_old) / dt - (K1 + K2 * c) * std::pow(1.0 - c, 1.5);
+}
+} // namespace
+
+TEST(CompileCheckGenerated, AutocatalyticNewtonConvergesOverCureHistory) {
+  double const K1 = 0.2, K2 = 2.0, dt = 0.05;
+  double c_old = 0.0;
+  double prev = 0.0;
+  for (int step = 0; step < 40; ++step) {
+    double c_out = 0.0;
+    AutocatalyticCheck_compute(K1, K2, c_old, dt, c_out);
+
+    // The generated Newton solve drove the residual to ~0.
+    EXPECT_LT(std::abs(autocat_residual(c_out, c_old, dt, K1, K2)), 1e-9)
+        << "step " << step << " residual not converged (c=" << c_out << ")";
+    // Physically admissible + monotonic cure.
+    EXPECT_GE(c_out, prev) << "cure must not decrease at step " << step;
+    EXPECT_GE(c_out, 0.0);
+    EXPECT_LE(c_out, 1.0);
+
+    prev = c_out;
+    c_old = c_out;
+  }
+  // After 40 steps of dt=0.05 (t=2.0) the autocatalytic cure is well
+  // advanced but not yet complete.
+  EXPECT_GT(c_old, 0.7) << "cure should be well advanced by t=2.0";
+  EXPECT_LT(c_old, 1.0);
 }

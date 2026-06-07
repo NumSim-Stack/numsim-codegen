@@ -17,6 +17,23 @@ namespace numsim::codegen {
 struct SymbolDecl;
 struct StateVariable;
 
+// Phase 3a-2 (issue #75): one in-function Newton solve recorded by
+// `LocalNewtonLoweringPass` and rendered by `CodeEmitPass`. Each segment
+// owns a scalar state variable: the generated function declares a local
+// `<state_var_name>` initialised from `<state_var_name>_old`, iterates
+// `residual` / `jacobian` (recomputed per iteration with loop-local CSE)
+// until `|residual| < tol` or `max_iter` is hit, then writes the
+// converged value to `<state_var_name>_out`. The residual + Jacobian are
+// the same expressions `TimeIntegrationPass` / `LocalJacobianPass` would
+// emit as outputs — here they become loop internals instead.
+struct NewtonSegment {
+  std::string state_var_name;
+  cas::expression_holder<cas::scalar_expression> residual;
+  cas::expression_holder<cas::scalar_expression> jacobian;
+  double tol;
+  int max_iter;
+};
+
 // Shared state for a single PassManager invocation. Passes read the
 // recipe via `model` (a RecipeView — const-only today, will gain a
 // mutable surface in Phase 2 without breaking pass signatures; see M4
@@ -43,6 +60,10 @@ struct PassContext {
   CodeGenContext ctx;
   std::optional<std::string> compute_function_source;
   std::unordered_map<std::string, std::size_t> symbol_lookup;
+  // Phase 3a-2 (issue #75): populated by LocalNewtonLoweringPass, consumed
+  // by CodeEmitPass. Empty unless the recipe opted into local Newton
+  // solving (`ConstitutiveModel::enable_local_newton`).
+  std::vector<NewtonSegment> newton_segments;
 };
 
 // Why a symbol lookup failed. The pre-modernization API returned a

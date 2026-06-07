@@ -90,6 +90,8 @@ sequenceDiagram
     LJP->>LJP: for each EvolutionEquation:<br/>add_output(sv_jacobian, cas::diff(residual, sv))
     LJP-->>PM: postconditions:<br/>{jacobian-emitted}
 
+    Note over PM,LJP: Phase 3a-2 (issue #75): if enable_local_newton() is set,<br/>LocalNewtonLoweringPass REPLACES TIP+LJP. It records a<br/>NewtonSegment (residual + Jacobian via the shared helpers)<br/>per evolution equation; CodeEmitPass renders the in-function<br/>loop with loop-local CSE. State var → sv_out (no R/J outputs).<br/>Postcondition: {newton-lowered}.
+
     PM->>CEP: run(pctx)
     Note over CEP: Cycle-break via<br/>unique_ptr<T2sCodeEmit> indirection
     CEP->>SE: construct(ctx)
@@ -253,7 +255,7 @@ Where future work plugs in (per epic #28 and follow-up issue #56):
 | **2.1** | `StateVariable` IR + `add_*_state_variable` API + RecipeView delegate | `ConstitutiveModel`, `RecipeView`, `SymbolDecl::Category` | ✓ landed |
 | **2.2** | `EvolutionEquation` IR + `TimeIntegrationPass` lowering `Dt(α) → (α − α_old)/dt` via mutate-recipe (synthesises `<sv>_residual` outputs) | Between SymbolValidationPass and CodeEmitPass; advertises `backward-euler-residual-emitted` postcondition. Scalar-only; tensor evolutions deferred. | ✓ landed |
 | **3a-1** | `LocalJacobianPass` symbolic `∂<sv>_residual/∂<sv>` via `cas::diff` → `<sv>_jacobian` output | After TimeIntegrationPass, before CodeEmitPass; advertises `jacobian-emitted` postcondition. Scalar-only. | ✓ landed |
-| **3a-2** | `LocalNewtonLoweringPass` emitting the actual Newton iteration body (needs control-flow emit primitives) | After LocalJacobianPass, before CodeEmitPass | next |
+| **3a-2** | `LocalNewtonLoweringPass` emitting the in-function Newton iteration body (opt-in via `enable_local_newton`; replaces TIP+LJP). Loop-local CSE via `CodeGenContext::reset()`; state var → `<sv>_out`. Scalar, uncoupled; numerically verified to the analytic fixed point. | Registered instead of TIP+LJP when local-newton is enabled; advertises `newton-lowered` | ✓ landed |
 | **2.3** | `Equation` + `ComplementarityConstraint` IR types | `ConstitutiveModel` IR section | next |
 | **2.4** | `LocalNewtonSystem` IR (unknown state vars + residual expressions) | New section on `ConstitutiveModel` | next |
 | **2.5** | `KuhnTuckerLoweringPass` rewriting NCP constraints to Fischer-Burmeister | Between SymbolValidationPass and CodeEmitPass; advertises `kt-lowered` | next |
