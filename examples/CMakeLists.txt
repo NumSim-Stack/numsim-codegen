@@ -6,3 +6,6 @@ target_link_libraries(moose_linear_elastic PRIVATE numsim::codegen)
 
 add_executable(recipe_registry_gen recipe_registry_gen.cpp)
 target_link_libraries(recipe_registry_gen PRIVATE numsim::codegen)
+
+add_executable(resin_curing resin_curing.cpp)
+target_link_libraries(resin_curing PRIVATE numsim::codegen)
