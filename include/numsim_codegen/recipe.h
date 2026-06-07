@@ -256,7 +256,22 @@ struct state_variable_alignment_access;
 // etc., by passing it through the appropriate Target backend.
 class ConstitutiveModel {
 public:
-  explicit ConstitutiveModel(std::string name) : m_name(std::move(name)) {}
+  explicit ConstitutiveModel(std::string name) : m_name(std::move(name)) {
+    // Security (PR #78 round-5): the model name flows UNESCAPED into
+    // generated C++ — the `<name>_compute` function name, the MOOSE
+    // `class <name> : public Material`, `registerMooseObject(...)`, and
+    // `declareProperty("<name>_...")` string literals. An invalid name
+    // (spaces, `"`, `;`, `)`) is a malformed-output / code-injection
+    // vector. SymbolValidationPass already validates *symbol* identifiers;
+    // the model name had no such guard. Reject it at construction.
+    if (!SymbolValidationPass::is_valid_cxx_identifier(m_name)) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel: model name '{}' is not a valid C++ identifier "
+          "(it becomes the generated function/class name). Use a "
+          "[A-Za-z_][A-Za-z0-9_]* name that is not a C++ keyword.",
+          m_name));
+    }
+  }
 
   [[nodiscard]] auto name() const -> std::string const & { return m_name; }
 

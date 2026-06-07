@@ -2,6 +2,8 @@
 
 #include <numsim_codegen/recipe.h>
 
+#include <cmath>
+#include <format>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
@@ -269,8 +271,21 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
     // `dt` maps to MOOSE's framework timestep `_dt`, not an input-file
     // parameter (issue #77).
     if (p.is_time_step) continue;
-    os << "  params.addParam<Real>(\"" << p.name << "\", " << *p.default_value
-       << ", \"" << p.doc << "\");\n";
+    // Security (PR #78 round-5): a non-finite default streams as `nan`/`inf`
+    // — not a valid C++ literal — so the generated source wouldn't compile.
+    // Fail loudly at emit. (`std::format` also gives shortest round-trip
+    // precision vs. ostream's default.)
+    if (!std::isfinite(*p.default_value)) {
+      throw std::runtime_error(
+          "MooseMaterialTarget: parameter '" + p.name +
+          "' has a non-finite default value (NaN/inf), which is not a valid "
+          "C++ literal. Provide a finite default.");
+    }
+    // `p.doc` is escaped (it flows into a string literal); a raw `"` would
+    // terminate the literal early.
+    os << "  params.addParam<Real>(\"" << p.name << "\", "
+       << std::format("{}", *p.default_value) << ", \""
+       << escape_for_cpp_literal(p.doc) << "\");\n";
   }
   for (auto const &i : model.inputs()) {
     os << "  params.addRequiredParam<MaterialPropertyName>(\"" << i.name

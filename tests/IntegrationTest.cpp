@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <limits>
 #include <string>
 
 namespace numsim::codegen {
@@ -300,6 +301,65 @@ TEST(Integration, OutputStateVarNameClashThrowsEitherOrder) {
     m.add_output("beta", make_expression<scalar_constant>(1.0));
     EXPECT_THROW((void)m.add_parameter("beta", 1.0), std::runtime_error);
   }
+}
+
+// ─── PR #78 round-5 security regressions ──────────────────────────
+//
+// The model name flows verbatim into the generated function name
+// (`<name>_compute`), the MOOSE class declaration (`class <name> :
+// public Material`), `registerMooseObject("<name>")`, and the
+// declared-property literals (`declareProperty<Real>("<name>_...")`).
+// An invalid identifier would emit syntactically broken — or, for a
+// crafted name, code-injecting — C++. The ConstitutiveModel
+// constructor must reject any name that is not a valid C++ identifier.
+TEST(Integration, ModelNameMustBeValidIdentifier) {
+  // A name carrying a statement separator would inject a declaration
+  // into the emitted source if it reached emit. Rejected at construction.
+  EXPECT_THROW(ConstitutiveModel{"Foo; struct Evil {};"}, std::runtime_error);
+  // Leading digit, embedded space, and an empty name are equally invalid.
+  EXPECT_THROW(ConstitutiveModel{"9Model"}, std::runtime_error);
+  EXPECT_THROW(ConstitutiveModel{"My Model"}, std::runtime_error);
+  EXPECT_THROW(ConstitutiveModel{""}, std::runtime_error);
+  // A C++ keyword is not usable as a class/function name either.
+  EXPECT_THROW(ConstitutiveModel{"class"}, std::runtime_error);
+  // Sanity: a plain valid identifier still constructs.
+  EXPECT_NO_THROW(ConstitutiveModel{"ResinCuring"});
+}
+
+// A parameter doc string is user-supplied free text streamed into a C++
+// string literal inside validParams(). An embedded `"` would terminate
+// the literal early (and the remainder could form arbitrary tokens). The
+// MOOSE backend must escape it so the emitted literal stays well-formed.
+TEST(Integration, MooseEscapesParameterDocString) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  m.add_parameter("K", 1.0, "bad \" doc with \\ and newline\n");
+  auto files = MooseMaterialTarget{}.emit(m);
+  std::string const source = files[1].contents;
+  // The raw unescaped quote must NOT appear right after the doc opens;
+  // the escaped forms must be present instead.
+  EXPECT_NE(source.find("\\\" doc"), std::string::npos)
+      << "embedded quote should be backslash-escaped";
+  EXPECT_NE(source.find("\\\\ and"), std::string::npos)
+      << "embedded backslash should be doubled";
+  EXPECT_NE(source.find("newline\\n"), std::string::npos)
+      << "embedded newline should be escaped, not raw";
+  // And no raw newline should leak into the literal.
+  EXPECT_EQ(source.find("newline\n\""), std::string::npos)
+      << "a raw newline inside the doc literal is ill-formed C++";
+}
+
+// A non-finite parameter default (NaN/inf) streams as `nan`/`inf`, which
+// is not a valid C++ floating literal. The MOOSE backend must reject it
+// loudly rather than emit code that fails to compile downstream.
+TEST(Integration, MooseRejectsNonFiniteParameterDefault) {
+  ConstitutiveModel m("M");
+  m.add_parameter("bad", std::numeric_limits<double>::quiet_NaN());
+  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+
+  ConstitutiveModel m2("M2");
+  m2.add_parameter("worse", std::numeric_limits<double>::infinity());
+  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m2), std::runtime_error);
 }
 
 } // namespace numsim::codegen
