@@ -46,9 +46,10 @@ auto write_single_file(numsim::codegen::ConstitutiveModel const &model,
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc < 4) {
+  if (argc < 5) {
     std::cerr << "usage: " << argv[0]
-              << " <CompileCheck.h> <HardeningCheck.h> <NewtonCheck.h>\n";
+              << " <CompileCheck.h> <HardeningCheck.h> <NewtonCheck.h>"
+                 " <AutocatalyticCheck.h>\n";
     return 1;
   }
 
@@ -100,6 +101,27 @@ int main(int argc, char *argv[]) {
     model.add_scalar_evolution_equation(alpha, K * alpha.current);
     model.enable_local_newton();
     if (int rc = write_single_file(model, argv[3]); rc != 0) return rc;
+  }
+
+  // ── Recipe 4: AUTOCATALYTIC Newton solve (Phase 3a-2, issue #75) ─────
+  //
+  // Kamal cure kinetics dα/dt = (K1 + K2·α)·(1−α)^1.5 — NONLINEAR in α, so
+  // the generated Newton loop genuinely iterates (the linear NewtonCheck
+  // above converges in one step and would not catch a broken iteration).
+  // The driver steps backward-Euler through a cure history and verifies
+  // the residual is driven to ~0 at every converged point.
+  {
+    ConstitutiveModel model("AutocatalyticCheck");
+    auto K1 = model.add_parameter("K1", 0.2);
+    auto K2 = model.add_parameter("K2", 2.0);
+    auto c = model.add_scalar_state_variable(
+        "c", make_expression<scalar_constant>(0.0));
+    auto one = make_expression<scalar_constant>(1.0);
+    auto n = make_expression<scalar_constant>(1.5);
+    model.add_scalar_evolution_equation(
+        c, (K1 + K2 * c.current) * pow(one - c.current, n));
+    model.enable_local_newton();
+    if (int rc = write_single_file(model, argv[4]); rc != 0) return rc;
   }
 
   return 0;

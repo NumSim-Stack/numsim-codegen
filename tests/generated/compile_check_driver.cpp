@@ -6,9 +6,11 @@
 //      tmech::adaptor without copying.
 //   3. The math is correct (verified against hand-computed values).
 
+#include "AutocatalyticCheck.h"
 #include "CompileCheck.h"
 #include "HardeningCheck.h"
 #include "NewtonCheck.h"
+#include <cmath>
 #include <gtest/gtest.h>
 #include <tmech/tmech.h>
 
@@ -149,4 +151,43 @@ TEST(CompileCheckGenerated, NewtonSolveHandlesZeroOldState) {
   NewtonCheck_compute(K, /*alpha_old=*/0.0, dt, sigma_y_out, alpha_out);
   EXPECT_NEAR(alpha_out, 0.0, 1e-12);
   EXPECT_NEAR(sigma_y_out, 0.0, 1e-12);
+}
+
+// Phase 3a-2: NONLINEAR Newton convergence. The autocatalytic Kamal rate
+// dα/dt = (K1 + K2·α)·(1−α)^1.5 makes the per-step residual nonlinear, so
+// the generated Newton loop must genuinely ITERATE (the linear NewtonCheck
+// converges in one step and would not catch a broken loop). We step
+// backward-Euler through a cure history and verify, at every converged
+// point, that the residual is ~0 — re-derived here independently of the
+// generated code.
+namespace {
+double autocat_residual(double c, double c_old, double dt, double K1,
+                        double K2) {
+  return (c - c_old) / dt - (K1 + K2 * c) * std::pow(1.0 - c, 1.5);
+}
+} // namespace
+
+TEST(CompileCheckGenerated, AutocatalyticNewtonConvergesOverCureHistory) {
+  double const K1 = 0.2, K2 = 2.0, dt = 0.05;
+  double c_old = 0.0;
+  double prev = 0.0;
+  for (int step = 0; step < 40; ++step) {
+    double c_out = 0.0;
+    AutocatalyticCheck_compute(K1, K2, c_old, dt, c_out);
+
+    // The generated Newton solve drove the residual to ~0.
+    EXPECT_LT(std::abs(autocat_residual(c_out, c_old, dt, K1, K2)), 1e-9)
+        << "step " << step << " residual not converged (c=" << c_out << ")";
+    // Physically admissible + monotonic cure.
+    EXPECT_GE(c_out, prev) << "cure must not decrease at step " << step;
+    EXPECT_GE(c_out, 0.0);
+    EXPECT_LE(c_out, 1.0);
+
+    prev = c_out;
+    c_old = c_out;
+  }
+  // After 40 steps of dt=0.05 (t=2.0) the autocatalytic cure is well
+  // advanced but not yet complete.
+  EXPECT_GT(c_old, 0.7) << "cure should be well advanced by t=2.0";
+  EXPECT_LT(c_old, 1.0);
 }
