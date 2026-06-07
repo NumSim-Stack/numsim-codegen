@@ -150,17 +150,30 @@ TEST(Integration, MooseMapsDtToFrameworkTimestep) {
   EXPECT_NE(source.find("_dt"), std::string::npos) << source;
 }
 
-TEST(Integration, MooseComputeCallArityMatchesGeneratedSignature) {
+TEST(Integration, MooseComputeCallThreadsStateAndDtInCanonicalOrder) {
   auto files = MooseMaterialTarget{}.emit(build_newton_hardening());
   std::string const source = files[1].contents;
   // The call must thread the state-variable arguments in the canonical
   // order — proving the historical arity bug (3-arg call into a 7-param
   // function) is gone. Generated signature is
   //   Hardening_compute(K, alpha_old, dt, sigma_y_out, alpha_out)
-  // so the call must pass _alpha_old[_qp], _dt, and _alpha[_qp].
-  EXPECT_NE(source.find("_alpha_old[_qp]"), std::string::npos) << source;
-  EXPECT_NE(source.find("_dt"), std::string::npos) << source;
-  EXPECT_NE(source.find("_alpha[_qp]"), std::string::npos) << source;
+  // so the actuals must appear in that order at the call-site. (Round-6
+  // review: the previous form only asserted each substring was present
+  // *somewhere*, so a reordered/mis-wired call would still pass green.
+  // Pin the relative order instead.)
+  auto const call = source.find("Hardening_compute(");
+  ASSERT_NE(call, std::string::npos) << source;
+  auto const old_pos = source.find("_alpha_old[_qp]", call);
+  auto const dt_pos = source.find("_dt", call);
+  // `_alpha[_qp]` is a prefix of `_alpha_old[_qp]`; search past the old
+  // occurrence so we match the distinct current-state actual.
+  auto const cur_pos = source.find("_alpha[_qp]", old_pos + 1);
+  ASSERT_NE(old_pos, std::string::npos) << source;
+  ASSERT_NE(dt_pos, std::string::npos) << source;
+  ASSERT_NE(cur_pos, std::string::npos) << source;
+  EXPECT_LT(old_pos, dt_pos) << "alpha_old must precede dt\n" << source;
+  EXPECT_LT(dt_pos, cur_pos) << "dt must precede alpha (NewtonStateOut)\n"
+                             << source;
 }
 
 TEST(Integration, MooseInitialisesStateVariable) {
@@ -187,6 +200,34 @@ TEST(Integration, CanonicalArgumentsOrderAndRoles) {
   EXPECT_EQ(args[2].name, "dt");        EXPECT_EQ(args[2].role, R::TimeStep);
   EXPECT_EQ(args[3].name, "sigma_y");   EXPECT_EQ(args[3].role, R::ScalarOutput);
   EXPECT_EQ(args[4].name, "alpha");     EXPECT_EQ(args[4].role, R::NewtonStateOut);
+}
+
+// Round-6 review coverage gap: a current state variable on a recipe that
+// does NOT enable local-Newton is classified `StateCurrentRead` (a plain
+// read-in arg), not `NewtonStateOut`. That branch (recipe.h canonical_
+// arguments) was previously unexercised — only the Newton-owned case had
+// a test. The standalone target accepts such a recipe (external-driver
+// mode); MOOSE rejects it, so assert on canonical_arguments directly.
+TEST(Integration, CanonicalArgumentsClassifiesNonNewtonCurrentStateAsRead) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  (void)m.add_parameter("K", 1.0);
+  (void)m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_output("out", make_expression<scalar_constant>(1.0));
+  // No enable_local_newton() and no evolution equation → `a` is a plain
+  // current state read, `a_old` the previous-step read.
+  auto const args = canonical_arguments(RecipeView{m});
+  using R = ArgSpec::Role;
+  auto role_of = [&](std::string_view n) -> R {
+    for (auto const &a : args)
+      if (a.name == n) return a.role;
+    ADD_FAILURE() << "arg '" << n << "' not found";
+    return R::ScalarParam;
+  };
+  EXPECT_EQ(role_of("a"), R::StateCurrentRead);
+  EXPECT_EQ(role_of("a_old"), R::StateOld);
+  EXPECT_EQ(role_of("K"), R::ScalarParam);
+  EXPECT_EQ(role_of("out"), R::ScalarOutput);
 }
 
 namespace {
