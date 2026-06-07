@@ -46,9 +46,9 @@ auto write_single_file(numsim::codegen::ConstitutiveModel const &model,
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc < 3) {
+  if (argc < 4) {
     std::cerr << "usage: " << argv[0]
-              << " <CompileCheck.h> <HardeningCheck.h>\n";
+              << " <CompileCheck.h> <HardeningCheck.h> <NewtonCheck.h>\n";
     return 1;
   }
 
@@ -80,6 +80,26 @@ int main(int argc, char *argv[]) {
         "alpha", make_expression<scalar_constant>(0.0));
     model.add_scalar_evolution_equation(alpha, K * alpha.current);
     if (int rc = write_single_file(model, argv[2]); rc != 0) return rc;
+  }
+
+  // ── Recipe 3: in-function Newton solve (Phase 3a-2, issue #75) ───────
+  //
+  // Same linear-hardening physics, but `enable_local_newton()` makes the
+  // generated function SOLVE for the converged α internally and expose it
+  // as `alpha_out`, instead of emitting R/J outputs. The residual is
+  // linear in α, so Newton hits the root in one step; the driver verifies
+  // convergence to the analytic fixed point α* = α_old / (1 − K·dt) and
+  // that the downstream output (sigma_y = K·α) sees the converged value.
+  // This is the Phase 1.3 (#32) de-risk spike realised as a CI test.
+  {
+    ConstitutiveModel model("NewtonCheck");
+    auto K = model.add_parameter("K", 1.0);
+    auto alpha = model.add_scalar_state_variable(
+        "alpha", make_expression<scalar_constant>(0.0));
+    model.add_output("sigma_y", K * alpha.current);
+    model.add_scalar_evolution_equation(alpha, K * alpha.current);
+    model.enable_local_newton();
+    if (int rc = write_single_file(model, argv[3]); rc != 0) return rc;
   }
 
   return 0;

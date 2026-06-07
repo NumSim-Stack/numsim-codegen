@@ -95,6 +95,15 @@ inline constexpr std::string_view backward_euler_residual_emitted =
 // Newton drivers can use the residual + Jacobian outputs directly.
 inline constexpr std::string_view jacobian_emitted = "jacobian-emitted";
 
+// LocalNewtonLoweringPass postcondition (Phase 3a-2, issue #75).
+// Advertises that every scalar evolution equation has been lowered to an
+// in-function Newton iteration segment (residual + Jacobian recomputed
+// per iteration, state variable solved internally) recorded on the
+// PassContext for CodeEmitPass to render. Phase 3b's tangent pass will
+// consume this — the converged state is the point the consistent tangent
+// is linearised about.
+inline constexpr std::string_view newton_lowered = "newton-lowered";
+
 // CodeEmitPass postcondition.
 inline constexpr std::string_view compute_function_emitted =
     "compute-function-emitted";

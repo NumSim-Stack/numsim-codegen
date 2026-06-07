@@ -276,6 +276,30 @@ inline void LocalJacobianPass::run(PassContext &pctx) {
   }
 }
 
+// Phase 3a-2 (issue #75): record an in-function Newton solve per scalar
+// evolution equation. Does NOT mutate the recipe and does NOT emit R/J as
+// outputs — it builds the residual + Jacobian via the shared helpers (the
+// same single source of truth the output passes use) and hands them to
+// CodeEmitPass as `NewtonSegment`s. Registered instead of TIP+LJP when the
+// recipe opted into `enable_local_newton`.
+inline void LocalNewtonLoweringPass::run(PassContext &pctx) {
+  auto const &model = pctx.model.raw_model();
+  auto const opts = model.newton_options();
+  auto const &equations = model.evolution_equations();
+  auto const &svs = model.state_variables();
+
+  pctx.newton_segments.reserve(equations.size());
+  for (auto const &eq : equations) {
+    auto const &sv = svs[eq.state_variable_idx];
+    auto built = detail::build_backward_euler_residual(
+        model, eq, "LocalNewtonLoweringPass");
+    auto jacobian = detail::build_backward_euler_jacobian(built);
+    pctx.newton_segments.push_back(NewtonSegment{
+        sv.name, std::move(built.residual), std::move(jacobian),
+        opts.tol, opts.max_iter});
+  }
+}
+
 inline void CodeEmitPass::run(PassContext &pctx) {
   auto const &model = pctx.model;
   auto &ctx = pctx.ctx;
@@ -291,6 +315,27 @@ inline void CodeEmitPass::run(PassContext &pctx) {
   }
   for (auto const &[name, expr] : model.tensor_symbol_map()) {
     ctx.register_symbol_tensor(expr, name);
+  }
+
+  // Phase 3a-2: render each Newton segment's residual + Jacobian with
+  // LOOP-LOCAL CSE. `ctx.reset()` clears statements + the CSE table but
+  // keeps the symbol registrations and the temp counter, so each block
+  // gets fresh temps (recomputed every iteration) that can't collide
+  // with the others or with the function-level output temps below.
+  std::vector<RenderedNewtonSegment> newton;
+  newton.reserve(pctx.newton_segments.size());
+  for (auto const &seg : pctx.newton_segments) {
+    ctx.reset();
+    auto r_rhs = pipeline.scalar().apply(seg.residual);
+    auto j_rhs = pipeline.scalar().apply(seg.jacobian);
+    newton.push_back(RenderedNewtonSegment{
+        seg.state_var_name, ctx.render_statements("    "),
+        std::move(r_rhs), std::move(j_rhs), seg.tol, seg.max_iter});
+  }
+  // Clean slate so the output temps below don't include any segment's
+  // loop-local statements.
+  if (!pctx.newton_segments.empty()) {
+    ctx.reset();
   }
 
   std::vector<std::string> output_rhs;
@@ -310,7 +355,8 @@ inline void CodeEmitPass::run(PassContext &pctx) {
         out.expr));
   }
 
-  pctx.compute_function_source = render_compute_function(model, ctx, output_rhs);
+  pctx.compute_function_source =
+      render_compute_function(model, ctx, output_rhs, newton);
 }
 
 } // namespace numsim::codegen
