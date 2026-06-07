@@ -223,6 +223,13 @@ inline void TimeIntegrationPass::run(PassContext &pctx) {
   auto const &equations = model_mut.evolution_equations();
   auto const &svs = model_mut.state_variables();
 
+  // Reserve ahead of the add_output batch (cross-cutting review MAJOR 4):
+  // one synthesised residual per evolution equation. Prevents incremental
+  // m_outputs reallocation mid-loop — both a perf hint at Phase-4 scale
+  // (~50 eqs) and a hardening guarantee that any output span/reference a
+  // future pass holds across this loop stays valid.
+  model_mut.reserve_outputs(equations.size());
+
   for (auto const &eq : equations) {
     auto const &sv = svs[eq.state_variable_idx];
     auto built = detail::build_backward_euler_residual(
@@ -247,19 +254,24 @@ inline void LocalJacobianPass::run(PassContext &pctx) {
   auto const &equations = model_mut.evolution_equations();
   auto const &svs = model_mut.state_variables();
 
+  // One synthesised Jacobian output per evolution equation (MAJOR 4).
+  model_mut.reserve_outputs(equations.size());
+
   for (auto const &eq : equations) {
     auto const &sv = svs[eq.state_variable_idx];
     auto built = detail::build_backward_euler_residual(
         model_mut, eq, "LocalJacobianPass");
 
-    // TODO(numsim-codegen#72): `cas::diff` produces a fresh expression
-    // tree. Sub-terms structurally identical to those in the residual
-    // (parameter handles, `1/dt` factor) are pointer-distinct from
-    // TimeIntegrationPass's tree, so the CodeGenContext's pointer-keyed
-    // CSE misses them. Fine at single-SV scale; Phase 4's multi-SV +
-    // rank-4-tensor Jacobian path will need value-based CSE or
-    // residual/Jacobian co-emission. See #72 for the design discussion.
-    auto jacobian = cas::diff(built.residual, built.cur_expr);
+    // Issue #73 (option 2): the Jacobian comes from the sibling helper,
+    // which diffs the residual `built` carries — same DAG, same resolved
+    // `cur_expr`, no second symbol-map walk.
+    //
+    // TODO(numsim-codegen#72): this residual is pointer-distinct from the
+    // one TimeIntegrationPass built, so the CodeGenContext's pointer-keyed
+    // CSE re-emits temporaries the residual pass already emitted. Fine at
+    // single-SV scale; Phase 4's multi-SV / rank-4 path needs value-based
+    // CSE or residual+Jacobian co-emission. See #72.
+    auto jacobian = detail::build_backward_euler_jacobian(built);
     model_mut.add_output(sv.name + "_jacobian", std::move(jacobian));
   }
 }

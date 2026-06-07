@@ -19,8 +19,6 @@
 // handle.
 namespace numsim::codegen::detail {
 
-// Phase 3a-2 will need to extend or pair with this helper to access
-// the Jacobian alongside the residual. See #73 for the decision.
 struct BackwardEulerResidual {
   cas::expression_holder<cas::scalar_expression> residual;
   cas::expression_holder<cas::scalar_expression> cur_expr;
@@ -69,6 +67,24 @@ inline auto build_backward_euler_residual(
 
   auto residual = (cur_expr - old_expr) / dt_expr - eq.rate;
   return {std::move(residual), std::move(cur_expr)};
+}
+
+// Issue #73 (option 2): the Jacobian sibling. Computes `∂R/∂α` for the
+// backward-Euler residual via `cas::diff`. Kept a free function rather
+// than a field on `BackwardEulerResidual` so:
+//   * TimeIntegrationPass (residual only) never pays for a diff it
+//     doesn't use,
+//   * the `cas::diff` call stays explicit at the consumer's seam, and
+//   * Phase 3a-2's LocalNewtonLoweringPass + Phase 4's per-row Jacobian
+//     assembly (`..._jacobian_row`) reuse the SAME resolved `cur_expr`
+//     the residual already carries — no second symbol-map walk.
+//
+// Takes the already-built `BackwardEulerResidual` so the residual + its
+// differentiation variable come from one source; this is what keeps the
+// residual and the Jacobian on the same DAG for a given call.
+inline auto build_backward_euler_jacobian(BackwardEulerResidual const &be)
+    -> cas::expression_holder<cas::scalar_expression> {
+  return cas::diff(be.residual, be.cur_expr);
 }
 
 } // namespace numsim::codegen::detail

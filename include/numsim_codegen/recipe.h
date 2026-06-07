@@ -508,6 +508,18 @@ public:
     m_outputs.push_back(std::move(decl));
   }
 
+  // Capacity hint ahead of a batch of `add_output` calls (cross-cutting
+  // review MAJOR 4). A mutating pass that synthesises one output per
+  // evolution equation calls this once before its loop so `m_outputs`
+  // doesn't reallocate incrementally. Purely a `reserve` — no semantic
+  // effect — but it also guarantees any output span/reference held
+  // across the batch stays valid (the hazard the span-invalidation note
+  // below warns about). Reserves `additional` slots beyond the current
+  // size.
+  void reserve_outputs(std::size_t additional) {
+    m_outputs.reserve(m_outputs.size() + additional);
+  }
+
   // ─── Layer 2: generic compute function emission ────────────────
   //
   // Emit a target-agnostic C++ function `<name>_compute` taking the declared
