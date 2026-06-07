@@ -257,14 +257,34 @@ TEST(Integration, MooseRejectsNonConstantStateVarInitial) {
 
 // #2: output name clashing with a state variable is rejected at build time
 // (would otherwise emit duplicate MOOSE properties + a duplicate member).
-TEST(Integration, OutputNameClashingWithStateVariableThrows) {
+// Both declaration orders must be guarded (PR #78 round-2 CRITICAL: the
+// reverse order initially slipped through assert_symbol_name_available).
+TEST(Integration, OutputStateVarNameClashThrowsEitherOrder) {
   using namespace numsim::cas;
-  ConstitutiveModel m("M");
-  (void)m.add_scalar_state_variable("alpha",
-                                    make_expression<scalar_constant>(0.0));
-  EXPECT_THROW(
-      m.add_output("alpha", make_expression<scalar_constant>(1.0)),
-      std::runtime_error);
+  // Forward: state var first, then output.
+  {
+    ConstitutiveModel m("M");
+    (void)m.add_scalar_state_variable("alpha",
+                                      make_expression<scalar_constant>(0.0));
+    EXPECT_THROW(
+        m.add_output("alpha", make_expression<scalar_constant>(1.0)),
+        std::runtime_error);
+  }
+  // Reverse: output first, then state var.
+  {
+    ConstitutiveModel m("M");
+    m.add_output("alpha", make_expression<scalar_constant>(1.0));
+    EXPECT_THROW(
+        m.add_scalar_state_variable("alpha",
+                                    make_expression<scalar_constant>(0.0)),
+        std::runtime_error);
+  }
+  // Also a plain parameter vs output, reverse order.
+  {
+    ConstitutiveModel m("M");
+    m.add_output("beta", make_expression<scalar_constant>(1.0));
+    EXPECT_THROW((void)m.add_parameter("beta", 1.0), std::runtime_error);
+  }
 }
 
 } // namespace numsim::codegen

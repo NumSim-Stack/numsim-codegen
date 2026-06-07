@@ -777,6 +777,20 @@ private:
             m_name, name, state_variable_old_suffix));
       }
     }
+    // Symmetric with assert_output_name_available (PR #78 round-2): a
+    // symbol must also not clash with an already-declared output, else a
+    // state var / output declared in EITHER order collides on the MOOSE
+    // property name `<Model>_<name>` + the `_<name>` member.
+    for (auto const &o : m_outputs) {
+      if (o.name == name) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': name '{}' is already declared as an "
+            "output; a symbol (parameter / input / state variable) cannot "
+            "reuse it. Backends derive member + MOOSE property names from "
+            "both.",
+            m_name, name));
+      }
+    }
   }
 
   // PR #78 review #2: an output's name must not clash with a symbol (param,
