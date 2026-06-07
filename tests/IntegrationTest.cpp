@@ -241,6 +241,21 @@ TEST(Integration, MooseWiresMultipleStateVariables) {
             canonical_arguments(RecipeView{m}).size());
 }
 
+// PR #78 round-3: MOOSE requires local-Newton for evolution recipes (a
+// MOOSE Material has no outer Newton loop; without enable_local_newton the
+// residual/Jacobian would be emitted as properties nothing solves).
+TEST(Integration, MooseRejectsEvolutionRecipeWithoutLocalNewton) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  auto K = m.add_parameter("K", 1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  // deliberately NOT calling enable_local_newton()
+  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+  // Standalone accepts it (external-driver mode) — same recipe, no throw.
+  EXPECT_NO_THROW((void)StandaloneCxxTarget{}.emit(m));
+}
+
 // #3: non-constant initial value → MOOSE emit fails loudly (rather than
 // emitting an undefined bare symbol name).
 TEST(Integration, MooseRejectsNonConstantStateVarInitial) {

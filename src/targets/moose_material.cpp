@@ -350,6 +350,23 @@ auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
           "See the numsim-codegen Phase B roadmap.");
     }
   }
+
+  // PR #78 round-3: a MOOSE Material solves its local constitutive system
+  // INTERNALLY — there is no outer Newton loop at the material level. An
+  // evolution recipe that doesn't `enable_local_newton()` would emit
+  // `<sv>_residual`/`<sv>_jacobian` as MOOSE properties that nothing
+  // solves, with the state property never advancing: valid-but-dead code.
+  // Fail loudly (matching the tensor / non-constant-init guards) — the
+  // residual/Jacobian-output mode is for external drivers via the
+  // standalone target.
+  if (!model.evolution_equations().empty() && !model.local_newton_enabled()) {
+    throw std::runtime_error(
+        "MooseMaterialTarget: recipe '" + model.name() +
+        "' has evolution equations but local Newton solving is not enabled. "
+        "Call enable_local_newton() so the generated MOOSE Material solves "
+        "its state variables internally. (The residual/Jacobian-output mode "
+        "is for external drivers — use StandaloneCxxTarget for that.)");
+  }
   return {
       EmittedFile{model.name() + ".h", emit_header(model),
                   "include/materials", EmittedFile::Kind::Header},
