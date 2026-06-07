@@ -27,6 +27,7 @@ add_executable(numsim_codegen_tests
     StateVariableTest.cpp
     TimeIntegrationTest.cpp
     LocalJacobianTest.cpp
+    IntegrationTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests

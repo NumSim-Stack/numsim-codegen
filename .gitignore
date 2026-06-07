@@ -16,3 +16,10 @@ CMakeCache.txt
 CMakeFiles/
 CMakeUserPresets.json
 cmake-build-*/
+
+# CTest run output
+Testing/
+
+# Review scratch artifacts (not committed)
+REVIEW*.md
+*.probe

@@ -28,7 +28,9 @@
 // passes will introduce a separate `tensor_space_inferred` tag for the
 // stronger guarantee, without having to redefine the existing one.
 
+#include <array>
 #include <string_view>
+#include <vector>
 
 namespace numsim::codegen::pass_tags {
 
@@ -96,6 +98,38 @@ inline constexpr std::string_view jacobian_emitted = "jacobian-emitted";
 // CodeEmitPass postcondition.
 inline constexpr std::string_view compute_function_emitted =
     "compute-function-emitted";
+
+// ─── Precondition bundles (cross-cutting review, MAJOR/MINOR #6) ──────
+//
+// Phase 2.2+ state-variable-lowering passes (TimeIntegrationPass,
+// LocalJacobianPass, and Phase 3a-2's LocalNewtonLoweringPass / Phase
+// 2.5's KuhnTuckerLoweringPass) all require the same baseline: a fully
+// validated recipe that actually HAS state variables. Repeating the
+// four-tag list in each pass invites drift (one pass forgets a tag and
+// silently runs in a weaker context). The bundle centralises the list;
+// passes splice it in via `with(...)`, appending any pass-specific tags.
+namespace bundles {
+
+// Everything SymbolValidationPass guarantees for a recipe that has at
+// least one state variable. The precondition floor for every pass that
+// lowers state-variable evolution.
+inline constexpr std::array state_variable_lowering_inputs = {
+    symbols_declared, identifiers_valid, state_variables_checked,
+    state_variables_non_empty};
+
+// Build a precondition vector from a bundle plus zero or more extra
+// pass-specific tags. `with(bundle)` returns the bundle as a vector;
+// `with(bundle, a, b)` appends a and b.
+template <std::size_t N, class... Extra>
+[[nodiscard]] inline auto with(std::array<std::string_view, N> const &base,
+                               Extra... extra)
+    -> std::vector<std::string_view> {
+  std::vector<std::string_view> v(base.begin(), base.end());
+  (v.push_back(extra), ...);
+  return v;
+}
+
+} // namespace bundles
 
 } // namespace numsim::codegen::pass_tags
 
