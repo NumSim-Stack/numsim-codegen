@@ -120,6 +120,19 @@ TEST(AlgorithmicTangent, UnknownStrainInputThrowsAtEmit) {
   EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
 }
 
+// Locks the current rank-4 identity emission (PR #80 review, math finding Q3).
+// dσ/dε for σ = 2μ ε renders as 2μ · tmech::otimesu(eye,eye) — the
+// NON-symmetrized identity δ_ik δ_jl. Correct contracting against symmetric ε,
+// but lacking minor symmetry. This test documents the present behavior so the
+// planned symmetric-tensor-space fix (→ P_sym / otimesu+otimesl) is a
+// deliberate, reviewed change rather than a silent shift.
+TEST(AlgorithmicTangent, ElasticTangentEmitsNonSymmetrizedIdentityForNow) {
+  auto const src = build_elastic_with_tangent().emit_compute_function();
+  EXPECT_NE(src.find("tmech::otimesu"), std::string::npos) << src;
+  // The 2μ factor is shared with the stress via CSE (no recomputation).
+  EXPECT_NE(src.find("2.0 * mu"), std::string::npos) << src;
+}
+
 // Pins the scaffold's flip-on point: the ∂σ/∂x seam throws a precise
 // numsim-cas#275 diagnostic until the upstream diff(tensor, scalar) lands.
 TEST(AlgorithmicTangent, DiffTensorWrtScalarSeamThrowsUntilCas275) {

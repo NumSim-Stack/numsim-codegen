@@ -278,19 +278,46 @@ inline void LocalJacobianPass::run(PassContext &pctx) {
 }
 
 // Phase 3b-1 (issue #35): synthesise the consistent tangent dσ/dε for each
-// requested tangent and add it as a rank-4 tensor output. Runs AFTER any
-// state-variable lowering (the converged-state seam `pctx.newton_segments`
-// is populated) and BEFORE CodeEmitPass.
+// requested tangent and add it as a rank-4 tensor output. Registered AFTER any
+// state-variable lowering and BEFORE CodeEmitPass.
 //
 //     dσ/dε = ∂σ/∂ε  +  Σ_i (∂σ/∂x_i)·(dx_i/dε) ,   dx_i/dε = −(1/J_i)·∂R_i/∂ε
 //
 // The explicit term ∂σ/∂ε is emitted via cas::diff(tensor, tensor). The
 // implicit correction is provably zero with the current scalar-residual Newton
 // machinery (∂R_i/∂ε ≡ 0 because a scalar_expression residual cannot depend on
-// a tensor), so the exact tangent is ∂σ/∂ε. The correction assembly is staged
-// behind NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR for when strain-coupled
-// (t2s) residuals + numsim-cas#275 land — see internal/algorithmic_tangent.h.
+// a tensor — see the static_assert below), so the exact tangent is ∂σ/∂ε. The
+// correction assembly is staged behind NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR
+// for when strain-coupled (t2s) residuals + numsim-cas#275 land — see
+// internal/algorithmic_tangent.h.
+//
+// **Ordering (PR #80 review, finding 1).** This pass requires only the
+// validation floor; its placement after Newton lowering is ASSUMED from
+// registration order, not enforced by a precondition tag. That is safe today
+// because the live path (explicit term) never reads `pctx.newton_segments`.
+// When the correction term below goes live it WILL read the converged-state
+// seam, and at that point this pass MUST add `newton_lowered` to its
+// preconditions (made conditional on the recipe having evolution equations) so
+// a reordered pipeline fails loudly instead of dropping the correction.
 inline void AlgorithmicTangentPass::run(PassContext &pctx) {
+  // **Exactness contract (PR #80 review, findings 2/5).** The explicit-only
+  // tangent emitted here is the EXACT consistent tangent iff dx/dε ≡ 0, which
+  // holds only because `NewtonSegment.residual` is scalar-typed — hence
+  // type-guaranteed independent of any tensor input (∂R/∂ε ≡ 0). If that type
+  // ever widens to carry a strain-coupled (t2s) residual, emitting only ∂σ/∂ε
+  // would be SILENTLY WRONG. This static_assert turns that future change into a
+  // hard compile error, forcing the completeness guard (refuse explicit-only
+  // emission unless NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR) to be added
+  // first. A convention in comments is not enough; this makes it enforced.
+  static_assert(
+      std::is_same_v<decltype(NewtonSegment::residual),
+                     cas::expression_holder<cas::scalar_expression>>,
+      "NewtonSegment.residual is no longer scalar-typed: AlgorithmicTangentPass "
+      "emits only the explicit term ∂σ/∂ε, which is the exact consistent "
+      "tangent ONLY for a strain-independent (scalar) residual. Add the "
+      "implicit-correction completeness guard (numsim-cas#275) before widening "
+      "this type — see internal/algorithmic_tangent.h.");
+
   auto &model_mut = pctx.model.require_mutable_model("AlgorithmicTangentPass");
   auto const &specs = model_mut.tangents();
   if (specs.empty()) {
