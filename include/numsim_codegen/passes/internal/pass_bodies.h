@@ -9,6 +9,7 @@
 #error "Do not include passes/internal/pass_bodies.h directly; include <numsim_codegen/recipe.h>."
 #endif
 
+#include <numsim_codegen/passes/internal/algorithmic_tangent.h>
 #include <numsim_codegen/passes/internal/backward_euler.h>
 
 namespace numsim::codegen {
@@ -273,6 +274,98 @@ inline void LocalJacobianPass::run(PassContext &pctx) {
     // CSE or residual+Jacobian co-emission. See #72.
     auto jacobian = detail::build_backward_euler_jacobian(built);
     model_mut.add_output(sv.name + "_jacobian", std::move(jacobian));
+  }
+}
+
+// Phase 3b-1 (issue #35): synthesise the consistent tangent dσ/dε for each
+// requested tangent and add it as a rank-4 tensor output. Runs AFTER any
+// state-variable lowering (the converged-state seam `pctx.newton_segments`
+// is populated) and BEFORE CodeEmitPass.
+//
+//     dσ/dε = ∂σ/∂ε  +  Σ_i (∂σ/∂x_i)·(dx_i/dε) ,   dx_i/dε = −(1/J_i)·∂R_i/∂ε
+//
+// The explicit term ∂σ/∂ε is emitted via cas::diff(tensor, tensor). The
+// implicit correction is provably zero with the current scalar-residual Newton
+// machinery (∂R_i/∂ε ≡ 0 because a scalar_expression residual cannot depend on
+// a tensor), so the exact tangent is ∂σ/∂ε. The correction assembly is staged
+// behind NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR for when strain-coupled
+// (t2s) residuals + numsim-cas#275 land — see internal/algorithmic_tangent.h.
+inline void AlgorithmicTangentPass::run(PassContext &pctx) {
+  auto &model_mut = pctx.model.require_mutable_model("AlgorithmicTangentPass");
+  auto const &specs = model_mut.tangents();
+  if (specs.empty()) {
+    return;
+  }
+
+  // Resolve a tensor input variable (the strain ε) by name.
+  auto find_tensor_input =
+      [&](std::string const &nm)
+      -> cas::expression_holder<cas::tensor_expression> const * {
+    for (auto const &[name, expr] : model_mut.tensor_symbol_map()) {
+      if (name == nm) {
+        return &expr;
+      }
+    }
+    return nullptr;
+  };
+
+  // Snapshot the specs before mutating m_outputs (add_output below does not
+  // touch m_tangents, so the span stays valid — but resolve eagerly anyway).
+  std::vector<TangentSpec> pending(specs.begin(), specs.end());
+  model_mut.reserve_outputs(pending.size());
+
+  for (auto const &spec : pending) {
+    // Resolve the stress output σ — must be an existing tensor output.
+    cas::expression_holder<cas::tensor_expression> const *sigma = nullptr;
+    for (auto const &o : model_mut.outputs()) {
+      if (o.name == spec.of_output) {
+        if (o.kind != OutputDecl::Kind::Tensor) {
+          throw std::runtime_error(std::format(
+              "AlgorithmicTangentPass: tangent '{}' references output '{}', "
+              "which is not a tensor output — dσ/dε needs a tensor σ.",
+              spec.name, spec.of_output));
+        }
+        sigma = &std::get<cas::expression_holder<cas::tensor_expression>>(
+            o.expr);
+        break;
+      }
+    }
+    if (sigma == nullptr) {
+      throw std::runtime_error(std::format(
+          "AlgorithmicTangentPass: tangent '{}' references output '{}', which "
+          "was not declared via add_output.",
+          spec.name, spec.of_output));
+    }
+
+    // Resolve the strain input ε — must be a declared tensor input/symbol.
+    auto const *eps = find_tensor_input(spec.wrt_input);
+    if (eps == nullptr) {
+      throw std::runtime_error(std::format(
+          "AlgorithmicTangentPass: tangent '{}' differentiates w.r.t. '{}', "
+          "which is not a declared tensor input.",
+          spec.name, spec.wrt_input));
+    }
+
+    // Explicit term: ∂σ/∂ε (rank-4). Real cas::diff — no upstream dependency.
+    auto tangent = cas::diff(*sigma, *eps);
+
+#ifdef NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR
+    // Implicit correction Σ_i (−1/J_i)·(∂σ/∂x_i)·(∂R_i/∂ε). Only meaningful
+    // once NewtonSegment carries a strain-coupled (t2s) residual so that
+    // ∂R_i/∂ε ≠ 0; with the scalar-residual machinery this loop is a no-op.
+    // ∂σ/∂x_i is taken through the diff(tensor, scalar) seam (numsim-cas#275).
+    for (auto const &seg : pctx.newton_segments) {
+      auto const *x = /* scalar var named seg.state_var_name */ nullptr;
+      (void)seg;
+      (void)x;
+      // TODO(3b-1 strain-coupled): build dR_i/dε (diff of a t2s residual
+      // w.r.t. ε), dσ/dx_i = detail::diff_tensor_wrt_scalar(*sigma, x), and
+      // accumulate (-1/J_i) * outer(dσ/dx_i, dR_i/dε) into `tangent`.
+    }
+#endif
+
+    model_mut.add_output(spec.name, std::move(tangent),
+                         roles::ConsistentTangent);
   }
 }
 

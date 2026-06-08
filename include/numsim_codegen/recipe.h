@@ -7,6 +7,7 @@
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_to_scalar_code_emit.h>
+#include <numsim_codegen/passes/algorithmic_tangent_pass.h>
 #include <numsim_codegen/passes/code_emit_pass.h>
 #include <numsim_codegen/passes/local_jacobian_pass.h>
 #include <numsim_codegen/passes/local_newton_lowering_pass.h>
@@ -22,6 +23,7 @@
 #include <numsim_cas/scalar/scalar_diff.h>
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
+#include <numsim_cas/tensor/tensor_diff.h> // Phase 3b-1: diff(tensor, tensor)
 
 #include <cstddef>
 #include <format>
@@ -240,6 +242,18 @@ struct OutputDecl {
   std::size_t dim = 0;
   std::size_t rank = 0;
   Role role = roles::Other;
+};
+
+// Phase 3b-1 (issue #35): a requested algorithmic (consistent) tangent
+// `dσ/dε`. `name` is the rank-4 output the generated function emits;
+// `of_output` names the (tensor) stress output to differentiate; `wrt_input`
+// names the (tensor) strain input to differentiate against.
+// AlgorithmicTangentPass resolves these against the final output/symbol sets
+// and synthesises one rank-4 tensor output per spec.
+struct TangentSpec {
+  std::string name;
+  std::string of_output;
+  std::string wrt_input;
 };
 
 // Forward-declared in a sub-namespace so `ConstitutiveModel`'s
@@ -632,6 +646,14 @@ public:
         pm.emplace<LocalJacobianPass>();
       }
     }
+    // Phase 3b-1 (issue #35): consistent-tangent synthesis. Registered AFTER
+    // state-variable lowering (so `pctx.newton_segments` — the converged-state
+    // seam — is populated) and BEFORE CodeEmitPass (so the synthesised rank-4
+    // tangent outputs render in the same sweep). Opt-in via
+    // `add_algorithmic_tangent`.
+    if (!m_tangents.empty()) {
+      pm.emplace<AlgorithmicTangentPass>();
+    }
     pm.emplace<CodeEmitPass>();
     pm.run(pctx);
     if (!pctx.compute_function_source) {
@@ -734,6 +756,36 @@ public:
   }
   [[nodiscard]] auto newton_options() const noexcept -> NewtonOptions {
     return m_newton_options;
+  }
+
+  // ─── Algorithmic tangent (Phase 3b-1, issue #35) ────────────────
+  //
+  // Request a consistent tangent `dσ/dε` emitted as a rank-4 tensor output
+  // `name`. `of_output` must name a tensor output (added via add_output);
+  // `wrt_input` a tensor input (added via add_tensor_input). Existence and
+  // rank are checked at emit time by AlgorithmicTangentPass, where the full
+  // output set is final. Opt-in: a recipe with no tangent specs runs no
+  // tangent pass (mirrors enable_local_newton). The emitted output is tagged
+  // `roles::ConsistentTangent`.
+  void add_algorithmic_tangent(std::string name, std::string of_output,
+                               std::string wrt_input) {
+    assert_output_name_available(name); // reserve vs outputs + symbols
+    for (auto const &t : m_tangents) {
+      if (t.name == name) {
+        throw std::runtime_error(
+            "ConstitutiveModel::add_algorithmic_tangent: a tangent named '" +
+            name + "' was already requested.");
+      }
+    }
+    m_tangents.push_back(
+        {std::move(name), std::move(of_output), std::move(wrt_input)});
+  }
+  [[nodiscard]] auto algorithmic_tangent_enabled() const noexcept -> bool {
+    return !m_tangents.empty();
+  }
+  [[nodiscard]] auto tangents() const noexcept
+      -> std::span<TangentSpec const> {
+    return m_tangents;
   }
 
   // Symbol → expression maps. Exposed for the Phase 1.2 pass framework so
@@ -941,6 +993,7 @@ private:
   std::vector<EvolutionEquation> m_evolution_equations; // Phase 2.2
   bool m_local_newton = false;          // Phase 3a-2 (issue #75)
   NewtonOptions m_newton_options{};     // Phase 3a-2 (issue #75)
+  std::vector<TangentSpec> m_tangents;  // Phase 3b-1 (issue #35)
 
   std::vector<
       std::pair<std::string, cas::expression_holder<cas::scalar_expression>>>
