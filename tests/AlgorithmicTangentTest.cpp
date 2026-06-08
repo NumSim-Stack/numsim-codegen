@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 
 namespace numsim::codegen {
@@ -48,6 +49,105 @@ TEST(AlgorithmicTangent, OptInReflectsState) {
   EXPECT_EQ(m.tangents()[0].name, "dstress_deps");
   EXPECT_EQ(m.tangents()[0].of_output, "stress");
   EXPECT_EQ(m.tangents()[0].wrt_input, "eps");
+}
+
+// ─── Phase 5: tangent identity through canonical_arguments + MOOSE wiring ───
+
+// Closes PR #80 round-2 MAJOR-3: the tangent's identity must survive the
+// canonical_arguments projection (it was previously dropped → indistinguishable
+// from a user rank-4 output). Derived STRUCTURALLY from the request, so it's
+// present even before AlgorithmicTangentPass runs (the pre-pass model a backend
+// sees).
+TEST(AlgorithmicTangent, CanonicalArgumentsTagsTangentAsTensorTangentOutput) {
+  auto m = build_elastic_with_tangent();
+  auto const args = canonical_arguments(RecipeView{m});
+  using R = ArgSpec::Role;
+  auto const *tan = [&]() -> ArgSpec const * {
+    for (auto const &a : args)
+      if (a.name == "dstress_deps") return &a;
+    return nullptr;
+  }();
+  ASSERT_NE(tan, nullptr);
+  EXPECT_EQ(tan->role, R::TensorTangentOutput);
+  EXPECT_EQ(tan->rank, 4u);
+  EXPECT_EQ(tan->dim, 3u);
+  // The ordinary stress output stays a plain TensorOutput.
+  for (auto const &a : args)
+    if (a.name == "stress") EXPECT_EQ(a.role, R::TensorOutput);
+}
+
+// The MOOSE call-site arg count must equal canonical_arguments — i.e. the
+// structurally-derived tangent keeps the call-site and the generated signature
+// in lockstep even though the tangent OutputDecl only exists on the pass's
+// working copy.
+TEST(AlgorithmicTangent, MooseCallSiteArityIncludesTangent) {
+  auto m = build_elastic_with_tangent();
+  auto const source = MooseMaterialTarget{}.emit(m).at(1).contents;
+  auto const open = source.find("ElasticTangent_compute(");
+  ASSERT_NE(open, std::string::npos) << source;
+  auto const lp = source.find('(', open);
+  auto const rp = source.find(')', lp);
+  auto const inner = source.substr(lp + 1, rp - lp - 1);
+  auto const n = std::size_t{1} +
+                 static_cast<std::size_t>(
+                     std::count(inner.begin(), inner.end(), ','));
+  EXPECT_EQ(n, canonical_arguments(RecipeView{m}).size());
+}
+
+// Phase 5: the consistent tangent is wired to MOOSE's framework _Jacobian_mult
+// slot — member, declared property (bare conventional name), write adaptor, and
+// call-site argument.
+TEST(AlgorithmicTangent, MooseWiresTangentToJacobianMult) {
+  auto files = MooseMaterialTarget{}.emit(build_elastic_with_tangent());
+  std::string const header = files[0].contents;
+  std::string const source = files[1].contents;
+  EXPECT_NE(header.find("MaterialProperty<RankFourTensor> & _Jacobian_mult;"),
+            std::string::npos)
+      << header;
+  EXPECT_NE(source.find("declareProperty<RankFourTensor>(\"Jacobian_mult\")"),
+            std::string::npos)
+      << source;
+  EXPECT_NE(source.find("Jacobian_mult_ad(_Jacobian_mult[_qp].dataPointer())"),
+            std::string::npos)
+      << source;
+  EXPECT_NE(source.find("      Jacobian_mult_ad"), std::string::npos) << source;
+  // The tangent is NOT emitted as a model-scoped property a solver can't find.
+  EXPECT_EQ(source.find("ElasticTangent_dstress_deps"), std::string::npos)
+      << source;
+}
+
+// A recipe with no tangent emits no _Jacobian_mult (regression: the wiring is
+// opt-in and doesn't leak into ordinary materials).
+TEST(AlgorithmicTangent, MooseWithoutTangentHasNoJacobianMult) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Plain");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  auto files = MooseMaterialTarget{}.emit(m);
+  EXPECT_EQ(files[0].contents.find("Jacobian_mult"), std::string::npos);
+  EXPECT_EQ(files[1].contents.find("Jacobian_mult"), std::string::npos);
+}
+
+// Standalone has no _Jacobian_mult concept — the tangent is a plain rank-4
+// out-parameter of the generated function.
+TEST(AlgorithmicTangent, StandaloneEmitsTangentAsPlainOutParam) {
+  auto const src =
+      StandaloneCxxTarget{}.emit(build_elastic_with_tangent()).at(0).contents;
+  EXPECT_NE(src.find("dstress_deps_out"), std::string::npos) << src;
+  EXPECT_EQ(src.find("Jacobian_mult"), std::string::npos) << src;
+}
+
+// MOOSE has a single consistent-tangent slot; more than one tangent is rejected.
+TEST(AlgorithmicTangent, MooseRejectsMultipleTangents) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("MultiTan");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  m.add_algorithmic_tangent("t1", "stress", "eps");
+  m.add_algorithmic_tangent("t2", "stress", "eps");
+  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
 }
 
 // The RHS expression assigned to `<lhs> = ` in the emitted source, trimmed.
