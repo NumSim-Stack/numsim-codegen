@@ -52,6 +52,29 @@ TEST(AlgorithmicTangent, OptInReflectsState) {
   EXPECT_EQ(m.tangents()[0].wrt_input, "eps");
 }
 
+// PR #82 round-3 security: the tangent name becomes the generated `<name>_out`
+// parameter, and SymbolValidationPass (which identifier-checks outputs) runs
+// before AlgorithmicTangentPass materialises the tangent — so the name must be
+// validated at the API. A name with a statement separator / space / empty must
+// be rejected at request time, not injected into the generated signature.
+TEST(AlgorithmicTangent, TangentNameMustBeValidIdentifier) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Inj");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  EXPECT_THROW(m.add_algorithmic_tangent("x; struct Evil {}", "stress", "eps"),
+               std::runtime_error);
+  EXPECT_THROW(m.add_algorithmic_tangent("9bad", "stress", "eps"),
+               std::runtime_error);
+  EXPECT_THROW(m.add_algorithmic_tangent("has space", "stress", "eps"),
+               std::runtime_error);
+  EXPECT_THROW(m.add_algorithmic_tangent("", "stress", "eps"),
+               std::runtime_error);
+  // A valid identifier still works.
+  EXPECT_NO_THROW(m.add_algorithmic_tangent("dstress_deps", "stress", "eps"));
+}
+
 // ─── Phase 5: tangent identity through canonical_arguments + MOOSE wiring ───
 
 // Closes PR #80 round-2 MAJOR-3: the tangent's identity must survive the

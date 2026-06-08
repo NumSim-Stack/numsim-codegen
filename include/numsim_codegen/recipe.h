@@ -795,6 +795,21 @@ public:
   // `roles::ConsistentTangent`.
   void add_algorithmic_tangent(std::string name, std::string of_output,
                                std::string wrt_input) {
+    // Security (PR #82 round-3): the tangent name flows UNESCAPED into the
+    // generated function signature as `<name>_out`. SymbolValidationPass
+    // identifier-checks declared symbols/outputs, but it runs BEFORE
+    // AlgorithmicTangentPass materialises the tangent output — so the tangent
+    // name would otherwise never be validated. An invalid name (`;`, spaces,
+    // `)`) is a malformed-output / code-injection vector. Reject it here, at
+    // the API, mirroring the model-name guard in the constructor.
+    if (!SymbolValidationPass::is_valid_cxx_identifier(name)) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': algorithmic-tangent name '{}' is not a "
+          "valid C++ identifier (it becomes the generated `<name>_out` "
+          "parameter). Use a [A-Za-z_][A-Za-z0-9_]* name that is not a C++ "
+          "keyword.",
+          m_name, name));
+    }
     assert_output_name_available(name); // reserve vs outputs + symbols
     for (auto const &t : m_tangents) {
       if (t.name == name) {
