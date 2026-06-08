@@ -50,10 +50,46 @@ TEST(AlgorithmicTangent, OptInReflectsState) {
   EXPECT_EQ(m.tangents()[0].wrt_input, "eps");
 }
 
+// The RHS expression assigned to `<lhs> = ` in the emitted source, trimmed.
+auto rhs_of(std::string const &src, std::string const &lhs) -> std::string {
+  auto const p = src.find(lhs + " = ");
+  if (p == std::string::npos) {
+    return {};
+  }
+  auto const start = p + lhs.size() + 3;
+  auto const end = src.find(';', start);
+  return src.substr(start, end - start);
+}
+
 TEST(AlgorithmicTangent, EmitsRank4TangentAsOutputParameter) {
   auto const src = build_elastic_with_tangent().emit_compute_function();
   // The synthesised tangent becomes a `<name>_out` output parameter.
   EXPECT_NE(src.find("dstress_deps_out"), std::string::npos) << src;
+}
+
+// Round-2 review (test-quality MAJOR-2): pin the tangent VALUE to its output,
+// not just that `otimesu` appears somewhere. dσ/dε for σ = 2μ ε must be the
+// SCALED rank-4 identity — a distinct expression from the stress, not a copy of
+// σ or ε.
+TEST(AlgorithmicTangent, TangentValueIsScaledRank4IdentityDistinctFromStress) {
+  auto const src = build_elastic_with_tangent().emit_compute_function();
+  auto const stress_rhs = rhs_of(src, "stress_out");
+  auto const tan_rhs = rhs_of(src, "dstress_deps_out");
+  ASSERT_FALSE(tan_rhs.empty()) << src;
+  ASSERT_FALSE(stress_rhs.empty()) << src;
+  // The tangent is NOT a copy of the stress, nor a bare copy of the strain.
+  EXPECT_NE(tan_rhs, stress_rhs) << src;
+  EXPECT_NE(tan_rhs, "eps") << src;
+  // It must be built from the rank-4 identity, scaled. Follow the assigned
+  // temp one hop and require it to be a product (`a * b`).
+  auto const def = rhs_of(src, "auto " + tan_rhs);
+  EXPECT_NE(def.find('*'), std::string::npos)
+      << "tangent temp '" << tan_rhs << "' should be a scaled product\n"
+      << src;
+  EXPECT_NE(src.find("tmech::otimesu(tmech::eye<double, 3, 2>(), "
+                     "tmech::eye<double, 3, 2>())"),
+            std::string::npos)
+      << src;
 }
 
 TEST(AlgorithmicTangent, ExplicitTangentEmitsWithoutStub) {
@@ -129,6 +165,15 @@ TEST(AlgorithmicTangent, UnknownStrainInputThrowsAtEmit) {
 TEST(AlgorithmicTangent, ElasticTangentEmitsNonSymmetrizedIdentityForNow) {
   auto const src = build_elastic_with_tangent().emit_compute_function();
   EXPECT_NE(src.find("tmech::otimesu"), std::string::npos) << src;
+  // Round-2 review (test-quality MINOR-2): the LOCK is the ABSENCE of the
+  // symmetrized form. P_sym = ½(otimesu + otimesl) still contains `otimesu`,
+  // so asserting otimesu-present would NOT trip on the planned symmetric-space
+  // fix. Asserting `otimesl` absent is what actually locks the current
+  // non-symmetrized `δ_ik δ_jl` emission.
+  EXPECT_EQ(src.find("tmech::otimesl"), std::string::npos)
+      << "minor-symmetric tangent (otimesl) emitted — the symmetric-tensor-"
+         "space change landed; update this lock + the pass-header note.\n"
+      << src;
   // The 2μ factor is shared with the stress via CSE (no recomputation).
   EXPECT_NE(src.find("2.0 * mu"), std::string::npos) << src;
 }
@@ -146,6 +191,50 @@ TEST(AlgorithmicTangent, DiffTensorWrtScalarSeamThrowsUntilCas275) {
     EXPECT_NE(std::string(e.what()).find("numsim-cas#275"), std::string::npos)
         << e.what();
   }
+}
+
+// Round-2 review (test-quality MAJOR-5): the pass running ALONGSIDE local Newton
+// — i.e. with `pctx.newton_segments` populated, after LocalNewtonLoweringPass —
+// had zero coverage. Every other test is pure-elastic (empty segments). This
+// exercises the real pipeline interaction the static_assert / ordering contract
+// is about. The evolution is strain-independent so dx/dε ≡ 0 and the explicit
+// tangent stays exact.
+TEST(AlgorithmicTangent, TangentCoexistsWithLocalNewtonStateVariable) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("HardeningTangent");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto K = m.add_parameter("K", 1.0);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current); // strain-independent rate
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  m.enable_local_newton();
+  m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
+
+  std::string src;
+  ASSERT_NO_THROW(src = m.emit_compute_function());
+  // Both the in-function Newton solve (state var → a_out) and the tangent emit.
+  EXPECT_NE(src.find("a_out"), std::string::npos) << src;
+  EXPECT_NE(src.find("dstress_deps_out"), std::string::npos) << src;
+  // The Newton iteration loop is present (the converged-state seam is live).
+  EXPECT_NE(src.find("for ("), std::string::npos) << src;
+}
+
+// Round-2 review (test-quality MINOR-4): the pass loops over `pending` and
+// reserves N outputs, but only N=1 was ever tested. Two tangents off the same
+// stress (e.g. dσ/dε and a second alias) exercise the loop + reserve.
+TEST(AlgorithmicTangent, MultipleTangentsAllEmit) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("MultiTangent");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
+  m.add_algorithmic_tangent("dstress_deps_alias", "stress", "eps");
+  ASSERT_EQ(m.tangents().size(), 2u);
+  auto const src = m.emit_compute_function();
+  EXPECT_NE(src.find("dstress_deps_out"), std::string::npos) << src;
+  EXPECT_NE(src.find("dstress_deps_alias_out"), std::string::npos) << src;
 }
 
 } // namespace

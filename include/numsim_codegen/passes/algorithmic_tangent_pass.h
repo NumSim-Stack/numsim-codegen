@@ -48,6 +48,19 @@ namespace numsim::codegen {
 // local systems / multi-surface (rank-4 `(∂R/∂x)⁻¹`, numsim-cas#276 / #43) are
 // Phase 3b-2.
 //
+// **Phase-5 forward-compat note (PR #80 round-2, API finding).** The tangent is
+// emitted as an ordinary rank-4 output tagged `roles::ConsistentTangent`. That
+// semantic role lives on the `OutputDecl`, but `canonical_arguments` projects
+// every output to an `ArgSpec` by KIND only — it drops `OutputDecl::role`, and
+// `ArgSpec` has no semantic-role field. So once the tangent reaches a backend
+// call-site it is indistinguishable from a user-declared rank-4 output. Phase 5
+// (MOOSE `_Jacobian_mult[_qp]` wiring) will need to special-case the tangent and
+// must therefore propagate the role (or a `bool is_tangent` / a dedicated
+// `ArgSpec::Role`) through `canonical_arguments` into `ArgSpec`. Doing so is
+// purely additive (a new field; backends ignore it) and avoids re-touching the
+// issue-#77 frozen ArgSpec contract at Phase-5 time. Deferred here (no consumer
+// yet) but tracked so the producer-side identity isn't silently lost.
+//
 // **Known limitation — minor symmetry (PR #80 review, math finding Q3).**
 // `cas::diff` returns the symmetric rank-4 identity (P_sym) only when the strain
 // tensor was declared with a symmetric `tensor_space`; codegen inputs currently
