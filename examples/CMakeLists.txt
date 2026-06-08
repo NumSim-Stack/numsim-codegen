@@ -9,3 +9,6 @@ target_link_libraries(recipe_registry_gen PRIVATE numsim::codegen)
 
 add_executable(resin_curing resin_curing.cpp)
 target_link_libraries(resin_curing PRIVATE numsim::codegen)
+
+add_executable(elastic_tangent elastic_tangent.cpp)
+target_link_libraries(elastic_tangent PRIVATE numsim::codegen)

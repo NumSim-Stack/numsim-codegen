@@ -104,6 +104,14 @@ inline constexpr std::string_view jacobian_emitted = "jacobian-emitted";
 // is linearised about.
 inline constexpr std::string_view newton_lowered = "newton-lowered";
 
+// AlgorithmicTangentPass postcondition (Phase 3b-1, issue #35). Advertises
+// that every requested consistent tangent `dσ/dε` has been synthesised as a
+// rank-4 tensor output. The explicit term `∂σ/∂ε` is emitted today via
+// `cas::diff(tensor, tensor)`; the implicit correction `∂σ/∂x · dx/dε`
+// activates once strain-coupled (t2s) residuals + numsim-cas#275
+// (`diff(tensor, scalar)`) land — see internal/algorithmic_tangent.h.
+inline constexpr std::string_view tangent_emitted = "tangent-emitted";
+
 // CodeEmitPass postcondition.
 inline constexpr std::string_view compute_function_emitted =
     "compute-function-emitted";

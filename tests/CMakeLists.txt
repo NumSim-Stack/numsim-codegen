@@ -29,6 +29,7 @@ add_executable(numsim_codegen_tests
     LocalJacobianTest.cpp
     IntegrationTest.cpp
     LocalNewtonTest.cpp
+    AlgorithmicTangentTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests
