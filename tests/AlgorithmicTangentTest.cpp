@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <string>
+#include <vector>
 
 namespace numsim::codegen {
 
@@ -130,12 +131,66 @@ TEST(AlgorithmicTangent, MooseWithoutTangentHasNoJacobianMult) {
 }
 
 // Standalone has no _Jacobian_mult concept — the tangent is a plain rank-4
-// out-parameter of the generated function.
+// out-parameter (a templated reference) of the generated function.
 TEST(AlgorithmicTangent, StandaloneEmitsTangentAsPlainOutParam) {
   auto const src =
       StandaloneCxxTarget{}.emit(build_elastic_with_tangent()).at(0).contents;
   EXPECT_NE(src.find("dstress_deps_out"), std::string::npos) << src;
+  // Round-2 review: pin it as a templated reference out-param (rank-4 via T#),
+  // not just a name match.
+  EXPECT_NE(src.find("&dstress_deps_out"), std::string::npos) << src;
   EXPECT_EQ(src.find("Jacobian_mult"), std::string::npos) << src;
+}
+
+// Round-2 review (MAJOR test gap): every other tangent test uses dim=3, so the
+// dim-propagation path (canonical_arguments dim, MOOSE adaptor extent) was
+// invisible — a hardcoded `3` would ship green. A plane-strain (dim=2) recipe
+// must carry dim=2 through to both.
+TEST(AlgorithmicTangent, TangentDimFollowsStrainDimNotHardcoded3) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("PlaneStrain");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto eps = m.add_tensor_input("eps", 2, 2, roles::Strain); // dim = 2
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
+  bool found = false;
+  for (auto const &a : canonical_arguments(RecipeView{m})) {
+    if (a.name == "dstress_deps") {
+      EXPECT_EQ(a.dim, 2u);
+      EXPECT_EQ(a.rank, 4u);
+      found = true;
+    }
+  }
+  EXPECT_TRUE(found);
+  auto const source = MooseMaterialTarget{}.emit(m).at(1).contents;
+  EXPECT_NE(source.find("tmech::adaptor<double, 2, 4, tmech::full<2>> "
+                        "Jacobian_mult_ad"),
+            std::string::npos)
+      << source;
+}
+
+// Round-2 review (coverage): the tangent through the MOOSE backend ALONGSIDE a
+// local-Newton state variable (the other combo tests only exercised the Layer-2
+// compute function, not MooseMaterialTarget::emit).
+TEST(AlgorithmicTangent, MooseTangentCoexistsWithLocalNewton) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("MooseNewtonTan");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto K = m.add_parameter("K", 1.0);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  m.enable_local_newton();
+  m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
+  std::vector<EmittedFile> files;
+  ASSERT_NO_THROW(files = MooseMaterialTarget{}.emit(m));
+  auto const &source = files[1].contents;
+  EXPECT_NE(source.find("Jacobian_mult_ad"), std::string::npos) << source;
+  EXPECT_NE(source.find("declareProperty<RankFourTensor>(\"Jacobian_mult\")"),
+            std::string::npos)
+      << source;
+  EXPECT_NE(source.find("_a[_qp]"), std::string::npos) << source; // Newton state
 }
 
 // PR #82 review: a regular output named "Jacobian_mult" collides with the MOOSE
