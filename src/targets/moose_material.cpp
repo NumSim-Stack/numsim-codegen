@@ -60,6 +60,13 @@ auto output_storage_type(OutputDecl const &o) -> std::string {
 // never find. The tangent is rank-4; its dim is that of the differentiated
 // (stress) output. The single-tangent guard in `emit` keeps `_Jacobian_mult`
 // unambiguous (MOOSE has one consistent-tangent slot).
+//
+// SCOPE (PR #82 review): the bare `"Jacobian_mult"` name is correct for the
+// default single-material / no-`base_name` case — the common one — which is
+// what the StressDivergence kernels resolve by default. A `base_name`-namespaced
+// setup (multiple stacked materials per block) expects
+// `<base_name>_Jacobian_mult`; threading a `base_name` parameter through is out
+// of scope until a multi-material consumer needs it.
 auto tangent_dim(ConstitutiveModel const &model, TangentSpec const &t)
     -> std::size_t {
   for (auto const &o : model.outputs()) {
@@ -438,6 +445,21 @@ auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
         "' requests more than one consistent tangent (roles::ConsistentTangent)."
         " MOOSE has a single _Jacobian_mult slot, so only one tangent can be "
         "wired. Emit additional tangents via StandaloneCxxTarget.");
+  }
+  // PR #82 review: when a tangent is wired, the backend emits a hardcoded
+  // `_Jacobian_mult` member. A regular output literally named "Jacobian_mult"
+  // would collide with that member (ill-formed C++). The recipe symbol
+  // namespace can't know the backend's member name, so guard it here.
+  if (!model.tangents().empty()) {
+    for (auto const &o : model.outputs()) {
+      if (o.name == "Jacobian_mult") {
+        throw std::runtime_error(
+            "MooseMaterialTarget: recipe '" + model.name() +
+            "' has both a consistent tangent and an output named "
+            "'Jacobian_mult', which collides with the framework consistent-"
+            "tangent member. Rename the output.");
+      }
+    }
   }
   return {
       EmittedFile{model.name() + ".h", emit_header(model),

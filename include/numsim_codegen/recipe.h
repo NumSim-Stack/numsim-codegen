@@ -910,6 +910,12 @@ private:
             m_name, name));
       }
     }
+    // NOTE (PR #82 review): tangent-request names are intentionally NOT scanned
+    // here. AlgorithmicTangentPass materializes the tangent via add_output(<the
+    // tangent name>), which must be allowed. A user add_output colliding with a
+    // tangent name is instead caught at emit (the pass's add_output throws
+    // "output already declared"); a tangent colliding with an existing output is
+    // caught at request time by add_algorithmic_tangent's own check.
   }
 
   // Reject a user-defined Role that shares a name with a `roles::` catalogue

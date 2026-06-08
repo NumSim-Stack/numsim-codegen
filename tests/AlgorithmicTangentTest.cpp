@@ -138,6 +138,25 @@ TEST(AlgorithmicTangent, StandaloneEmitsTangentAsPlainOutParam) {
   EXPECT_EQ(src.find("Jacobian_mult"), std::string::npos) << src;
 }
 
+// PR #82 review: a regular output named "Jacobian_mult" collides with the MOOSE
+// backend's hardcoded consistent-tangent member when a tangent is present.
+TEST(AlgorithmicTangent, MooseRejectsOutputNamedJacobianMultWithTangent) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Clash");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  m.add_output("Jacobian_mult", 2 * mu * eps); // collides with the member
+  m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
+  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+  // Without a tangent the same output name is fine (no _Jacobian_mult member).
+  ConstitutiveModel ok("NoTan");
+  auto mu2 = ok.add_parameter("mu", 0.5);
+  auto eps2 = ok.add_tensor_input("eps", 3, 2, roles::Strain);
+  ok.add_output("Jacobian_mult", 2 * mu2 * eps2);
+  EXPECT_NO_THROW((void)MooseMaterialTarget{}.emit(ok));
+}
+
 // MOOSE has a single consistent-tangent slot; more than one tangent is rejected.
 TEST(AlgorithmicTangent, MooseRejectsMultipleTangents) {
   using namespace numsim::cas;
