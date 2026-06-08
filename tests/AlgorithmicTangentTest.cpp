@@ -162,20 +162,36 @@ TEST(AlgorithmicTangent, UnknownStrainInputThrowsAtEmit) {
 // but lacking minor symmetry. This test documents the present behavior so the
 // planned symmetric-tensor-space fix (→ P_sym / otimesu+otimesl) is a
 // deliberate, reviewed change rather than a silent shift.
-TEST(AlgorithmicTangent, ElasticTangentEmitsNonSymmetrizedIdentityForNow) {
+// A consistent stress-strain tangent must have minor symmetry C_ijkl = C_ijlk.
+// Because the strain is declared roles::Strain (symmetric), `cas::diff` returns
+// the symmetric rank-4 identity P_sym = ½(I⊗ᵘI + I⊗ˡI), so dσ/dε for σ = 2μ ε
+// emits 2μ·½(otimesu + otimesl). (Superseded the earlier non-symmetrized lock.)
+TEST(AlgorithmicTangent, ElasticTangentIsMinorSymmetric) {
   auto const src = build_elastic_with_tangent().emit_compute_function();
+  // Both halves of the minor-symmetric identity are present, scaled by ½.
   EXPECT_NE(src.find("tmech::otimesu"), std::string::npos) << src;
-  // Round-2 review (test-quality MINOR-2): the LOCK is the ABSENCE of the
-  // symmetrized form. P_sym = ½(otimesu + otimesl) still contains `otimesu`,
-  // so asserting otimesu-present would NOT trip on the planned symmetric-space
-  // fix. Asserting `otimesl` absent is what actually locks the current
-  // non-symmetrized `δ_ik δ_jl` emission.
-  EXPECT_EQ(src.find("tmech::otimesl"), std::string::npos)
-      << "minor-symmetric tangent (otimesl) emitted — the symmetric-tensor-"
-         "space change landed; update this lock + the pass-header note.\n"
+  EXPECT_NE(src.find("tmech::otimesl"), std::string::npos)
+      << "tangent lost minor symmetry — the symmetric tensor space on the "
+         "strain input is not reaching cas::diff.\n"
       << src;
+  EXPECT_NE(src.find("0.5 *"), std::string::npos) << src;
   // The 2μ factor is shared with the stress via CSE (no recomputation).
   EXPECT_NE(src.find("2.0 * mu"), std::string::npos) << src;
+}
+
+// A plain (roles::Other) strain input carries no symmetric space, so its
+// tangent stays the non-symmetrized identity — confirms the change is
+// opt-in via the symmetric role, not a blanket behavior shift.
+TEST(AlgorithmicTangent, PlainInputTangentStaysNonSymmetrized) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("PlainTangent");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto eps = m.add_tensor_input("eps", 3, 2); // no role → unconstrained
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
+  auto const src = m.emit_compute_function();
+  EXPECT_NE(src.find("tmech::otimesu"), std::string::npos) << src;
+  EXPECT_EQ(src.find("tmech::otimesl"), std::string::npos) << src;
 }
 
 // Pins the scaffold's flip-on point: the ∂σ/∂x seam throws a precise

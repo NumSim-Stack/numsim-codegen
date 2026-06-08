@@ -61,15 +61,15 @@ namespace numsim::codegen {
 // issue-#77 frozen ArgSpec contract at Phase-5 time. Deferred here (no consumer
 // yet) but tracked so the producer-side identity isn't silently lost.
 //
-// **Known limitation — minor symmetry (PR #80 review, math finding Q3).**
-// `cas::diff` returns the symmetric rank-4 identity (P_sym) only when the strain
-// tensor was declared with a symmetric `tensor_space`; codegen inputs currently
-// carry no space, so `∂(2μ ε)/∂ε` emits the NON-symmetrized identity
-// `δ_ik δ_jl` (`tmech::otimesu(eye,eye)`). The contraction `C:ε` is correct for
-// symmetric ε, but the tangent object lacks minor symmetry `C_ijkl = C_ijlk`,
-// which a Voigt/Mandel assembler expects. Fix is to wire `roles::Strain`'s
-// symmetry to the CAS tensor space (a separate change with golden
-// re-baselining). Tracked as a follow-up.
+// **Minor symmetry (PR #80 review, math finding Q3 — resolved).** A consistent
+// stress-strain tangent must satisfy minor symmetry `C_ijkl = C_ijlk`.
+// `cas::diff` returns the symmetric rank-4 identity (P_sym = ½(I⊗ᵘI + I⊗ˡI))
+// when the strain tensor carries a symmetric `tensor_space`. `add_tensor_input`
+// now sets that space for symmetric-role rank-2 inputs (e.g. `roles::Strain`),
+// so `∂(2μ ε)/∂ε` emits `2μ·½(otimesu + otimesl)` — minor-symmetric. A plain
+// input (`roles::Other`) stays unconstrained, so the behavior is opt-in via the
+// role and non-derivative outputs / CSE are unchanged (the space is not part of
+// the leaf hash).
 class AlgorithmicTangentPass final : public Pass {
 public:
   [[nodiscard]] auto name() const -> std::string_view override {

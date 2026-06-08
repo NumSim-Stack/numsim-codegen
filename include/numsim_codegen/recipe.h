@@ -311,6 +311,32 @@ public:
     validate_role_attributes(role);
     assert_symbol_name_available(name); // M1
     auto var = cas::make_expression<cas::tensor>(name, dim, rank);
+    // Phase 3b-1 follow-up (#80 review, math Q3): a symmetric-role rank-2
+    // input (e.g. roles::Strain) carries a Symmetric tensor space, so
+    // `cas::diff` returns the minor-symmetric rank-4 identity (P_sym =
+    // ½(I⊗ᵘI + I⊗ˡI)) rather than the bare `δ_ik δ_jl`. This makes consistent
+    // tangents `∂σ/∂ε` minor-symmetric (C_ijkl = C_ijlk) — and, for σ = 2μ ε,
+    // major-symmetric too — as a stress-strain tangent must be. Plain inputs
+    // (roles::Other) stay unconstrained — backward compatible. The space is
+    // metadata only (not part of the leaf hash), so non-derivative outputs and
+    // CSE are byte-identical.
+    //
+    // `AnyTraceTag` (no trace constraint) is required: a strain has a non-zero
+    // volumetric part, so `DeviatoricTag`/`HarmonicTag` would wrongly project
+    // it out of the tangent. The guard is keyed on `is_symmetric && rank==2`,
+    // so any symmetric rank-2 role qualifies (roles::Stress too, if ever used
+    // as an input) — which is correct, since the space only affects
+    // differentiation and those tensors genuinely are symmetric.
+    //
+    // Propagation: `data()` mutates the shared leaf node, and `cas::diff` reads
+    // the space from its ARGUMENT handle (the `m_tensor_symbols` copy, shared
+    // via the holder's shared_ptr) — NOT from the leaf inside the forward
+    // expression. So the "2-arg ctors drop the space" CAS caveat does not
+    // affect this path.
+    if (role.is_symmetric && rank == 2) {
+      var.data()->set_space(
+          cas::tensor_space{cas::Symmetric{}, cas::AnyTraceTag{}});
+    }
     SymbolDecl decl{name, SymbolDecl::Category::Input,
                     SymbolDecl::Kind::Tensor, dim, rank};
     decl.role = std::move(role);
