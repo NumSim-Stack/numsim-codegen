@@ -311,6 +311,18 @@ public:
     validate_role_attributes(role);
     assert_symbol_name_available(name); // M1
     auto var = cas::make_expression<cas::tensor>(name, dim, rank);
+    // Phase 3b-1 follow-up (#80 review, math Q3): a symmetric-role rank-2
+    // input (e.g. roles::Strain) carries a Symmetric tensor space, so
+    // `cas::diff` returns the minor-symmetric rank-4 identity (P_sym =
+    // ½(I⊗ᵘI + I⊗ˡI)) rather than the bare `δ_ik δ_jl`. This makes consistent
+    // tangents `∂σ/∂ε` minor-symmetric (C_ijkl = C_ijlk) as a stress-strain
+    // tangent must be. Plain inputs (roles::Other) stay unconstrained —
+    // backward compatible. The space is metadata only (not part of the leaf
+    // hash), so non-derivative outputs and CSE are byte-identical.
+    if (role.is_symmetric && rank == 2) {
+      var.data()->set_space(
+          cas::tensor_space{cas::Symmetric{}, cas::AnyTraceTag{}});
+    }
     SymbolDecl decl{name, SymbolDecl::Category::Input,
                     SymbolDecl::Kind::Tensor, dim, rank};
     decl.role = std::move(role);
