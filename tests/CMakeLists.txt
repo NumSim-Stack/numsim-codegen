@@ -30,6 +30,7 @@ add_executable(numsim_codegen_tests
     IntegrationTest.cpp
     LocalNewtonTest.cpp
     AlgorithmicTangentTest.cpp
+    LinearAlgebraEmitterTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests

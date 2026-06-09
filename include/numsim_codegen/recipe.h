@@ -4,6 +4,7 @@
 #include <numsim_codegen/code_emit/code_emit_pipeline.h>
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/code_emit/leaf_collector.h>
+#include <numsim_codegen/code_emit/linear_algebra_emitter.h>
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_code_emit.h>
 #include <numsim_codegen/code_emit/tensor_to_scalar_code_emit.h>
@@ -1528,70 +1529,52 @@ inline auto render_compute_function(
     os << "  }\n";
   }
 
-  // Phase 3b-2b: coupled N×N Newton systems. One loop assembles the residual
-  // vector + dense Jacobian each iteration, solves `J·Δx = R` with Eigen
-  // (fixed-size `Eigen::Matrix<double,N,N>`, partial-pivot LU — no heap), and
-  // updates `x -= Δx`. The backend emits `#include <Eigen/Dense>` when the
-  // recipe has a coupled system.
+  // Phase 3b-2b: coupled N×N Newton systems. render owns the library-AGNOSTIC
+  // loop frame (iterate decls, the for-loop, loop-local CSE, writeback); the
+  // dense `J·Δx = R` solve body is delegated to the LinearAlgebraEmitter (Eigen
+  // today — a single swap point). The backend emits the emitter's include(s)
+  // when the recipe has a coupled system.
   //
-  // Solve-locals (`<p>_iter/_r/_J/_dx`) must collide with NOTHING in scope.
-  // PR #83 review: using the first unknown verbatim was a bug — a recipe with
-  // unknowns `{a, a_r}` would emit both `double a_r = …` (the iterate) and
-  // `Eigen::Matrix … a_r` (the residual vector). So derive a prefix that is
-  // collision-free against every in-scope identifier (all symbols incl. each
-  // `<sv>_old`, and every output + `<out>_out`), extending it until clear.
-  std::set<std::string> reserved_ids;
-  for (auto const &[nm, _] : model.scalar_symbol_map()) reserved_ids.insert(nm);
-  for (auto const &[nm, _] : model.tensor_symbol_map()) reserved_ids.insert(nm);
-  for (auto const &o : model.outputs()) {
-    reserved_ids.insert(o.name);
-    reserved_ids.insert(o.name + "_out");
-  }
-  for (auto const &sys : newton_systems) {
-    auto const n = sys.unknowns.size();
-    std::string p = sys.unknowns[0]; // seed; mangled below until collision-free
-    auto collides = [&](std::string const &pre) {
-      for (char const *s : {"_iter", "_r", "_J", "_dx"}) {
-        if (reserved_ids.contains(pre + s)) return true;
+  // Solve-locals (`<p>_iter` + the emitter's `local_suffixes()`) must collide
+  // with NOTHING in scope. PR #83 review: using the first unknown verbatim was a
+  // bug — unknowns `{a, a_r}` would emit both `double a_r =` (iterate) and the
+  // solver's `a_r` vector. So derive a prefix collision-free against every
+  // in-scope identifier (all symbols incl. each `<sv>_old`, every output +
+  // `<out>_out`), checking the loop counter + every emitter suffix.
+  if (!newton_systems.empty()) {
+    auto const &la = default_linear_algebra_emitter();
+    auto suffixes = la.local_suffixes();
+    suffixes.emplace_back("iter"); // render's loop counter
+    std::set<std::string> reserved_ids;
+    for (auto const &[nm, _] : model.scalar_symbol_map())
+      reserved_ids.insert(nm);
+    for (auto const &[nm, _] : model.tensor_symbol_map())
+      reserved_ids.insert(nm);
+    for (auto const &o : model.outputs()) {
+      reserved_ids.insert(o.name);
+      reserved_ids.insert(o.name + "_out");
+    }
+    for (auto const &sys : newton_systems) {
+      std::string p = sys.unknowns[0]; // seed; mangled below until collision-free
+      auto collides = [&](std::string const &pre) {
+        for (auto const &s : suffixes) {
+          if (reserved_ids.contains(pre + "_" + s)) return true;
+        }
+        return false;
+      };
+      while (collides(p)) {
+        p += "_";
       }
-      return false;
-    };
-    while (collides(p)) {
-      p += "_";
-    }
-    auto L = [&](char const *s) { return p + "_" + s; };
-    for (auto const &u : sys.unknowns) {
-      os << "  double " << u << " = " << u << "_old;\n";
-    }
-    os << "  for (int " << L("iter") << " = 0; " << L("iter") << " < "
-       << sys.max_iter << "; ++" << L("iter") << ") {\n";
-    os << sys.loop_local_decls; // shared CSE temps (4-indented)
-    // Residual vector R (size N).
-    os << "    Eigen::Matrix<double, " << n << ", 1> " << L("r");
-    os << ";\n    " << L("r") << " << ";
-    for (std::size_t i = 0; i < n; ++i) {
-      os << (i ? ", " : "") << sys.residual_rhs[i];
-    }
-    os << ";\n";
-    // Dense Jacobian J (N×N), `<<` fills row-major: J(i,j) = ∂R_i/∂x_j.
-    os << "    Eigen::Matrix<double, " << n << ", " << n << "> " << L("J");
-    os << ";\n    " << L("J") << " << ";
-    for (std::size_t i = 0; i < n; ++i) {
-      for (std::size_t j = 0; j < n; ++j) {
-        os << ((i || j) ? ", " : "") << sys.jacobian_rhs[i][j];
+      for (auto const &u : sys.unknowns) {
+        os << "  double " << u << " = " << u << "_old;\n";
       }
+      os << "  for (int " << p << "_iter = 0; " << p << "_iter < "
+         << sys.max_iter << "; ++" << p << "_iter) {\n";
+      os << sys.loop_local_decls; // shared CSE temps (4-indented)
+      la.emit_newton_step(os, p, sys.unknowns, sys.residual_rhs,
+                          sys.jacobian_rhs, sys.tol);
+      os << "  }\n";
     }
-    os << ";\n";
-    // Convergence on the residual ∞-norm.
-    os << "    if (" << L("r") << ".cwiseAbs().maxCoeff() < " << sys.tol
-       << ") {\n      break;\n    }\n";
-    // Solve J·Δx = R and update x -= Δx.
-    os << "    Eigen::Matrix<double, " << n << ", 1> " << L("dx") << " = "
-       << L("J") << ".partialPivLu().solve(" << L("r") << ");\n";
-    for (std::size_t i = 0; i < n; ++i) {
-      os << "    " << sys.unknowns[i] << " -= " << L("dx") << "(" << i << ");\n";
-    }
-    os << "  }\n";
   }
 
   os << ctx.render_statements();
