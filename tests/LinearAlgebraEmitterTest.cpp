@@ -1,7 +1,7 @@
-// Phase 3b-2b (issue #35): the LinearAlgebraEmitter abstraction — the single
-// swap point for the dense-solve backend used by generated coupled-Newton code.
-// These pin the Eigen implementation's contract and that it's the default, so a
-// future backend swap (Armadillo / LAPACK / …) is a deliberate, visible change.
+// Phase 3b-2b (issue #35): the LinearAlgebraEmitter abstraction — the per-target
+// dense-solve backend used by generated coupled-Newton code. These pin the Eigen
+// implementation's contract and that it's the default, so a future backend swap
+// (Armadillo / LAPACK / …) is a deliberate, visible change.
 
 #include <numsim_codegen/code_emit/linear_algebra_emitter.h>
 

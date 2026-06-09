@@ -41,7 +41,7 @@ struct NewtonSegment {
 // — those equations cannot be solved independently. The generated function
 // declares one local iterate per unknown, then runs a single Newton loop that
 // each iteration assembles the residual vector R (size N) and the dense Jacobian
-// J (N×N, `jacobian[i][j] = ∂R_i/∂x_j`), solves `J·Δx = −R`, and updates
+// J (N×N, `jacobian[i][j] = ∂R_i/∂x_j`), solves `J·Δx = R`, and updates
 // `x -= Δx` until `max|R_i| < tol` or `max_iter`. Uncoupled equations stay as
 // 1×1 `NewtonSegment`s (the existing scalar-reciprocal path, byte-identical).
 //

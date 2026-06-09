@@ -4,7 +4,8 @@
 // Phase 3b-2b (issue #35): the dense linear-algebra backend used by GENERATED
 // code for a coupled local-Newton system's `J·Δx = R` solve — behind a small
 // emit interface so the library (Eigen today; Armadillo / LAPACK / a hand-rolled
-// fallback later) is a SINGLE swap point: `default_linear_algebra_emitter()`.
+// fallback later) is selected PER-TARGET by passing a `LinearAlgebraEmitter
+// const&` (defaulting to Eigen) — see the accessor block at the bottom.
 //
 // Division of labour: the Newton-loop *frame* is library-agnostic and stays in
 // `render_compute_function` — it declares one `double` iterate per unknown, the

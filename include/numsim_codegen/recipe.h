@@ -1537,7 +1537,7 @@ inline auto render_compute_function(
   // Phase 3b-2b: coupled N×N Newton systems. render owns the library-AGNOSTIC
   // loop frame (iterate decls, the for-loop, loop-local CSE, writeback); the
   // dense `J·Δx = R` solve body is delegated to the LinearAlgebraEmitter (Eigen
-  // today — a single swap point). The backend emits the emitter's include(s)
+  // today — injected per-target). The backend emits the emitter's include(s)
   // when the recipe has a coupled system.
   //
   // Solve-locals (`<p>_iter` + the emitter's `local_suffixes()`) must collide

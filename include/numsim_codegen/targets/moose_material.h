@@ -32,6 +32,9 @@ public:
       std::string app_name = "MyApp",
       LinearAlgebraEmitter const &la = default_linear_algebra_emitter())
       : m_app_name(std::move(app_name)), m_la(la) {}
+  // `m_la` borrows — reject a temporary emitter at compile time (PR #83
+  // round-4 review). Pass an accessor singleton, not `Emitter{}`.
+  MooseMaterialTarget(std::string, LinearAlgebraEmitter const &&) = delete;
 
   [[nodiscard]] auto emit(ConstitutiveModel const &model) const
       -> std::vector<EmittedFile> override;

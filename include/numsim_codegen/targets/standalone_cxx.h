@@ -20,6 +20,10 @@ public:
   explicit StandaloneCxxTarget(
       LinearAlgebraEmitter const &la = default_linear_algebra_emitter())
       : m_la(la) {}
+  // `m_la` borrows — reject a temporary emitter at compile time so it can't
+  // dangle (PR #83 round-4 review). Pass an accessor singleton
+  // (default_/eigen_/armadillo_linear_algebra_emitter()), not `Emitter{}`.
+  StandaloneCxxTarget(LinearAlgebraEmitter const &&) = delete;
   [[nodiscard]] auto emit(ConstitutiveModel const &model) const
       -> std::vector<EmittedFile> override;
   [[nodiscard]] auto target_name() const -> std::string override;
