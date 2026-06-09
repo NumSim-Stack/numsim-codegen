@@ -62,27 +62,43 @@ set(GENERATED_NEWTON_HEADER
     ${CMAKE_CURRENT_BINARY_DIR}/generated/NewtonCheck.h)
 set(GENERATED_AUTOCAT_HEADER
     ${CMAKE_CURRENT_BINARY_DIR}/generated/AutocatalyticCheck.h)
+# Phase 3b-2b (issue #35): coupled-Newton compile-check header. Its generated
+# code uses Eigen for the dense solve (see below).
+set(GENERATED_COUPLED_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/CoupledCheck.h)
 
 add_custom_command(
     OUTPUT ${GENERATED_HEADER} ${GENERATED_HARDENING_HEADER}
            ${GENERATED_NEWTON_HEADER} ${GENERATED_AUTOCAT_HEADER}
+           ${GENERATED_COUPLED_HEADER}
     COMMAND ${CMAKE_COMMAND} -E make_directory
             ${CMAKE_CURRENT_BINARY_DIR}/generated
     COMMAND $<TARGET_FILE:generate_compile_check_recipe>
             ${GENERATED_HEADER} ${GENERATED_HARDENING_HEADER}
             ${GENERATED_NEWTON_HEADER} ${GENERATED_AUTOCAT_HEADER}
+            ${GENERATED_COUPLED_HEADER}
     DEPENDS generate_compile_check_recipe
     COMMENT "Generating compile-check headers via numsim-codegen"
     VERBATIM)
+
+# Phase 3b-2b: the coupled-Newton generated code includes <Eigen/Dense>. The CI
+# runners don't ship libeigen3-dev, so fetch Eigen (header-only — DOWNLOAD_ONLY,
+# no Eigen CMake configure) and expose just its include dir to the driver.
+CPMAddPackage(
+    NAME eigen3
+    GITLAB_REPOSITORY libeigen/eigen
+    GIT_TAG 3.4.0
+    DOWNLOAD_ONLY YES)
 
 add_executable(compile_check_driver
     generated/compile_check_driver.cpp
     ${GENERATED_HEADER}
     ${GENERATED_HARDENING_HEADER}
     ${GENERATED_NEWTON_HEADER}
-    ${GENERATED_AUTOCAT_HEADER})
+    ${GENERATED_AUTOCAT_HEADER}
+    ${GENERATED_COUPLED_HEADER})
 target_include_directories(compile_check_driver
-    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated ${eigen3_SOURCE_DIR})
 target_link_libraries(compile_check_driver
     PRIVATE numsim::codegen GTest::gtest GTest::gtest_main)
 

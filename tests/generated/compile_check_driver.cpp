@@ -8,6 +8,7 @@
 
 #include "AutocatalyticCheck.h"
 #include "CompileCheck.h"
+#include "CoupledCheck.h"
 #include "HardeningCheck.h"
 #include "NewtonCheck.h"
 #include <cmath>
@@ -190,4 +191,34 @@ TEST(CompileCheckGenerated, AutocatalyticNewtonConvergesOverCureHistory) {
   // advanced but not yet complete.
   EXPECT_GT(c_old, 0.7) << "cure should be well advanced by t=2.0";
   EXPECT_LT(c_old, 1.0);
+}
+
+// Phase 3b-2b (issue #35), PR #83 review F3: NUMERICAL lock for the coupled
+// vector-Newton dense (Eigen) solve. Two mutually-referencing equations
+// a' = K1·b, b' = K2·a with DISTINCT coefficients (asymmetric, so a transposed
+// Jacobian would give a different — wrong — answer). Backward-Euler is linear,
+// so the converged (a,b) solve
+//     [1, −dt·K1; −dt·K2] [a; b] = [a_old; b_old]
+// whose closed form we compare against. This is the compile-AND-RUN check the
+// structural string tests cannot provide.
+TEST(CompileCheckGenerated, CoupledNewtonMatchesAnalyticLinearSolve) {
+  double const K1 = 1.0, K2 = 2.0, dt = 0.1;
+  double const a_old = 1.0, b_old = 0.3;
+  double a_out = 0.0, b_out = 0.0;
+  CoupledCheck_compute(K1, K2, a_old, b_old, dt, a_out, b_out);
+
+  double const det = 1.0 - dt * dt * K1 * K2;
+  double const a_ref = (a_old + dt * K1 * b_old) / det;
+  double const b_ref = (b_old + dt * K2 * a_old) / det;
+  EXPECT_NEAR(a_out, a_ref, 1e-9) << "a_out=" << a_out << " ref=" << a_ref;
+  EXPECT_NEAR(b_out, b_ref, 1e-9) << "b_out=" << b_out << " ref=" << b_ref;
+
+  // The coupled backward-Euler residuals are driven to ~0 at the solution.
+  EXPECT_LT(std::abs((a_out - a_old) / dt - K1 * b_out), 1e-9);
+  EXPECT_LT(std::abs((b_out - b_old) / dt - K2 * a_out), 1e-9);
+
+  // Asymmetry sanity: with these inputs a transposed Jacobian (swapping the
+  // off-diagonals) would NOT satisfy the residuals — a_ref != b_ref so the
+  // answer is genuinely orientation-sensitive.
+  EXPECT_GT(std::abs(a_ref - b_ref), 0.1);
 }
