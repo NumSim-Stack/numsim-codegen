@@ -44,6 +44,16 @@ public:
   // Emit the per-iteration body (4-space indented, inside the Newton for-loop).
   // `prefix` is a collision-free local-name stem chosen by the caller. Emits a
   // `break;` on convergence and `<unknown> -= …;` updates for each unknown.
+  //
+  // SCOPE (PR #83 round-3 review): this is the dense-solve emission for a
+  // CLASSICAL scalar Newton step — it bakes in the ∞-norm convergence test and
+  // the `jacobian_rhs[i][j] = ∂R_i/∂x_j` solve, and takes residual/Jacobian as
+  // pre-rendered C++ TEXT (the expression structure is already gone). That is
+  // exactly right for "swap the dense C++ linalg library", and rules out
+  // structural/sparse/cross-language backends behind this seam. Phase 3b-2a
+  // (Fischer-Burmeister: a semismooth Jacobian + merit-function convergence) and
+  // 3b-2d (tensor unknowns: block assembly) are EXPECTED to extend this
+  // interface — it is not a frozen general "coupled solver" contract.
   virtual void emit_newton_step(
       std::ostream &os, std::string const &prefix,
       std::vector<std::string> const &unknowns,
@@ -155,23 +165,28 @@ public:
   }
 };
 
-// THE linear-algebra backend selection point. Swap the returned implementation
-// to change the library across emission, includes, and the usage gate at once.
-// Compile-time selectable via NUMSIM_CODEGEN_USE_ARMADILLO (the codebase's
-// macro-seam idiom); Eigen is the default (header-only, MOOSE-bundled).
-//
-// The macro is a BUILD-WIDE setting: both the inline emit path (render, in this
-// header) and the compiled backends (standalone/moose .cpp, which gate the
-// include on `usage_marker()`) must see the same selection, or the emitted body
-// and its include would disagree. Define it for the whole project build.
+// Backend accessors (stable singletons). Selection is PER-EMIT / per-target —
+// a target takes a `LinearAlgebraEmitter const&` (defaulting to Eigen) and
+// threads the SAME instance through emission AND its include decision, so the
+// emitted body and its `#include` can never disagree, and one build can emit a
+// MOOSE material (Eigen, libMesh-bundled) and a standalone file (e.g. Armadillo)
+// at once. (A build-wide `#ifdef` selector was a category error here: the
+// interface is runtime-polymorphic, and a per-TU-inconsistent macro on an inline
+// selector is an ODR/IFNDR hazard — PR #83 round-3 review.)
+[[nodiscard]] inline auto eigen_linear_algebra_emitter()
+    -> LinearAlgebraEmitter const & {
+  static EigenLinearAlgebraEmitter const emitter;
+  return emitter;
+}
+[[nodiscard]] inline auto armadillo_linear_algebra_emitter()
+    -> LinearAlgebraEmitter const & {
+  static ArmadilloLinearAlgebraEmitter const emitter;
+  return emitter;
+}
+// The default backend: Eigen (header-only; bundled with libMesh/MOOSE).
 [[nodiscard]] inline auto default_linear_algebra_emitter()
     -> LinearAlgebraEmitter const & {
-#ifdef NUMSIM_CODEGEN_USE_ARMADILLO
-  static ArmadilloLinearAlgebraEmitter const emitter;
-#else
-  static EigenLinearAlgebraEmitter const emitter;
-#endif
-  return emitter;
+  return eigen_linear_algebra_emitter();
 }
 
 } // namespace numsim::codegen

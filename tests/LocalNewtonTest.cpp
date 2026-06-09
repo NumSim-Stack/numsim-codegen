@@ -194,6 +194,24 @@ TEST(LocalNewton, CoupledSystemJacobianIsCrossCoupled) {
   EXPECT_NE(fill.find("-K"), std::string::npos) << fill.substr(0, 80);
 }
 
+// PR #83 round-3 review: the dense-solve backend is a PER-TARGET choice (not a
+// build-wide macro), so one build can target different libraries per output.
+TEST(LocalNewton, CoupledBackendIsSelectablePerTarget) {
+  auto const m = build_coupled_pair();
+  // Default → Eigen.
+  auto const eig = StandaloneCxxTarget{}.emit(m).at(0).contents;
+  EXPECT_NE(eig.find("#include <Eigen/Dense>"), std::string::npos) << eig;
+  EXPECT_NE(eig.find("Eigen::Matrix"), std::string::npos) << eig;
+  EXPECT_EQ(eig.find("arma::"), std::string::npos) << eig;
+  // Same recipe, same build → Armadillo backend, just by injecting it.
+  auto const arm =
+      StandaloneCxxTarget{armadillo_linear_algebra_emitter()}.emit(m).at(0)
+          .contents;
+  EXPECT_NE(arm.find("#include <armadillo>"), std::string::npos) << arm;
+  EXPECT_NE(arm.find("arma::solve"), std::string::npos) << arm;
+  EXPECT_EQ(arm.find("Eigen::"), std::string::npos) << arm;
+}
+
 TEST(LocalNewton, CoupledStandaloneEmitsEigenInclude) {
   auto const src =
       StandaloneCxxTarget{}.emit(build_coupled_pair()).at(0).contents;

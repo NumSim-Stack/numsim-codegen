@@ -16,6 +16,7 @@ namespace numsim::codegen {
 
 struct SymbolDecl;
 struct StateVariable;
+class LinearAlgebraEmitter;
 
 // Phase 3a-2 (issue #75): one in-function Newton solve recorded by
 // `LocalNewtonLoweringPass` and rendered by `CodeEmitPass`. Each segment
@@ -94,6 +95,9 @@ struct PassContext {
   // Phase 3b-2b (issue #35): coupled N>1 systems (mutually-referencing
   // evolution equations). Rendered as a single dense Newton loop.
   std::vector<NewtonSystem> newton_systems;
+  // Phase 3b-2b: the dense-solve backend for coupled systems, injected by the
+  // caller (per-target). Null → CodeEmitPass uses the Eigen default.
+  LinearAlgebraEmitter const *linear_algebra = nullptr;
 };
 
 // Why a symbol lookup failed. The pre-modernization API returned a

@@ -589,7 +589,10 @@ inline void CodeEmitPass::run(PassContext &pctx) {
   }
 
   pctx.compute_function_source =
-      render_compute_function(model, ctx, output_rhs, newton, newton_sys);
+      render_compute_function(
+          model, ctx, output_rhs, newton, newton_sys,
+          pctx.linear_algebra ? *pctx.linear_algebra
+                              : default_linear_algebra_emitter());
 }
 
 } // namespace numsim::codegen

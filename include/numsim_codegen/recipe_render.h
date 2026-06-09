@@ -23,6 +23,7 @@
 // pattern for callers.
 
 #include <numsim_codegen/code_emit/codegen_context.h>
+#include <numsim_codegen/code_emit/linear_algebra_emitter.h>
 #include <numsim_codegen/passes/recipe_view.h>
 
 #include <cstddef>
@@ -110,7 +111,9 @@ struct RenderedNewtonSystem {
     RecipeView model, CodeGenContext const &ctx,
     std::vector<std::string> const &output_rhs,
     std::vector<RenderedNewtonSegment> const &newton = {},
-    std::vector<RenderedNewtonSystem> const &newton_systems = {}) -> std::string;
+    std::vector<RenderedNewtonSystem> const &newton_systems = {},
+    LinearAlgebraEmitter const &la = default_linear_algebra_emitter())
+    -> std::string;
 
 } // namespace numsim::codegen
 

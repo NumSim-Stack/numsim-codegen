@@ -289,16 +289,15 @@ void emit_init_stateful_body(std::ostream &os, ConstitutiveModel const &model) {
 
 // ─── Source (.C) emission ──────────────────────────────────────
 
-auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
-    -> std::string {
+auto emit_source(ConstitutiveModel const &model, std::string const &app_name,
+                 LinearAlgebraEmitter const &la) -> std::string {
   // Emit the Layer-2 function first so the linalg-include decision tracks the
   // ACTUAL emitted code (PR #83 round-2 #4): gating on a re-derived coupling
   // predicate could diverge from what was emitted (e.g. a future pass-
   // synthesized coupling) → a missing header for code that uses it. Keying on
-  // the emitter's usage marker cannot drift. The library is whatever
-  // default_linear_algebra_emitter() selects.
-  std::string const body = model.emit_compute_function();
-  auto const &la = default_linear_algebra_emitter();
+  // the emitter's usage marker cannot drift. The SAME `la` drives emission and
+  // the include (per-target, injected) so they cannot disagree.
+  std::string const body = model.emit_compute_function(la);
   bool const needs_la = body.find(la.usage_marker()) != std::string::npos;
 
   std::ostringstream os;
@@ -487,7 +486,7 @@ auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
   return {
       EmittedFile{model.name() + ".h", emit_header(model),
                   "include/materials", EmittedFile::Kind::Header},
-      EmittedFile{model.name() + ".C", emit_source(model, m_app_name),
+      EmittedFile{model.name() + ".C", emit_source(model, m_app_name, m_la),
                   "src/materials", EmittedFile::Kind::Source},
   };
 }

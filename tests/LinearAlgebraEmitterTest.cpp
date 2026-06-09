@@ -90,6 +90,32 @@ TEST(LinearAlgebraEmitter, ArmadilloEmitsDenseSolveBody) {
   EXPECT_EQ(src.find("Eigen::"), std::string::npos) << src;
 }
 
+// PR #83 round-3 design review: the `usage_marker()` contract is "a token that
+// appears in emitted code IFF this backend was used" — the include gate relies
+// on it. Enforce the load-bearing direction (no false negatives): every
+// backend's own marker must appear in what it emits.
+TEST(LinearAlgebraEmitter, EveryBackendEmitsItsUsageMarker) {
+  std::vector<LinearAlgebraEmitter const *> const backends = {
+      &eigen_linear_algebra_emitter(), &armadillo_linear_algebra_emitter()};
+  for (auto const *la : backends) {
+    std::ostringstream os;
+    la->emit_newton_step(os, "p", {"a", "b"}, {"Ra", "Rb"},
+                         {{"J00", "J01"}, {"J10", "J11"}}, 1e-10);
+    auto const src = os.str();
+    EXPECT_NE(src.find(la->usage_marker()), std::string::npos)
+        << "marker '" << la->usage_marker() << "' absent from its emission";
+    // And every advertised local suffix must actually appear as <p>_<suffix>.
+    for (auto const &suf : la->local_suffixes()) {
+      EXPECT_NE(src.find("p_" + suf), std::string::npos)
+          << "suffix '" << suf << "' advertised but not emitted";
+    }
+  }
+}
+
+TEST(LinearAlgebraEmitter, DefaultIsEigenAccessor) {
+  EXPECT_EQ(&default_linear_algebra_emitter(), &eigen_linear_algebra_emitter());
+}
+
 } // namespace
 
 } // namespace numsim::codegen
