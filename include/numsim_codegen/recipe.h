@@ -1526,12 +1526,33 @@ inline auto render_compute_function(
   // vector + dense Jacobian each iteration, solves `J·Δx = R` with Eigen
   // (fixed-size `Eigen::Matrix<double,N,N>`, partial-pivot LU — no heap), and
   // updates `x -= Δx`. The backend emits `#include <Eigen/Dense>` when the
-  // recipe has a coupled system. All solve-locals are prefixed with the system
-  // prefix `<p>_` so they cannot collide with a user state-variable name (`<p>`
-  // is the first unknown, itself a valid identifier).
+  // recipe has a coupled system.
+  //
+  // Solve-locals (`<p>_iter/_r/_J/_dx`) must collide with NOTHING in scope.
+  // PR #83 review: using the first unknown verbatim was a bug — a recipe with
+  // unknowns `{a, a_r}` would emit both `double a_r = …` (the iterate) and
+  // `Eigen::Matrix … a_r` (the residual vector). So derive a prefix that is
+  // collision-free against every in-scope identifier (all symbols incl. each
+  // `<sv>_old`, and every output + `<out>_out`), extending it until clear.
+  std::set<std::string> reserved_ids;
+  for (auto const &[nm, _] : model.scalar_symbol_map()) reserved_ids.insert(nm);
+  for (auto const &[nm, _] : model.tensor_symbol_map()) reserved_ids.insert(nm);
+  for (auto const &o : model.outputs()) {
+    reserved_ids.insert(o.name);
+    reserved_ids.insert(o.name + "_out");
+  }
   for (auto const &sys : newton_systems) {
     auto const n = sys.unknowns.size();
-    auto const &p = sys.unknowns[0]; // unique prefix for this system's locals
+    std::string p = sys.unknowns[0]; // seed; mangled below until collision-free
+    auto collides = [&](std::string const &pre) {
+      for (char const *s : {"_iter", "_r", "_J", "_dx"}) {
+        if (reserved_ids.contains(pre + s)) return true;
+      }
+      return false;
+    };
+    while (collides(p)) {
+      p += "_";
+    }
     auto L = [&](char const *s) { return p + "_" + s; };
     for (auto const &u : sys.unknowns) {
       os << "  double " << u << " = " << u << "_old;\n";

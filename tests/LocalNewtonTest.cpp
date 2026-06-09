@@ -197,7 +197,90 @@ TEST(LocalNewton, CoupledSystemJacobianIsCrossCoupled) {
 TEST(LocalNewton, CoupledStandaloneEmitsEigenInclude) {
   auto const src =
       StandaloneCxxTarget{}.emit(build_coupled_pair()).at(0).contents;
+  // PR #83 review F2: tie the include to the actual coupled solve in one
+  // emission, so the two detection paths (pass union-find vs the backend's
+  // has_coupled_local_newton) can't silently diverge.
   EXPECT_NE(src.find("#include <Eigen/Dense>"), std::string::npos) << src;
+  EXPECT_NE(src.find("Eigen::Matrix<double, 2, 2>"), std::string::npos) << src;
+}
+
+// PR #83 review F1: the off-diagonal orientation (row-major J(i,j)=∂R_i/∂x_j)
+// was unlocked — a symmetric fixture + a bare `-K` substring can't catch a
+// transpose. Use distinct off-diagonal coefficients and pin their order.
+TEST(LocalNewton, CoupledJacobianFillIsRowMajorOriented) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Asym");
+  auto K = m.add_parameter("K", 1.0);
+  auto C = m.add_parameter("C", 2.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  auto b = m.add_scalar_state_variable("b", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * b.current); // ∂R_a/∂b = -K  (J(0,1))
+  m.add_scalar_evolution_equation(b, C * a.current); // ∂R_b/∂a = -C  (J(1,0))
+  m.enable_local_newton();
+  auto const src = m.emit_compute_function();
+  auto const pos = src.find("_J << ");
+  ASSERT_NE(pos, std::string::npos) << src;
+  auto const fill = src.substr(pos, src.find(';', pos) - pos);
+  // Row-major: J(0,1) = -K must appear BEFORE J(1,0) = -C. A transpose flips it.
+  auto const kpos = fill.find("-K");
+  auto const cpos = fill.find("-C");
+  ASSERT_NE(kpos, std::string::npos) << fill;
+  ASSERT_NE(cpos, std::string::npos) << fill;
+  EXPECT_LT(kpos, cpos) << "Jacobian fill is transposed (column-major)\n" << fill;
+}
+
+// PR #83 review F4: transitive coupling — a→b, b→c, c→a forms ONE 3×3 system.
+TEST(LocalNewton, CoupledTransitiveChainFormsOneSystem) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Chain");
+  auto K = m.add_parameter("K", 1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  auto b = m.add_scalar_state_variable("b", make_expression<scalar_constant>(0.0));
+  auto c = m.add_scalar_state_variable("c", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * b.current);
+  m.add_scalar_evolution_equation(b, K * c.current);
+  m.add_scalar_evolution_equation(c, K * a.current);
+  m.enable_local_newton();
+  auto const src = m.emit_compute_function();
+  EXPECT_NE(src.find("Eigen::Matrix<double, 3, 3>"), std::string::npos) << src;
+  EXPECT_NE(src.find("Eigen::Matrix<double, 3, 1>"), std::string::npos) << src;
+}
+
+// PR #83 review F4: a coupled pair AND an independent equation in one recipe —
+// the pair is a 2×2 Eigen system, the independent one a scalar-reciprocal loop.
+TEST(LocalNewton, CoupledAndIndependentCoexist) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Mixed");
+  auto K = m.add_parameter("K", 1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  auto b = m.add_scalar_state_variable("b", make_expression<scalar_constant>(0.0));
+  auto c = m.add_scalar_state_variable("c", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * b.current); // a↔b coupled
+  m.add_scalar_evolution_equation(b, K * a.current);
+  m.add_scalar_evolution_equation(c, K * c.current); // c independent
+  m.enable_local_newton();
+  auto const src = m.emit_compute_function();
+  EXPECT_NE(src.find("Eigen::Matrix<double, 2, 2>"), std::string::npos) << src;
+  EXPECT_NE(src.find("c -= c_R / c_J"), std::string::npos) << src; // scalar path
+}
+
+// PR #83 review (MAJOR): a system-local must not collide with another unknown.
+// Unknowns {a, a_r}: the residual vector must NOT be named `a_r` (the iterate).
+TEST(LocalNewton, CoupledPrefixAvoidsCollisionWithOtherUnknown) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Clash");
+  auto K = m.add_parameter("K", 1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  auto ar = m.add_scalar_state_variable("a_r",
+                                        make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * ar.current);
+  m.add_scalar_evolution_equation(ar, K * a.current);
+  m.enable_local_newton();
+  auto const src = m.emit_compute_function();
+  EXPECT_NE(src.find("double a_r = a_r_old;"), std::string::npos) << src;
+  // The Eigen residual vector must have been re-prefixed away from `a_r`.
+  EXPECT_EQ(src.find("Eigen::Matrix<double, 2, 1> a_r;"), std::string::npos)
+      << src;
 }
 
 TEST(LocalNewton, UncoupledRecipeEmitsNoEigenInclude) {
