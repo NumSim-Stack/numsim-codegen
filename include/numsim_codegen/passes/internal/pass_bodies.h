@@ -434,6 +434,14 @@ inline void LocalNewtonLoweringPass::run(PassContext &pctx) {
   // versa). A coupled group cannot be solved independently — it becomes one
   // dense Newton system. Detected via a scalar-leaf scan of each residual.
   // Union-Find over equation indices (no recursion, no extra headers).
+  //
+  // POLICY (PR #83 round-2 #1): coupling is AUTO-detected. This is a deliberate
+  // choice, not an assumption — it always finds the correct fixed point (a
+  // monolithic solve and a converged staggered scheme share the same root), but
+  // it does convert an intended SINGLE-PASS operator-split into a fully-implicit
+  // solve, which differs at finite dt. No public API promises "referenced
+  // equations stay independent", so an opt-out (`NewtonOptions{coupling=…}` /
+  // explicit grouping) is additive later without a break when 3b-2c needs it.
   std::vector<std::set<std::string>> leaves(n);
   for (std::size_t i = 0; i < n; ++i) {
     LeafCollector lc;

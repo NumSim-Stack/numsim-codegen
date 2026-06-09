@@ -88,6 +88,7 @@ CPMAddPackage(
     NAME eigen3
     GITLAB_REPOSITORY libeigen/eigen
     GIT_TAG 3.4.0
+    GIT_SHALLOW TRUE
     DOWNLOAD_ONLY YES)
 
 add_executable(compile_check_driver

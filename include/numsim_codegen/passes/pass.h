@@ -43,6 +43,14 @@ struct NewtonSegment {
 // J (N×N, `jacobian[i][j] = ∂R_i/∂x_j`), solves `J·Δx = −R`, and updates
 // `x -= Δx` until `max|R_i| < tol` or `max_iter`. Uncoupled equations stay as
 // 1×1 `NewtonSegment`s (the existing scalar-reciprocal path, byte-identical).
+//
+// SCALAR-UNKNOWNS ONLY (PR #83 round-2): each `unknowns[i]` is one `double` and
+// the emit hard-codes `Eigen::Matrix<double,N,1>` / `x -= dx(i)`. Phase 3b-2a
+// (Fischer-Burmeister) and #285 t2s residuals fit unchanged (an FB multiplier is
+// just another scalar unknown + residual row; a t2s residual still produces a
+// scalar). Phase 3b-2d (tensor unknowns — e.g. a back-stress tensor) does NOT
+// fit and will need a sibling type / block generalization, not a mangled
+// `unknowns: vector<string>`.
 struct NewtonSystem {
   std::vector<std::string> unknowns;                            // size N
   std::vector<cas::expression_holder<cas::scalar_expression>> residuals; // N

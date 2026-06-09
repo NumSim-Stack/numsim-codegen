@@ -198,10 +198,26 @@ TEST(LocalNewton, CoupledStandaloneEmitsEigenInclude) {
   auto const src =
       StandaloneCxxTarget{}.emit(build_coupled_pair()).at(0).contents;
   // PR #83 review F2: tie the include to the actual coupled solve in one
-  // emission, so the two detection paths (pass union-find vs the backend's
-  // has_coupled_local_newton) can't silently diverge.
+  // emission, so the include can't drift from the emitted Eigen usage.
   EXPECT_NE(src.find("#include <Eigen/Dense>"), std::string::npos) << src;
   EXPECT_NE(src.find("Eigen::Matrix<double, 2, 2>"), std::string::npos) << src;
+}
+
+// PR #83 round-2 #3: the MOOSE backend builds Eigen's headers under -Werror, so
+// the generated .C must wrap the Eigen include in libMesh's warning-suppression
+// idiom (a bare include risks build-breaking warnings inside Eigen). The
+// standalone backend keeps the bare include (no libMesh).
+TEST(LocalNewton, CoupledMooseWrapsEigenInIgnoreWarnings) {
+  auto const files = MooseMaterialTarget{}.emit(build_coupled_pair());
+  std::string const &src = files.at(1).contents; // the .C
+  auto const ignore = src.find("#include \"libmesh/ignore_warnings.h\"");
+  auto const eigen = src.find("#include <Eigen/Dense>");
+  auto const restore = src.find("#include \"libmesh/restore_warnings.h\"");
+  ASSERT_NE(eigen, std::string::npos) << src;
+  ASSERT_NE(ignore, std::string::npos) << src;
+  ASSERT_NE(restore, std::string::npos) << src;
+  EXPECT_LT(ignore, eigen) << "ignore_warnings must precede the Eigen include";
+  EXPECT_LT(eigen, restore) << "restore_warnings must follow the Eigen include";
 }
 
 // PR #83 review F1: the off-diagonal orientation (row-major J(i,j)=∂R_i/∂x_j)

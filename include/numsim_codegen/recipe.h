@@ -1409,11 +1409,17 @@ inline auto canonical_arguments(RecipeView model) -> std::vector<ArgSpec> {
 
 // Phase 3b-2b (issue #35): does this recipe produce a COUPLED local-Newton
 // system (≥2 evolution equations whose rates reference each other's current
-// state variable)? Such a group is solved as one dense N×N Newton system, whose
-// generated code uses Eigen — so a backend calls this to decide whether to emit
-// `#include <Eigen/Dense>`. Coupling enters only through the rate (the discrete
-// residual `(x−x_old)/dt − rate` adds no cross-references), so scanning rates is
-// exact and matches LocalNewtonLoweringPass's residual-scan grouping.
+// state variable)? Such a group is solved as one dense N×N Newton system. This
+// is a recipe-level QUERY (used by tests). Coupling enters only through the rate
+// (the discrete residual `(x−x_old)/dt − rate` adds no cross-references), so the
+// rate-scan here matches LocalNewtonLoweringPass's residual-scan grouping for
+// user-authored coupling.
+//
+// NOTE (PR #83 round-2 #4): the backends do NOT use this to decide the
+// `<Eigen/Dense>` include — they gate on whether the EMITTED code actually uses
+// `Eigen::`, which cannot drift from a re-derived predicate (e.g. if a future
+// pass synthesizes coupling that isn't visible as a user rate, like a Phase
+// 3b-2a Fischer-Burmeister multiplier).
 [[nodiscard]] inline auto has_coupled_local_newton(ConstitutiveModel const &m)
     -> bool {
   if (!m.local_newton_enabled()) {
