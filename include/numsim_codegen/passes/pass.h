@@ -34,6 +34,24 @@ struct NewtonSegment {
   int max_iter;
 };
 
+// Phase 3b-2b (issue #35): a COUPLED local Newton system of N>1 scalar unknowns.
+// Produced by LocalNewtonLoweringPass when a group of evolution equations
+// reference each other's current state variable (multi-surface plasticity etc.)
+// — those equations cannot be solved independently. The generated function
+// declares one local iterate per unknown, then runs a single Newton loop that
+// each iteration assembles the residual vector R (size N) and the dense Jacobian
+// J (N×N, `jacobian[i][j] = ∂R_i/∂x_j`), solves `J·Δx = −R`, and updates
+// `x -= Δx` until `max|R_i| < tol` or `max_iter`. Uncoupled equations stay as
+// 1×1 `NewtonSegment`s (the existing scalar-reciprocal path, byte-identical).
+struct NewtonSystem {
+  std::vector<std::string> unknowns;                            // size N
+  std::vector<cas::expression_holder<cas::scalar_expression>> residuals; // N
+  std::vector<std::vector<cas::expression_holder<cas::scalar_expression>>>
+      jacobian; // N×N, row-major: jacobian[i][j] = ∂R_i/∂x_j
+  double tol;
+  int max_iter;
+};
+
 // Shared state for a single PassManager invocation. Passes read the
 // recipe via `model` (a RecipeView — const-only today, will gain a
 // mutable surface in Phase 2 without breaking pass signatures; see M4
@@ -62,8 +80,12 @@ struct PassContext {
   std::unordered_map<std::string, std::size_t> symbol_lookup;
   // Phase 3a-2 (issue #75): populated by LocalNewtonLoweringPass, consumed
   // by CodeEmitPass. Empty unless the recipe opted into local Newton
-  // solving (`ConstitutiveModel::enable_local_newton`).
+  // solving (`ConstitutiveModel::enable_local_newton`). Holds the 1×1
+  // (uncoupled) solves; coupled groups go in `newton_systems` below.
   std::vector<NewtonSegment> newton_segments;
+  // Phase 3b-2b (issue #35): coupled N>1 systems (mutually-referencing
+  // evolution equations). Rendered as a single dense Newton loop.
+  std::vector<NewtonSystem> newton_systems;
 };
 
 // Why a symbol lookup failed. The pre-modernization API returned a

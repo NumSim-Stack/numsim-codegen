@@ -137,6 +137,80 @@ TEST(LocalNewton, MultipleEvolutionEquationsGetSeparateLoops) {
   EXPECT_NE(src.find("for (int b_iter"), std::string::npos) << src;
   EXPECT_NE(src.find("double &a_out"), std::string::npos) << src;
   EXPECT_NE(src.find("double &b_out"), std::string::npos) << src;
+  // Independent equations must NOT be coupled into a dense Eigen solve.
+  EXPECT_EQ(src.find("Eigen::Matrix"), std::string::npos) << src;
+  EXPECT_FALSE(has_coupled_local_newton(m));
+}
+
+// ─── Phase 3b-2b: coupled vector Newton ─────────────────────────────
+
+// Two evolution equations whose rates reference each other's unknown form a
+// COUPLED 2×2 system — solved as ONE dense Newton loop via Eigen, not two
+// independent scalar reciprocals.
+namespace {
+auto build_coupled_pair() -> ConstitutiveModel {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Coupled");
+  auto K = m.add_parameter("K", 1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  auto b = m.add_scalar_state_variable("b", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * b.current); // a' depends on b
+  m.add_scalar_evolution_equation(b, K * a.current); // b' depends on a
+  m.enable_local_newton();
+  return m;
+}
+} // namespace
+
+TEST(LocalNewton, CoupledSystemDetected) {
+  EXPECT_TRUE(has_coupled_local_newton(build_coupled_pair()));
+}
+
+TEST(LocalNewton, CoupledSystemEmitsSingleEigenSolve) {
+  auto const src = build_coupled_pair().emit_compute_function();
+  // ONE Newton loop (the first unknown drives the prefix), not two.
+  EXPECT_NE(src.find("for (int a_iter"), std::string::npos) << src;
+  EXPECT_EQ(src.find("for (int b_iter"), std::string::npos) << src;
+  // Dense residual vector + Jacobian matrix + partial-pivot LU solve.
+  EXPECT_NE(src.find("Eigen::Matrix<double, 2, 1> a_r"), std::string::npos)
+      << src;
+  EXPECT_NE(src.find("Eigen::Matrix<double, 2, 2> a_J"), std::string::npos)
+      << src;
+  EXPECT_NE(src.find("a_J.partialPivLu().solve(a_r)"), std::string::npos)
+      << src;
+  // Both unknowns updated from the solution vector and written back.
+  EXPECT_NE(src.find("a -= a_dx(0)"), std::string::npos) << src;
+  EXPECT_NE(src.find("b -= a_dx(1)"), std::string::npos) << src;
+  EXPECT_NE(src.find("a_out = a"), std::string::npos) << src;
+  EXPECT_NE(src.find("b_out = b"), std::string::npos) << src;
+  // NOT the scalar-reciprocal path.
+  EXPECT_EQ(src.find("a -= a_R / a_J"), std::string::npos) << src;
+}
+
+TEST(LocalNewton, CoupledSystemJacobianIsCrossCoupled) {
+  // R_a = (a-a_old)/dt - K*b ⇒ ∂R_a/∂b = -K (the off-diagonal coupling term).
+  auto const src = build_coupled_pair().emit_compute_function();
+  ASSERT_NE(src.find("a_J << "), std::string::npos) << src;
+  auto const fill = src.substr(src.find("a_J << "));
+  EXPECT_NE(fill.find("-K"), std::string::npos) << fill.substr(0, 80);
+}
+
+TEST(LocalNewton, CoupledStandaloneEmitsEigenInclude) {
+  auto const src =
+      StandaloneCxxTarget{}.emit(build_coupled_pair()).at(0).contents;
+  EXPECT_NE(src.find("#include <Eigen/Dense>"), std::string::npos) << src;
+}
+
+TEST(LocalNewton, UncoupledRecipeEmitsNoEigenInclude) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Indep");
+  auto K = m.add_parameter("K", 1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  auto b = m.add_scalar_state_variable("b", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  m.add_scalar_evolution_equation(b, K * b.current);
+  m.enable_local_newton();
+  auto const src = StandaloneCxxTarget{}.emit(m).at(0).contents;
+  EXPECT_EQ(src.find("Eigen/Dense"), std::string::npos) << src;
 }
 
 } // namespace numsim::codegen
