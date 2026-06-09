@@ -56,6 +56,40 @@ TEST(LinearAlgebraEmitter, EigenEmitsDenseSolveBody) {
   EXPECT_NE(src.find("b -= sys_dx(1)"), std::string::npos) << src;
 }
 
+// The Armadillo backend exercises a genuinely different API behind the same
+// interface — proof the seam is library-agnostic.
+TEST(LinearAlgebraEmitter, ArmadilloAdvertisesItsContract) {
+  ArmadilloLinearAlgebraEmitter const a;
+  EXPECT_EQ(a.usage_marker(), "arma::");
+  ASSERT_EQ(a.includes().size(), 1u);
+  EXPECT_EQ(a.includes()[0], "<armadillo>");
+  auto const s = a.local_suffixes();
+  for (char const *expected : {"r", "J", "dx"}) {
+    EXPECT_NE(std::find(s.begin(), s.end(), expected), s.end());
+  }
+}
+
+TEST(LinearAlgebraEmitter, ArmadilloEmitsDenseSolveBody) {
+  ArmadilloLinearAlgebraEmitter const a;
+  std::ostringstream os;
+  a.emit_newton_step(os, "sys", {"a", "b"}, {"Ra", "Rb"},
+                     {{"J00", "J01"}, {"J10", "J11"}}, 1e-10);
+  auto const src = os.str();
+  // Fixed-size types, element assignment, ∞-norm via arma::norm, arma::solve.
+  EXPECT_NE(src.find("arma::vec::fixed<2> sys_r"), std::string::npos) << src;
+  EXPECT_NE(src.find("sys_r(0) = Ra;"), std::string::npos) << src;
+  EXPECT_NE(src.find("arma::mat::fixed<2, 2> sys_J"), std::string::npos) << src;
+  EXPECT_NE(src.find("sys_J(0, 1) = J01;"), std::string::npos) << src; // ∂R_0/∂x_1
+  EXPECT_NE(src.find("sys_J(1, 0) = J10;"), std::string::npos) << src; // ∂R_1/∂x_0
+  EXPECT_NE(src.find("arma::norm(sys_r, \"inf\") < 1e-10"), std::string::npos)
+      << src;
+  EXPECT_NE(src.find("arma::solve(sys_J, sys_r)"), std::string::npos) << src;
+  EXPECT_NE(src.find("a -= sys_dx(0)"), std::string::npos) << src;
+  EXPECT_NE(src.find("b -= sys_dx(1)"), std::string::npos) << src;
+  // No Eigen leakage.
+  EXPECT_EQ(src.find("Eigen::"), std::string::npos) << src;
+}
+
 } // namespace
 
 } // namespace numsim::codegen

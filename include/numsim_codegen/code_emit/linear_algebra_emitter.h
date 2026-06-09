@@ -102,11 +102,75 @@ public:
   }
 };
 
+// Armadillo implementation — fixed-size `arma::mat::fixed` / `arma::vec::fixed`
+// + `arma::solve` (LAPACK). A worked second backend, proving the interface is
+// library-agnostic: Armadillo's API differs from Eigen's in every emitted line
+// (element assignment vs comma-init, `arma::norm(·,"inf")` vs
+// `cwiseAbs().maxCoeff()`, `arma::solve` vs `partialPivLu().solve`), yet it
+// slots behind the same four methods. NOTE: `arma::solve` links LAPACK/BLAS, a
+// heavier downstream dependency than header-only Eigen.
+class ArmadilloLinearAlgebraEmitter final : public LinearAlgebraEmitter {
+public:
+  [[nodiscard]] auto includes() const -> std::vector<std::string> override {
+    return {"<armadillo>"};
+  }
+  [[nodiscard]] auto usage_marker() const -> std::string override {
+    return "arma::";
+  }
+  [[nodiscard]] auto local_suffixes() const
+      -> std::vector<std::string> override {
+    return {"r", "J", "dx"};
+  }
+  void emit_newton_step(
+      std::ostream &os, std::string const &prefix,
+      std::vector<std::string> const &unknowns,
+      std::vector<std::string> const &residual_rhs,
+      std::vector<std::vector<std::string>> const &jacobian_rhs,
+      double tol) const override {
+    auto const n = unknowns.size();
+    auto L = [&](char const *s) { return prefix + "_" + s; };
+    // Residual vector R (size N) — element assignment (Armadillo has no
+    // version-stable fixed-size comma-init).
+    os << "    arma::vec::fixed<" << n << "> " << L("r") << ";\n";
+    for (std::size_t i = 0; i < n; ++i) {
+      os << "    " << L("r") << "(" << i << ") = " << residual_rhs[i] << ";\n";
+    }
+    // Dense Jacobian J (N×N): J(i,j) = ∂R_i/∂x_j.
+    os << "    arma::mat::fixed<" << n << ", " << n << "> " << L("J") << ";\n";
+    for (std::size_t i = 0; i < n; ++i) {
+      for (std::size_t j = 0; j < n; ++j) {
+        os << "    " << L("J") << "(" << i << ", " << j
+           << ") = " << jacobian_rhs[i][j] << ";\n";
+      }
+    }
+    // Convergence on the residual ∞-norm.
+    os << "    if (arma::norm(" << L("r") << ", \"inf\") < " << tol
+       << ") {\n      break;\n    }\n";
+    // Solve J·Δx = R and update x -= Δx.
+    os << "    arma::vec::fixed<" << n << "> " << L("dx") << " = arma::solve("
+       << L("J") << ", " << L("r") << ");\n";
+    for (std::size_t i = 0; i < n; ++i) {
+      os << "    " << unknowns[i] << " -= " << L("dx") << "(" << i << ");\n";
+    }
+  }
+};
+
 // THE linear-algebra backend selection point. Swap the returned implementation
 // to change the library across emission, includes, and the usage gate at once.
+// Compile-time selectable via NUMSIM_CODEGEN_USE_ARMADILLO (the codebase's
+// macro-seam idiom); Eigen is the default (header-only, MOOSE-bundled).
+//
+// The macro is a BUILD-WIDE setting: both the inline emit path (render, in this
+// header) and the compiled backends (standalone/moose .cpp, which gate the
+// include on `usage_marker()`) must see the same selection, or the emitted body
+// and its include would disagree. Define it for the whole project build.
 [[nodiscard]] inline auto default_linear_algebra_emitter()
     -> LinearAlgebraEmitter const & {
+#ifdef NUMSIM_CODEGEN_USE_ARMADILLO
+  static ArmadilloLinearAlgebraEmitter const emitter;
+#else
   static EigenLinearAlgebraEmitter const emitter;
+#endif
   return emitter;
 }
 
