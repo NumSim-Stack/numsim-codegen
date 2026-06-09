@@ -51,9 +51,14 @@ struct ArgSpec {
     StateOld,         // double const <name>   ← MOOSE: _<name>[_qp] (getMaterialPropertyOld)
     StateCurrentRead, // double const <name>   ← MOOSE: _<name>[_qp] (declared property, read)
     TimeStep,         // double const dt       ← MOOSE: _dt (framework timestep)
-    ScalarOutput,     // double & <name>_out   ← MOOSE: _<name>[_qp]
-    TensorOutput,     // T# & <name>_out       ← MOOSE: <name>_ad
-    NewtonStateOut,   // double & <name>_out   ← MOOSE: _<name>[_qp] (solved, written)
+    ScalarOutput,       // double & <name>_out   ← MOOSE: _<name>[_qp]
+    TensorOutput,       // T# & <name>_out       ← MOOSE: <name>_ad
+    TensorTangentOutput,// T# & <name>_out       ← MOOSE: _Jacobian_mult[_qp]
+                        //   (Phase 5: a roles::ConsistentTangent rank-4 output;
+                        //    identical to TensorOutput in the Layer-2 signature,
+                        //    but a backend routes it to the framework's
+                        //    consistent-tangent slot rather than a fresh output.)
+    NewtonStateOut,     // double & <name>_out   ← MOOSE: _<name>[_qp] (solved, written)
   };
   std::string name;     // base symbol/output name (no `_out` suffix)
   Role role;

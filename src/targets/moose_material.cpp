@@ -52,6 +52,37 @@ auto output_storage_type(OutputDecl const &o) -> std::string {
   return tensor_storage_type(o.rank);
 }
 
+// Phase 5 (issue #37): a consistent tangent (requested via
+// add_algorithmic_tangent) is wired to MOOSE's conventional `Jacobian_mult`
+// property — the exact name the tensor-mechanics StressDivergence kernels look
+// up for the algorithmic tangent. It is FIRST-CLASS in this backend (driven by
+// `model.tangents()`), not an ordinary `<Model>_<name>` output a solver would
+// never find. The tangent is rank-4; its dim is that of the differentiated
+// (stress) output. The single-tangent guard in `emit` keeps `_Jacobian_mult`
+// unambiguous (MOOSE has one consistent-tangent slot).
+//
+// SCOPE (PR #82 review): the bare `"Jacobian_mult"` name is correct for the
+// default single-material / no-`base_name` case — the common one — which is
+// what the StressDivergence kernels resolve by default. A `base_name`-namespaced
+// setup (multiple stacked materials per block) expects
+// `<base_name>_Jacobian_mult`; threading a `base_name` parameter through is out
+// of scope until a multi-material consumer needs it.
+auto tangent_dim(ConstitutiveModel const &model, TangentSpec const &t)
+    -> std::size_t {
+  for (auto const &o : model.outputs()) {
+    if (o.name == t.of_output && o.kind == OutputDecl::Kind::Tensor) {
+      return o.dim;
+    }
+  }
+  // of_output existence/rank are validated by AlgorithmicTangentPass at emit;
+  // reaching here means the recipe wasn't built through the supported API.
+  throw std::runtime_error(
+      "MooseMaterialTarget: consistent tangent '" + t.name +
+      "' references tensor output '" + t.of_output +
+      "' which is not a declared tensor output of model '" + model.name() +
+      "'.");
+}
+
 // Escape a user-supplied string for safe inclusion in a C++ string
 // literal. Handles the five characters that would otherwise produce
 // ill-formed C++:
@@ -127,9 +158,14 @@ auto emit_header(ConstitutiveModel const &model) -> std::string {
     os << "\n";
   }
 
-  // Output members — declared MaterialProperty<...> refs
+  // Output members — declared MaterialProperty<...> refs.
   for (auto const &o : model.outputs()) {
     os << "  " << output_member_type(o) << " & _" << o.name << ";\n";
+  }
+  // Consistent-tangent member → MOOSE's framework `_Jacobian_mult` (Phase 5).
+  for (auto const &t : model.tangents()) {
+    (void)t;
+    os << "  MaterialProperty<RankFourTensor> & _Jacobian_mult;\n";
   }
 
   os << "};\n";
@@ -164,6 +200,13 @@ void emit_compute_qp_body(std::ostream &os, ConstitutiveModel const &model) {
          << "[_qp].dataPointer());\n";
     }
   }
+  // Consistent-tangent write adaptor over `_Jacobian_mult[_qp]` (Phase 5).
+  for (auto const &t : model.tangents()) {
+    auto const d = tangent_dim(model, t);
+    os << "  tmech::adaptor<double, " << d
+       << ", 4, tmech::full<" << d
+       << ">> Jacobian_mult_ad(_Jacobian_mult[_qp].dataPointer());\n";
+  }
 
   // Call the Layer 2 compute function. Arguments are built by iterating
   // the SAME canonical order the generated signature uses (issue #77), so
@@ -187,6 +230,9 @@ void emit_compute_qp_body(std::ostream &os, ConstitutiveModel const &model) {
     case ArgSpec::Role::TensorInput:
     case ArgSpec::Role::TensorOutput:
       os << "      " << a.name << "_ad"; // boundary adaptor
+      break;
+    case ArgSpec::Role::TensorTangentOutput:
+      os << "      Jacobian_mult_ad"; // Phase 5: → _Jacobian_mult[_qp]
       break;
     case ArgSpec::Role::ScalarInput:
     case ArgSpec::Role::StateOld:
@@ -318,9 +364,16 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name)
        << model.name() << "_" << sv.name << "\"))";
   }
   for (auto const &o : model.outputs()) {
-    os << ",\n    _" << o.name << "(declareProperty<"
-       << output_storage_type(o) << ">(\"" << model.name() << "_" << o.name
-       << "\"))";
+    os << ",\n    _" << o.name << "(declareProperty<" << output_storage_type(o)
+       << ">(\"" << model.name() << "_" << o.name << "\"))";
+  }
+  // Consistent tangent → declare the conventional `Jacobian_mult` property so
+  // MOOSE's StressDivergence kernels resolve it (Phase 5). Bare name (no model
+  // prefix) — that is the name the kernels look up.
+  for (auto const &t : model.tangents()) {
+    (void)t;
+    os << ",\n    _Jacobian_mult(declareProperty<RankFourTensor>(\"Jacobian_"
+          "mult\"))";
   }
   os << "\n{\n}\n\n";
 
@@ -381,6 +434,32 @@ auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
         "Call enable_local_newton() so the generated MOOSE Material solves "
         "its state variables internally. (The residual/Jacobian-output mode "
         "is for external drivers — use StandaloneCxxTarget for that.)");
+  }
+  // Phase 5 (issue #37): all consistent tangents map to the single framework
+  // `_Jacobian_mult` property — more than one would emit a duplicate member /
+  // property. MOOSE has exactly one consistent-tangent slot. (Tangents live in
+  // `tangents()`, not `outputs()`, on the pre-pass model the backend sees.)
+  if (model.tangents().size() > 1) {
+    throw std::runtime_error(
+        "MooseMaterialTarget: recipe '" + model.name() +
+        "' requests more than one consistent tangent (roles::ConsistentTangent)."
+        " MOOSE has a single _Jacobian_mult slot, so only one tangent can be "
+        "wired. Emit additional tangents via StandaloneCxxTarget.");
+  }
+  // PR #82 review: when a tangent is wired, the backend emits a hardcoded
+  // `_Jacobian_mult` member. A regular output literally named "Jacobian_mult"
+  // would collide with that member (ill-formed C++). The recipe symbol
+  // namespace can't know the backend's member name, so guard it here.
+  if (!model.tangents().empty()) {
+    for (auto const &o : model.outputs()) {
+      if (o.name == "Jacobian_mult") {
+        throw std::runtime_error(
+            "MooseMaterialTarget: recipe '" + model.name() +
+            "' has both a consistent tangent and an output named "
+            "'Jacobian_mult', which collides with the framework consistent-"
+            "tangent member. Rename the output.");
+      }
+    }
   }
   return {
       EmittedFile{model.name() + ".h", emit_header(model),

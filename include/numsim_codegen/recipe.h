@@ -795,6 +795,21 @@ public:
   // `roles::ConsistentTangent`.
   void add_algorithmic_tangent(std::string name, std::string of_output,
                                std::string wrt_input) {
+    // Security (PR #82 round-3): the tangent name flows UNESCAPED into the
+    // generated function signature as `<name>_out`. SymbolValidationPass
+    // identifier-checks declared symbols/outputs, but it runs BEFORE
+    // AlgorithmicTangentPass materialises the tangent output — so the tangent
+    // name would otherwise never be validated. An invalid name (`;`, spaces,
+    // `)`) is a malformed-output / code-injection vector. Reject it here, at
+    // the API, mirroring the model-name guard in the constructor.
+    if (!SymbolValidationPass::is_valid_cxx_identifier(name)) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': algorithmic-tangent name '{}' is not a "
+          "valid C++ identifier (it becomes the generated `<name>_out` "
+          "parameter). Use a [A-Za-z_][A-Za-z0-9_]* name that is not a C++ "
+          "keyword.",
+          m_name, name));
+    }
     assert_output_name_available(name); // reserve vs outputs + symbols
     for (auto const &t : m_tangents) {
       if (t.name == name) {
@@ -910,6 +925,12 @@ private:
             m_name, name));
       }
     }
+    // NOTE (PR #82 review): tangent-request names are intentionally NOT scanned
+    // here. AlgorithmicTangentPass materializes the tangent via add_output(<the
+    // tangent name>), which must be allowed. A user add_output colliding with a
+    // tangent name is instead caught at emit (the pass's add_output throws
+    // "output already declared"); a tangent colliding with an existing output is
+    // caught at request time by add_algorithmic_tangent's own check.
   }
 
   // Reject a user-defined Role that shares a name with a `roles::` catalogue
@@ -1335,11 +1356,42 @@ inline auto canonical_arguments(RecipeView model) -> std::vector<ArgSpec> {
     args.push_back({s.name, role, s.dim, s.rank});
   }
   for (auto const &o : m.outputs()) {
-    args.push_back({o.name,
-                    o.kind == OutputDecl::Kind::Tensor
-                        ? ArgSpec::Role::TensorOutput
-                        : ArgSpec::Role::ScalarOutput,
-                    o.dim, o.rank});
+    // Phase 5 (issue #37): preserve the consistent-tangent IDENTITY through the
+    // ArgSpec projection. A roles::ConsistentTangent rank-4 output becomes
+    // TensorTangentOutput so a backend can route it to its framework tangent
+    // slot (MOOSE `_Jacobian_mult[_qp]`) instead of a freshly declared output;
+    // without this the role is dropped here and the tangent is indistinguishable
+    // from a user rank-4 output (PR #80 round-2 API finding). Scalar outputs and
+    // non-tangent tensor outputs are unchanged.
+    auto const role =
+        o.kind == OutputDecl::Kind::Tensor
+            ? (o.role == roles::ConsistentTangent
+                   ? ArgSpec::Role::TensorTangentOutput
+                   : ArgSpec::Role::TensorOutput)
+            : ArgSpec::Role::ScalarOutput;
+    args.push_back({o.name, role, o.dim, o.rank});
+  }
+  // Phase 5 (issue #37): consistent tangents are requested via
+  // `add_algorithmic_tangent` and only materialise as OutputDecls when
+  // AlgorithmicTangentPass runs — inside emit_compute_function's working copy.
+  // A backend calling canonical_arguments on the PRE-pass model would miss
+  // them, so its call-site would drift from the generated signature (the arity
+  // hazard issue #77 exists to prevent). Derive them STRUCTURALLY from the
+  // requests here — mirroring Newton out-params — and dedup against any tangent
+  // OutputDecl the pass already appended, so the arg list is byte-identical
+  // whether or not the pass has run. The tangent is rank-4; its dim comes from
+  // the differentiated output.
+  for (auto const &t : m.tangents()) {
+    bool already = false;
+    for (auto const &a : args) {
+      if (a.name == t.name) { already = true; break; }
+    }
+    if (already) continue;
+    std::size_t dim = 0;
+    for (auto const &o : m.outputs()) {
+      if (o.name == t.of_output) { dim = o.dim; break; }
+    }
+    args.push_back({t.name, ArgSpec::Role::TensorTangentOutput, dim, 4});
   }
   // In-function-solved state variables, in evolution-equation order (the
   // same order render_compute_function emits the loops + writebacks).
@@ -1396,6 +1448,9 @@ inline auto render_compute_function(
       os << "T" << tmpl_counter++ << " const &" << a.name;
       break;
     case ArgSpec::Role::TensorOutput:
+    case ArgSpec::Role::TensorTangentOutput:
+      // Identical in the target-agnostic signature — a rank-4 out-param. The
+      // tangent-vs-ordinary distinction is a backend call-site concern (Phase 5).
       os << "T" << tmpl_counter++ << " &" << a.name << "_out";
       break;
     case ArgSpec::Role::ScalarOutput:
