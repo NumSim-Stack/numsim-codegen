@@ -4,10 +4,12 @@
 #include <numsim_cas/scalar/scalar_all.h>
 #include <numsim_cas/scalar/scalar_visitor_typedef.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
+#include <numsim_cas/tensor/tensor_if_then_else.h>
 #include <numsim_cas/tensor/tensor_visitor_typedef.h>
 #include <numsim_cas/tensor_to_scalar/operators/tensor_to_scalar_add.h>
 #include <numsim_cas/tensor_to_scalar/operators/tensor_to_scalar_mul.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_definitions.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_if_then_else.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_visitor_typedef.h>
 
 #include <ranges>

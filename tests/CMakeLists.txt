@@ -71,17 +71,23 @@ set(GENERATED_COUPLED_HEADER
 # exercises the tensor_if_then_else materialized-ternary emission vs tmech.
 set(GENERATED_PIECEWISE_HEADER
     ${CMAKE_CURRENT_BINARY_DIR}/generated/PiecewiseCheck.h)
+# Review #87 t2s coverage: the tensor_to_scalar_if_then_else sibling, reachable
+# only as a subterm (lifted into a tensor output via with_tensor_mul).
+set(GENERATED_PIECEWISE_T2S_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/PiecewiseT2sCheck.h)
 
 add_custom_command(
     OUTPUT ${GENERATED_HEADER} ${GENERATED_HARDENING_HEADER}
            ${GENERATED_NEWTON_HEADER} ${GENERATED_AUTOCAT_HEADER}
            ${GENERATED_COUPLED_HEADER} ${GENERATED_PIECEWISE_HEADER}
+           ${GENERATED_PIECEWISE_T2S_HEADER}
     COMMAND ${CMAKE_COMMAND} -E make_directory
             ${CMAKE_CURRENT_BINARY_DIR}/generated
     COMMAND $<TARGET_FILE:generate_compile_check_recipe>
             ${GENERATED_HEADER} ${GENERATED_HARDENING_HEADER}
             ${GENERATED_NEWTON_HEADER} ${GENERATED_AUTOCAT_HEADER}
             ${GENERATED_COUPLED_HEADER} ${GENERATED_PIECEWISE_HEADER}
+            ${GENERATED_PIECEWISE_T2S_HEADER}
     DEPENDS generate_compile_check_recipe
     COMMENT "Generating compile-check headers via numsim-codegen"
     VERBATIM)
@@ -103,7 +109,8 @@ add_executable(compile_check_driver
     ${GENERATED_NEWTON_HEADER}
     ${GENERATED_AUTOCAT_HEADER}
     ${GENERATED_COUPLED_HEADER}
-    ${GENERATED_PIECEWISE_HEADER})
+    ${GENERATED_PIECEWISE_HEADER}
+    ${GENERATED_PIECEWISE_T2S_HEADER})
 target_include_directories(compile_check_driver
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated ${eigen3_SOURCE_DIR})
 target_link_libraries(compile_check_driver
