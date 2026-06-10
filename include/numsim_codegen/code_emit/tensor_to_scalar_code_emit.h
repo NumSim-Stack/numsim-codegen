@@ -60,6 +60,19 @@ public:
     m_result = m_scalar.apply(v.expr());
   }
 
+  // Piecewise selection. For this node cond/then/else are ALL
+  // tensor-to-scalar (scalar-VALUED), so it is an ordinary scalar ternary —
+  // the condition is also t2s (compared `!= 0.0`), not a separate scalar.
+  void operator()(cas::tensor_to_scalar_if_then_else const &v) override {
+    auto cond = apply(v.expr_cond());
+    auto then_branch = apply(v.expr_then());
+    auto else_branch = apply(v.expr_else());
+    m_result = register_temp(
+        &v, "(" + wrap_if_compound(cond) + " != 0.0 ? " +
+                wrap_if_compound(then_branch) + " : " +
+                wrap_if_compound(else_branch) + ")");
+  }
+
   // ─── Tensor reductions ───────────────────────────────────────────
 
   void operator()(cas::tensor_trace const &v) override {

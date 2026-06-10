@@ -20,6 +20,7 @@
 #include <numsim_cas/scalar/scalar_std.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_operators.h>
+#include <numsim_cas/tensor/tensor_std.h>
 
 #include <fstream>
 #include <iostream>
@@ -46,10 +47,10 @@ auto write_single_file(numsim::codegen::ConstitutiveModel const &model,
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc < 6) {
+  if (argc < 7) {
     std::cerr << "usage: " << argv[0]
               << " <CompileCheck.h> <HardeningCheck.h> <NewtonCheck.h>"
-                 " <AutocatalyticCheck.h> <CoupledCheck.h>\n";
+                 " <AutocatalyticCheck.h> <CoupledCheck.h> <PiecewiseCheck.h>\n";
     return 1;
   }
 
@@ -147,6 +148,24 @@ int main(int argc, char *argv[]) {
     model.add_scalar_evolution_equation(b, K2 * a.current);
     model.enable_local_newton();
     if (int rc = write_single_file(model, argv[5]); rc != 0) return rc;
+  }
+
+  // ── Recipe 6: PIECEWISE tensor output (CAS f3e799e if_then_else) ─────
+  //
+  // `if_then_else(x, 2*eps, -eps)` builds a `tensor_if_then_else` node —
+  // a SCALAR condition selecting between two TENSOR branches. The CAS pin
+  // bump (#275/#285, move_to_virtual) made codegen's tensor/t2s visitors
+  // grow these as pure-virtuals; this exercises the materialized-ternary
+  // emission `(cond != 0.0 ? tmech::tensor<…>(then) : tmech::tensor<…>(else))`
+  // end-to-end. The driver compiles it against real tmech and verifies both
+  // branches numerically — the lock that proves the emitted construct is a
+  // valid tmech expression, which a string test cannot.
+  {
+    ConstitutiveModel model("PiecewiseCheck");
+    auto x = model.add_scalar_input("x");
+    auto eps = model.add_tensor_input("eps", 3, 2);
+    model.add_output("sigma", if_then_else(x, 2.0 * eps, -eps));
+    if (int rc = write_single_file(model, argv[6]); rc != 0) return rc;
   }
 
   return 0;

@@ -11,6 +11,7 @@
 #include "CoupledCheck.h"
 #include "HardeningCheck.h"
 #include "NewtonCheck.h"
+#include "PiecewiseCheck.h"
 #include <cmath>
 #include <gtest/gtest.h>
 #include <tmech/tmech.h>
@@ -221,4 +222,32 @@ TEST(CompileCheckGenerated, CoupledNewtonMatchesAnalyticLinearSolve) {
   // off-diagonals) would NOT satisfy the residuals — a_ref != b_ref so the
   // answer is genuinely orientation-sensitive.
   EXPECT_GT(std::abs(a_ref - b_ref), 0.1);
+}
+
+// CAS f3e799e catch-up (#275/#285): the `tensor_if_then_else` node — a SCALAR
+// condition selecting between two TENSOR branches — emits as a materialized
+// ternary `(cond != 0.0 ? tmech::tensor<…>(then) : tmech::tensor<…>(else))`.
+// The move_to_virtual refactor turned codegen's tensor/t2s visitor overrides
+// into pure-virtuals; this compile-AND-RUN check is the lock that the emitted
+// construct is a valid tmech expression AND that both branches are selected
+// correctly — neither of which a string test can prove. PiecewiseCheck emits
+// `sigma = (x != 0 ? 2*eps : -eps)`.
+TEST(CompileCheckGenerated, PiecewiseTensorSelectsBranchAndCompilesVsTmech) {
+  tmech::tensor<double, 3, 2> eps;  // zero-initialised
+  eps(0, 0) = 1.0;
+  eps(1, 1) = 2.0;
+  eps(0, 1) = eps(1, 0) = 0.5;
+  tmech::tensor<double, 3, 2> sigma;
+
+  // x != 0 ⇒ then branch (2*eps)
+  PiecewiseCheck_compute(1.0, eps, sigma);
+  EXPECT_NEAR(sigma(0, 0), 2.0, 1e-12);
+  EXPECT_NEAR(sigma(1, 1), 4.0, 1e-12);
+  EXPECT_NEAR(sigma(0, 1), 1.0, 1e-12);
+
+  // x == 0 ⇒ else branch (-eps)
+  PiecewiseCheck_compute(0.0, eps, sigma);
+  EXPECT_NEAR(sigma(0, 0), -1.0, 1e-12);
+  EXPECT_NEAR(sigma(1, 1), -2.0, 1e-12);
+  EXPECT_NEAR(sigma(0, 1), -0.5, 1e-12);
 }

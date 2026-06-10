@@ -125,7 +125,7 @@ else()
     CPMAddPackage(
         NAME numsim_cas
         GITHUB_REPOSITORY NumSim-Stack/numsim-cas
-        GIT_TAG dd5383837362349c67d65ea83756e4b490c7c6bc
+        GIT_TAG f3e799e757a42c4123c62d5a92df8a54b99c7968
         SYSTEM YES
         EXCLUDE_FROM_ALL YES
         OPTIONS

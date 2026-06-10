@@ -147,6 +147,22 @@ public:
                                      wrap_if_compound(rhs));
   }
 
+  // Piecewise tensor selection with a SCALAR condition. The two branches are
+  // tmech expression templates of (generally) different types, so a C++
+  // ternary needs a common type — materialise both to a concrete
+  // `tmech::tensor<double, dim, rank>` (same dim/rank, asserted equal in the
+  // node). The condition goes through the scalar emitter.
+  void operator()(cas::tensor_if_then_else const &v) override {
+    auto cond = m_scalar.apply(v.expr_cond());
+    auto then_branch = apply(v.expr_then());
+    auto else_branch = apply(v.expr_else());
+    std::string const tt = "tmech::tensor<double, " + std::to_string(v.dim()) +
+                           ", " + std::to_string(v.rank()) + ">";
+    m_result = register_temp(
+        &v, "(" + wrap_if_compound(cond) + " != 0.0 ? " + tt + "(" +
+                then_branch + ") : " + tt + "(" + else_branch + "))");
+  }
+
   // ─── Phase A stubs — node types not yet implemented ─────────────
 
 #define NUMSIM_CODEGEN_TENSOR_STUB(T)                                          \
