@@ -1,6 +1,7 @@
 #ifndef NUMSIM_CODEGEN_TARGETS_STANDALONE_CXX_H
 #define NUMSIM_CODEGEN_TARGETS_STANDALONE_CXX_H
 
+#include <numsim_codegen/code_emit/linear_algebra_emitter.h>
 #include <numsim_codegen/targets/target.h>
 
 namespace numsim::codegen {
@@ -9,11 +10,26 @@ namespace numsim::codegen {
 // compute function with the user's declared signature. No framework
 // boundary; the user calls the function directly with tmech::tensor
 // arguments. This is the simplest target and the one used by tests.
+//
+// Phase 3b-2b: takes the dense-solve backend for coupled local-Newton systems
+// (default Eigen). The SAME instance drives both emission and the include, so
+// they cannot disagree, and a single build can target different backends per
+// output (e.g. Armadillo here, Eigen for MOOSE).
 class StandaloneCxxTarget : public Target {
 public:
+  explicit StandaloneCxxTarget(
+      LinearAlgebraEmitter const &la = default_linear_algebra_emitter())
+      : m_la(la) {}
+  // `m_la` borrows — reject a temporary emitter at compile time so it can't
+  // dangle (PR #83 round-4 review). Pass an accessor singleton
+  // (default_/eigen_/armadillo_linear_algebra_emitter()), not `Emitter{}`.
+  StandaloneCxxTarget(LinearAlgebraEmitter const &&) = delete;
   [[nodiscard]] auto emit(ConstitutiveModel const &model) const
       -> std::vector<EmittedFile> override;
   [[nodiscard]] auto target_name() const -> std::string override;
+
+private:
+  LinearAlgebraEmitter const &m_la;
 };
 
 } // namespace numsim::codegen

@@ -1,6 +1,7 @@
 #ifndef NUMSIM_CODEGEN_TARGETS_MOOSE_MATERIAL_H
 #define NUMSIM_CODEGEN_TARGETS_MOOSE_MATERIAL_H
 
+#include <numsim_codegen/code_emit/linear_algebra_emitter.h>
 #include <numsim_codegen/targets/target.h>
 
 #include <string>
@@ -27,8 +28,13 @@ namespace numsim::codegen {
 // decisions — user-defined roles flow through transparently.
 class MooseMaterialTarget : public Target {
 public:
-  explicit MooseMaterialTarget(std::string app_name = "MyApp")
-      : m_app_name(std::move(app_name)) {}
+  explicit MooseMaterialTarget(
+      std::string app_name = "MyApp",
+      LinearAlgebraEmitter const &la = default_linear_algebra_emitter())
+      : m_app_name(std::move(app_name)), m_la(la) {}
+  // `m_la` borrows — reject a temporary emitter at compile time (PR #83
+  // round-4 review). Pass an accessor singleton, not `Emitter{}`.
+  MooseMaterialTarget(std::string, LinearAlgebraEmitter const &&) = delete;
 
   [[nodiscard]] auto emit(ConstitutiveModel const &model) const
       -> std::vector<EmittedFile> override;
@@ -36,6 +42,7 @@ public:
 
 private:
   std::string m_app_name;
+  LinearAlgebraEmitter const &m_la;
 };
 
 } // namespace numsim::codegen

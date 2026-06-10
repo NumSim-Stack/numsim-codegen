@@ -16,6 +16,7 @@ namespace numsim::codegen {
 
 struct SymbolDecl;
 struct StateVariable;
+class LinearAlgebraEmitter;
 
 // Phase 3a-2 (issue #75): one in-function Newton solve recorded by
 // `LocalNewtonLoweringPass` and rendered by `CodeEmitPass`. Each segment
@@ -30,6 +31,32 @@ struct NewtonSegment {
   std::string state_var_name;
   cas::expression_holder<cas::scalar_expression> residual;
   cas::expression_holder<cas::scalar_expression> jacobian;
+  double tol;
+  int max_iter;
+};
+
+// Phase 3b-2b (issue #35): a COUPLED local Newton system of N>1 scalar unknowns.
+// Produced by LocalNewtonLoweringPass when a group of evolution equations
+// reference each other's current state variable (multi-surface plasticity etc.)
+// — those equations cannot be solved independently. The generated function
+// declares one local iterate per unknown, then runs a single Newton loop that
+// each iteration assembles the residual vector R (size N) and the dense Jacobian
+// J (N×N, `jacobian[i][j] = ∂R_i/∂x_j`), solves `J·Δx = R`, and updates
+// `x -= Δx` until `max|R_i| < tol` or `max_iter`. Uncoupled equations stay as
+// 1×1 `NewtonSegment`s (the existing scalar-reciprocal path, byte-identical).
+//
+// SCALAR-UNKNOWNS ONLY (PR #83 round-2): each `unknowns[i]` is one `double` and
+// the emit hard-codes `Eigen::Matrix<double,N,1>` / `x -= dx(i)`. Phase 3b-2a
+// (Fischer-Burmeister) and #285 t2s residuals fit unchanged (an FB multiplier is
+// just another scalar unknown + residual row; a t2s residual still produces a
+// scalar). Phase 3b-2d (tensor unknowns — e.g. a back-stress tensor) does NOT
+// fit and will need a sibling type / block generalization, not a mangled
+// `unknowns: vector<string>`.
+struct NewtonSystem {
+  std::vector<std::string> unknowns;                            // size N
+  std::vector<cas::expression_holder<cas::scalar_expression>> residuals; // N
+  std::vector<std::vector<cas::expression_holder<cas::scalar_expression>>>
+      jacobian; // N×N, row-major: jacobian[i][j] = ∂R_i/∂x_j
   double tol;
   int max_iter;
 };
@@ -62,8 +89,15 @@ struct PassContext {
   std::unordered_map<std::string, std::size_t> symbol_lookup;
   // Phase 3a-2 (issue #75): populated by LocalNewtonLoweringPass, consumed
   // by CodeEmitPass. Empty unless the recipe opted into local Newton
-  // solving (`ConstitutiveModel::enable_local_newton`).
+  // solving (`ConstitutiveModel::enable_local_newton`). Holds the 1×1
+  // (uncoupled) solves; coupled groups go in `newton_systems` below.
   std::vector<NewtonSegment> newton_segments;
+  // Phase 3b-2b (issue #35): coupled N>1 systems (mutually-referencing
+  // evolution equations). Rendered as a single dense Newton loop.
+  std::vector<NewtonSystem> newton_systems;
+  // Phase 3b-2b: the dense-solve backend for coupled systems, injected by the
+  // caller (per-target). Null → CodeEmitPass uses the Eigen default.
+  LinearAlgebraEmitter const *linear_algebra = nullptr;
 };
 
 // Why a symbol lookup failed. The pre-modernization API returned a

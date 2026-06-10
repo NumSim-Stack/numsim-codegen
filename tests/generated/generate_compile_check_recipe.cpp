@@ -46,10 +46,10 @@ auto write_single_file(numsim::codegen::ConstitutiveModel const &model,
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc < 5) {
+  if (argc < 6) {
     std::cerr << "usage: " << argv[0]
               << " <CompileCheck.h> <HardeningCheck.h> <NewtonCheck.h>"
-                 " <AutocatalyticCheck.h>\n";
+                 " <AutocatalyticCheck.h> <CoupledCheck.h>\n";
     return 1;
   }
 
@@ -122,6 +122,31 @@ int main(int argc, char *argv[]) {
         c, (K1 + K2 * c.current) * pow(one - c.current, n));
     model.enable_local_newton();
     if (int rc = write_single_file(model, argv[4]); rc != 0) return rc;
+  }
+
+  // ── Recipe 5: COUPLED 2×2 Newton solve (Phase 3b-2b, issue #35) ──────
+  //
+  // Two mutually-referencing evolution equations a' = K1·b, b' = K2·a with
+  // DISTINCT coefficients (asymmetric, so a transposed Jacobian would give a
+  // different — wrong — answer). LocalNewtonLoweringPass detects the coupling
+  // and emits ONE dense Newton loop solved with Eigen. Backward-Euler is
+  // linear here, so the analytic fixed point is the solution of
+  //   [1, −dt·K1; −dt·K2, 1] [a; b] = [a_old; b_old]
+  // The driver compares the generated solve against that closed form — the
+  // numerical lock the string-matching structural tests cannot provide
+  // (PR #83 review F3). Requires Eigen on the compile path.
+  {
+    ConstitutiveModel model("CoupledCheck");
+    auto K1 = model.add_parameter("K1", 1.0);
+    auto K2 = model.add_parameter("K2", 2.0);
+    auto a = model.add_scalar_state_variable(
+        "a", make_expression<scalar_constant>(0.0));
+    auto b = model.add_scalar_state_variable(
+        "b", make_expression<scalar_constant>(0.0));
+    model.add_scalar_evolution_equation(a, K1 * b.current);
+    model.add_scalar_evolution_equation(b, K2 * a.current);
+    model.enable_local_newton();
+    if (int rc = write_single_file(model, argv[5]); rc != 0) return rc;
   }
 
   return 0;

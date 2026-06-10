@@ -23,6 +23,7 @@
 // pattern for callers.
 
 #include <numsim_codegen/code_emit/codegen_context.h>
+#include <numsim_codegen/code_emit/linear_algebra_emitter.h>
 #include <numsim_codegen/passes/recipe_view.h>
 
 #include <cstddef>
@@ -85,6 +86,19 @@ struct RenderedNewtonSegment {
   int max_iter;
 };
 
+// Phase 3b-2b (issue #35): a coupled N>1 Newton system after CodeEmitPass has
+// rendered its loop-local CSE temps + the residual-vector and N×N Jacobian-matrix
+// right-hand sides to text. `render_compute_function` emits a single Newton loop
+// that assembles R/J, solves the dense system, and updates the iterates.
+struct RenderedNewtonSystem {
+  std::vector<std::string> unknowns;             // size N, e.g. {"a","b"}
+  std::string loop_local_decls;                  // shared CSE temps (4-indented)
+  std::vector<std::string> residual_rhs;         // size N
+  std::vector<std::vector<std::string>> jacobian_rhs; // N×N, [i][j] = ∂R_i/∂x_j
+  double tol;
+  int max_iter;
+};
+
 // Render the function-frame source (signature + body + output writes)
 // from a populated CodeGenContext and the model view. Bodies are inline
 // at the bottom of recipe.h (where ConstitutiveModel is complete and
@@ -96,7 +110,10 @@ struct RenderedNewtonSegment {
 [[nodiscard]] auto render_compute_function(
     RecipeView model, CodeGenContext const &ctx,
     std::vector<std::string> const &output_rhs,
-    std::vector<RenderedNewtonSegment> const &newton = {}) -> std::string;
+    std::vector<RenderedNewtonSegment> const &newton = {},
+    std::vector<RenderedNewtonSystem> const &newton_systems = {},
+    LinearAlgebraEmitter const &la = default_linear_algebra_emitter())
+    -> std::string;
 
 } // namespace numsim::codegen
 

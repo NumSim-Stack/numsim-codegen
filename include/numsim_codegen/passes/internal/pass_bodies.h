@@ -412,16 +412,96 @@ inline void LocalNewtonLoweringPass::run(PassContext &pctx) {
   auto const opts = model.newton_options();
   auto const &equations = model.evolution_equations();
   auto const &svs = model.state_variables();
+  std::size_t const n = equations.size();
+  if (n == 0) {
+    return;
+  }
 
-  pctx.newton_segments.reserve(equations.size());
-  for (auto const &eq : equations) {
-    auto const &sv = svs[eq.state_variable_idx];
-    auto built = detail::build_backward_euler_residual(
-        model, eq, "LocalNewtonLoweringPass");
-    auto jacobian = detail::build_backward_euler_jacobian(built);
-    pctx.newton_segments.push_back(NewtonSegment{
-        sv.name, std::move(built.residual), std::move(jacobian),
-        opts.tol, opts.max_iter});
+  // Build each equation's backward-Euler residual once, recording its unknown
+  // (current state-variable symbol) name + its scalar handle (the
+  // differentiation variable).
+  std::vector<std::string> names(n);
+  std::vector<detail::BackwardEulerResidual> be;
+  be.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    auto const &sv = svs[equations[i].state_variable_idx];
+    names[i] = model.symbols()[sv.current_symbol_idx].name;
+    be.push_back(detail::build_backward_euler_residual(
+        model, equations[i], "LocalNewtonLoweringPass"));
+  }
+
+  // Coupling: equations i and j are coupled if R_i references x_j (or vice
+  // versa). A coupled group cannot be solved independently — it becomes one
+  // dense Newton system. Detected via a scalar-leaf scan of each residual.
+  // Union-Find over equation indices (no recursion, no extra headers).
+  //
+  // POLICY (PR #83 round-2 #1): coupling is AUTO-detected. This is a deliberate
+  // choice, not an assumption — it always finds the correct fixed point (a
+  // monolithic solve and a converged staggered scheme share the same root), but
+  // it does convert an intended SINGLE-PASS operator-split into a fully-implicit
+  // solve, which differs at finite dt. No public API promises "referenced
+  // equations stay independent", so an opt-out (`NewtonOptions{coupling=…}` /
+  // explicit grouping) is additive later without a break when 3b-2c needs it.
+  std::vector<std::set<std::string>> leaves(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    LeafCollector lc;
+    lc.collect_scalar(be[i].residual);
+    leaves[i] = lc.scalar_names();
+  }
+  std::vector<std::size_t> parent(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    parent[i] = i;
+  }
+  auto find = [&](std::size_t a) {
+    while (parent[a] != a) {
+      parent[a] = parent[parent[a]]; // path halving
+      a = parent[a];
+    }
+    return a;
+  };
+  for (std::size_t i = 0; i < n; ++i) {
+    for (std::size_t j = 0; j < n; ++j) {
+      if (i != j && leaves[i].contains(names[j])) {
+        parent[find(i)] = find(j);
+      }
+    }
+  }
+  // Group by representative. `comps[root]` collects members in increasing-index
+  // order; iterating comps in index order keeps uncoupled equations in
+  // evolution-equation order (so the single-scalar emit stays byte-identical).
+  std::vector<std::vector<std::size_t>> comps(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    comps[find(i)].push_back(i);
+  }
+
+  for (auto const &members : comps) {
+    if (members.empty()) {
+      continue;
+    }
+    if (members.size() == 1) {
+      auto const i = members[0];
+      auto jac = detail::build_backward_euler_jacobian(be[i]);
+      pctx.newton_segments.push_back(NewtonSegment{
+          names[i], be[i].residual, std::move(jac), opts.tol, opts.max_iter});
+    } else {
+      // Coupled N×N system: residual vector + dense Jacobian ∂R_i/∂x_j.
+      NewtonSystem sys;
+      sys.tol = opts.tol;
+      sys.max_iter = opts.max_iter;
+      for (auto m : members) {
+        sys.unknowns.push_back(names[m]);
+        sys.residuals.push_back(be[m].residual);
+      }
+      sys.jacobian.resize(members.size());
+      for (std::size_t i = 0; i < members.size(); ++i) {
+        sys.jacobian[i].reserve(members.size());
+        for (std::size_t j = 0; j < members.size(); ++j) {
+          sys.jacobian[i].push_back(
+              cas::diff(be[members[i]].residual, be[members[j]].cur_expr));
+        }
+      }
+      pctx.newton_systems.push_back(std::move(sys));
+    }
   }
 }
 
@@ -457,9 +537,37 @@ inline void CodeEmitPass::run(PassContext &pctx) {
         seg.state_var_name, ctx.render_statements("    "),
         std::move(r_rhs), std::move(j_rhs), seg.tol, seg.max_iter});
   }
-  // Clean slate so the output temps below don't include any segment's
-  // loop-local statements.
-  if (!pctx.newton_segments.empty()) {
+  // Phase 3b-2b: render each COUPLED system. One reset() per system so the
+  // residual vector + the whole N×N Jacobian share ONE set of loop-local CSE
+  // temps (computed once per Newton iteration). Apply order (residuals then
+  // Jacobian) only affects temp numbering, not correctness; render_statements
+  // captures the shared decls once.
+  std::vector<RenderedNewtonSystem> newton_sys;
+  newton_sys.reserve(pctx.newton_systems.size());
+  for (auto const &sys : pctx.newton_systems) {
+    ctx.reset();
+    RenderedNewtonSystem r;
+    r.unknowns = sys.unknowns;
+    r.tol = sys.tol;
+    r.max_iter = sys.max_iter;
+    r.residual_rhs.reserve(sys.residuals.size());
+    for (auto const &res : sys.residuals) {
+      r.residual_rhs.push_back(pipeline.scalar().apply(res));
+    }
+    r.jacobian_rhs.resize(sys.jacobian.size());
+    for (std::size_t i = 0; i < sys.jacobian.size(); ++i) {
+      r.jacobian_rhs[i].reserve(sys.jacobian[i].size());
+      for (auto const &je : sys.jacobian[i]) {
+        r.jacobian_rhs[i].push_back(pipeline.scalar().apply(je));
+      }
+    }
+    r.loop_local_decls = ctx.render_statements("    ");
+    newton_sys.push_back(std::move(r));
+  }
+
+  // Clean slate so the output temps below don't include any segment's or
+  // system's loop-local statements.
+  if (!pctx.newton_segments.empty() || !pctx.newton_systems.empty()) {
     ctx.reset();
   }
 
@@ -481,7 +589,10 @@ inline void CodeEmitPass::run(PassContext &pctx) {
   }
 
   pctx.compute_function_source =
-      render_compute_function(model, ctx, output_rhs, newton);
+      render_compute_function(
+          model, ctx, output_rhs, newton, newton_sys,
+          pctx.linear_algebra ? *pctx.linear_algebra
+                              : default_linear_algebra_emitter());
 }
 
 } // namespace numsim::codegen
