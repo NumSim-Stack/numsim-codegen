@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <format>
+#include <limits>
 #include <string>
 
 namespace numsim::codegen {
@@ -37,6 +38,17 @@ auto header_of(std::vector<EmittedFile> const &files) -> std::string {
   for (auto const &f : files)
     if (f.kind == EmittedFile::Kind::Header) return f.contents;
   return {};
+}
+
+// Returns the emit() exception message (or a sentinel) so a rejection test can
+// assert WHICH guard fired, not merely that *some* runtime_error was thrown.
+auto emit_throw_message(ConstitutiveModel const &m) -> std::string {
+  try {
+    NumSimMaterialTarget{}.emit(m);
+  } catch (std::exception const &e) {
+    return e.what();
+  }
+  return "<did not throw>";
 }
 
 TEST(NumSimMaterialTarget, EmitsHeaderAndJsonConfig) {
@@ -124,18 +136,21 @@ TEST(NumSimMaterialTarget, RejectsMultipleCoupledStates) {
   auto b = m.add_scalar_state_variable("b", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(a, K1 * b.current);
   m.add_scalar_evolution_equation(b, K2 * a.current);
-  EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+  // Hits the equation-count guard.
+  EXPECT_NE(emit_throw_message(m).find("exactly one scalar state variable"),
+            std::string::npos);
 }
 
 // Review #88: silently dropping a declared output/tangent/input is worse than a
-// hard failure for a code generator — reject loudly instead.
+// hard failure for a code generator — reject loudly instead. Round-2: each test
+// asserts WHICH guard fired (message substring), not just that it threw.
 TEST(NumSimMaterialTarget, RejectsDeclaredOutput) {
   ConstitutiveModel m("WithOutput");
   auto K = m.add_parameter("K", -1.0);
   auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(a, K * a.current);
   m.add_output("extra", K * a.current); // would be silently dropped
-  EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_NE(emit_throw_message(m).find("add_output"), std::string::npos);
 }
 
 TEST(NumSimMaterialTarget, RejectsDeclaredInput) {
@@ -144,7 +159,7 @@ TEST(NumSimMaterialTarget, RejectsDeclaredInput) {
   m.add_scalar_input("temperature"); // scalar inputs are a follow-up
   auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(a, K * a.current);
-  EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_NE(emit_throw_message(m).find("declared inputs"), std::string::npos);
 }
 
 // Review #88 (cpp-pro): a parameter named like an emitted fixed member would
@@ -154,7 +169,21 @@ TEST(NumSimMaterialTarget, RejectsReservedParameterName) {
   auto rate = m.add_parameter("rate", 1.0); // collides with m_rate
   auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(a, rate * a.current);
-  EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_NE(emit_throw_message(m).find("collides with an emitted member"),
+            std::string::npos);
+}
+
+// Round-2 (code-reviewer M2): the STATE-name reserved guard branch — previously
+// untested (only the parameter loop was covered).
+TEST(NumSimMaterialTarget, RejectsReservedStateName) {
+  ConstitutiveModel m("ReservedState");
+  auto K = m.add_parameter("K", -1.0);
+  // state literally named `rate` → would emit a duplicate m_rate member.
+  auto rate =
+      m.add_scalar_state_variable("rate", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(rate, K * rate.current);
+  EXPECT_NE(emit_throw_message(m).find("collides with an emitted member"),
+            std::string::npos);
 }
 
 // Review #88 (cpp-pro): a rate function cannot depend on dt / old-state /
@@ -166,7 +195,17 @@ TEST(NumSimMaterialTarget, RejectsRateDependingOnOldState) {
   auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
   // rate references a.previous (the old-step value) — invalid for a rate fn.
   m.add_scalar_evolution_equation(a, K * (a.current - a.previous));
-  EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_NE(emit_throw_message(m).find("neither the state"), std::string::npos);
+}
+
+// Round-2 (cpp-pro): a non-finite default would emit `value_type{nan}`/`{inf}`
+// (no such C++ literal) and an invalid JSON number — reject at emit time.
+TEST(NumSimMaterialTarget, RejectsNonFiniteDefault) {
+  ConstitutiveModel m("NonFinite");
+  auto K = m.add_parameter("K", std::numeric_limits<double>::infinity());
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  EXPECT_NE(emit_throw_message(m).find("non-finite default"), std::string::npos);
 }
 
 // Review #88 (cpp-pro / code-reviewer): non-round float defaults must round-trip

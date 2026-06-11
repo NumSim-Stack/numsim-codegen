@@ -7,6 +7,7 @@
 
 #include <numsim_cas/core/diff.h>
 
+#include <cmath>
 #include <format>
 #include <set>
 #include <sstream>
@@ -35,7 +36,10 @@ constexpr char const *material_base_include =
 
 // A recipe symbol whose name equals one of the emitted fixed members would
 // produce a duplicate member / duplicate ctor initializer in the generated
-// material (uncompilable). Reject at emit time.
+// material (uncompilable). Reject at emit time. Note `state_property` ("state")
+// is intentionally NOT reserved: it is only an edge-property KEY string, never
+// an emitted C++ member name (the state member is `m_<state>`), so a recipe
+// whose state/parameter is literally named `state` is legitimate.
 bool is_reserved_name(std::string const &n) {
   return n == contract::rate_property ||
          n == contract::rate_derivative_property ||
@@ -124,6 +128,14 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
           "NumSimMaterialTarget: parameter name '" + p.name +
           "' collides with an emitted member (rate/rate_derivative/"
           "integrator_source); rename it.");
+    }
+    // A non-finite default would emit `value_type{nan}`/`{inf}` (no such C++
+    // literal) and an invalid JSON number — reject rather than emit broken code.
+    if (p.default_value.has_value() && !std::isfinite(*p.default_value)) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: parameter '" + p.name +
+          "' has a non-finite default (" + fmt(*p.default_value) +
+          "); cannot emit as a C++ literal or JSON number.");
     }
   }
 
@@ -239,6 +251,9 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
         << "\").template add<numsim_core::set_default>(value_type{"
         << fmt(*p.default_value) << "});\n";
     } else {
+      // Defensive: `add_parameter` always sets a default, so this is currently
+      // unreachable via the public API. Kept (with the JSON-omission sibling
+      // below) for the day a no-default/required-parameter API lands.
       h << "    para.template insert<value_type>(\"" << p.name
         << "\").template add<numsim_core::is_required>();\n";
     }
