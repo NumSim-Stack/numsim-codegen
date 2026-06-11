@@ -44,7 +44,7 @@ auto header_of(std::vector<EmittedFile> const &files) -> std::string {
 // assert WHICH guard fired, not merely that *some* runtime_error was thrown.
 auto emit_throw_message(ConstitutiveModel const &m) -> std::string {
   try {
-    NumSimMaterialTarget{}.emit(m);
+    (void)NumSimMaterialTarget{}.emit(m); // expected to throw; [[nodiscard]]
   } catch (std::exception const &e) {
     return e.what();
   }

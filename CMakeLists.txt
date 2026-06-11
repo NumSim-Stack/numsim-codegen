@@ -25,6 +25,11 @@ endif()
 option(NUMSIM_CODEGEN_BUILD_TESTS "Build numsim-codegen tests" ON)
 option(NUMSIM_CODEGEN_BUILD_EXAMPLES "Build numsim-codegen examples" ON)
 option(NUMSIM_CODEGEN_USE_LOCAL_CAS "Use a local numsim-cas checkout (set NUMSIM_CAS_SOURCE_DIR)" OFF)
+option(NUMSIM_CODEGEN_WERROR "Treat first-party warnings as errors (forced on in Debug)" OFF)
+
+# First-party warning set (numsim_codegen_warnings INTERFACE target). Defined
+# early so every first-party compiled target can link it PRIVATE.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/warnings.cmake)
 
 # ─── Dependency manager: CPM ───────────────────────────────────────────────
 #
@@ -170,7 +175,9 @@ add_library(numsim_codegen STATIC
     src/targets/moose_material.cpp
     src/targets/numsim_material.cpp)
 add_library(numsim::codegen ALIAS numsim_codegen)
-target_link_libraries(numsim_codegen PUBLIC numsim_codegen_headers)
+target_link_libraries(numsim_codegen
+    PUBLIC numsim_codegen_headers
+    PRIVATE numsim_codegen_warnings)
 
 # POSITION_INDEPENDENT_CODE ON: downstream MOOSE apps and similar consumers
 # typically build as shared libraries / plugins. Linking a non-PIC STATIC

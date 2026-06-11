@@ -39,8 +39,9 @@ TEST_P(RecipeRegistrySmoke, EmitsViaMooseTarget) {
 INSTANTIATE_TEST_SUITE_P(
     AllRegistryRecipes, RecipeRegistrySmoke,
     ::testing::ValuesIn(numsim::examples::registry()),
-    [](::testing::TestParamInfo<numsim::examples::RecipeEntry> const &info) {
-      return std::string(info.param.name);
+    [](::testing::TestParamInfo<numsim::examples::RecipeEntry> const &param_info) {
+      // `info` would shadow the gtest macro's own parameter (-Wshadow).
+      return std::string(param_info.param.name);
     });
 
 } // namespace numsim::codegen

@@ -113,7 +113,8 @@ TEST(RecipeView, RequireMutableModelThrowsOnConstView) {
   ConstitutiveModel model("M");
   RecipeView view(static_cast<ConstitutiveModel const &>(model));
   try {
-    view.require_mutable_model("TestMutatingPass");
+    // Expected to throw (const view); the [[nodiscard]] return is never reached.
+    (void)view.require_mutable_model("TestMutatingPass");
     FAIL() << "expected runtime_error when require_mutable on a const view";
   } catch (std::runtime_error const &e) {
     std::string msg(e.what());
