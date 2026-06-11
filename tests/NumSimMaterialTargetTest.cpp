@@ -85,7 +85,8 @@ TEST(NumSimMaterialTarget, MaterialConformsToRkIntegratorContract) {
 TEST(NumSimMaterialTarget, ComputeEmitsRateAndDerivative) {
   auto const src = header_of(NumSimMaterialTarget{}.emit(build_linear_hardening()));
   // f = K·α  → rate; ∂f/∂α = K → rate_derivative (cas::diff).
-  EXPECT_NE(src.find("const auto alpha = m_alpha.get();"), std::string::npos)
+  EXPECT_NE(src.find("[[maybe_unused]] const auto alpha = m_alpha.get();"),
+            std::string::npos)
       << src;
   EXPECT_NE(src.find("auto t0 = m_K * alpha;"), std::string::npos) << src;
   EXPECT_NE(src.find("m_rate = t0;"), std::string::npos) << src;
@@ -182,8 +183,25 @@ TEST(NumSimMaterialTarget, RejectsReservedStateName) {
   auto rate =
       m.add_scalar_state_variable("rate", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(rate, K * rate.current);
-  EXPECT_NE(emit_throw_message(m).find("collides with an emitted member"),
+  // Pin to the STATE branch specifically (the param branch shares the "collides"
+  // substring).
+  EXPECT_NE(emit_throw_message(m).find("state variable name 'rate'"),
             std::string::npos);
+}
+
+// Round-3: a recipe carrying an algorithmic tangent necessarily also has the
+// stress OUTPUT the tangent differentiates, so it is rejected by the outputs
+// guard first (the tangents() guard is therefore defensive/unreachable).
+// Confirm such a kitchen-sink unsupported recipe is rejected loudly.
+TEST(NumSimMaterialTarget, RejectsTangentBearingRecipe) {
+  ConstitutiveModel m("WithTangent");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, mu * a.current);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
+  EXPECT_NE(emit_throw_message(m).find("add_output"), std::string::npos);
 }
 
 // Review #88 (cpp-pro): a rate function cannot depend on dt / old-state /

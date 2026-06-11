@@ -83,6 +83,9 @@ void check_scope(ConstitutiveModel const &model) {
         model.outputs().front().name + "'.");
   }
   if (!model.tangents().empty()) {
+    // Defensive: a tangent's `of_output` names an existing output, so any
+    // tangent-bearing recipe is already rejected by the outputs() guard above.
+    // Kept so the rejection is explicit if outputs ever become supported first.
     throw std::runtime_error(
         "NumSimMaterialTarget: algorithmic tangents are out of scope for the "
         "rate material (Phase D emits tangent-block properties).");
@@ -90,7 +93,7 @@ void check_scope(ConstitutiveModel const &model) {
   if (!model.inputs().empty()) {
     throw std::runtime_error(
         "NumSimMaterialTarget: declared inputs ('" + model.inputs().front().name +
-        "') are not yet wired — scalar inputs (via add_input_history) are a "
+        "') are not yet wired into the rate material — scalar inputs are a "
         "Phase B follow-up.");
   }
 }
@@ -269,7 +272,11 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
     << contract::rate_derivative_property << " = df/d" << cur_name
     << " (cas::diff).\n";
   h << "  void compute() {\n";
-  h << "    const auto " << cur_name << " = m_" << cur_name << ".get();\n";
+  // [[maybe_unused]]: a state-independent rate (e.g. dx/dt = const) never reads
+  // the state local — keep the binding uniform but suppress -Wunused-variable in
+  // a -Werror consumer build.
+  h << "    [[maybe_unused]] const auto " << cur_name << " = m_" << cur_name
+    << ".get();\n";
   if (!decls.empty()) h << decls;
   h << "    m_rate = " << rate_rhs << ";\n";
   h << "    m_rate_derivative = " << drate_rhs << ";\n";
@@ -280,7 +287,10 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
   h << "  value_type& m_rate;\n";
   h << "  value_type& m_rate_derivative;\n";
   for (auto const &p : params) {
-    h << "  const value_type& m_" << p.name << ";\n";
+    // [[maybe_unused]]: a parameter declared but not referenced by the rate is
+    // still stored (it stays in the schema/JSON) — suppress clang's
+    // -Wunused-private-field in a -Werror consumer build.
+    h << "  [[maybe_unused]] const value_type& m_" << p.name << ";\n";
   }
   h << "  const std::string& m_integrator_source;\n";
   h << "  const numsim::materials::input_property<value_type,\n";
