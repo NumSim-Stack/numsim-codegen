@@ -19,9 +19,11 @@ namespace numsim::codegen {
 // `rate_derivative` (= ∂f/∂x, via cas::diff) as Local-edge properties, reading
 // `x` from the integrator's `state`. The compute() body is filled by the
 // existing scalar code emitter; this target adds only the material boilerplate
-// + property/parameter mapping + a JSON config. Tensor state, multiple coupled
-// states (needs numsim-materials#12), and scalar inputs are out of scope here
-// and throw with a clear message.
+// + property/parameter mapping + a JSON config. Anything this increment does
+// not emit — tensor state and coupled multi-state (needs numsim-materials
+// #11/#12), declared outputs/tangents/inputs, and a rate depending on dt or the
+// old-state — is REJECTED at emit time with a clear message, never silently
+// dropped.
 class NumSimMaterialTarget : public Target {
 public:
   [[nodiscard]] auto emit(ConstitutiveModel const &model) const

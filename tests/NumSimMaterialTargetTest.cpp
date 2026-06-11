@@ -15,6 +15,7 @@
 
 #include <gtest/gtest.h>
 
+#include <format>
 #include <string>
 
 namespace numsim::codegen {
@@ -105,11 +106,11 @@ TEST(NumSimMaterialTarget, JsonWiresIntegratorToMaterial) {
   EXPECT_NE(json.find("\"K\": -1"), std::string::npos) << json;
 }
 
-TEST(NumSimMaterialTarget, RejectsTensorStateForNow) {
-  // Tensor-valued state is out of scope for the first increment (needs Mandel +
-  // the vector solver, numsim-materials#11/#12). Evolution is scalar-only in the
-  // recipe API, so a tensor state has no evolution equation — rejected by the
-  // scope guard.
+TEST(NumSimMaterialTarget, RejectsTensorStateMissingEvolution) {
+  // Tensor-valued state is out of scope (needs Mandel + the vector solver,
+  // numsim-materials#11/#12). Evolution is scalar-only in the recipe API, so a
+  // tensor state has no evolution equation and is rejected by the equation-count
+  // guard (the tensor-kind branch is defensive/unreachable via the public API).
   ConstitutiveModel m("TensorState");
   m.add_tensor_state_variable("ep", 3, 2, make_expression<tensor_zero>(3, 2));
   EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
@@ -124,6 +125,65 @@ TEST(NumSimMaterialTarget, RejectsMultipleCoupledStates) {
   m.add_scalar_evolution_equation(a, K1 * b.current);
   m.add_scalar_evolution_equation(b, K2 * a.current);
   EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+}
+
+// Review #88: silently dropping a declared output/tangent/input is worse than a
+// hard failure for a code generator — reject loudly instead.
+TEST(NumSimMaterialTarget, RejectsDeclaredOutput) {
+  ConstitutiveModel m("WithOutput");
+  auto K = m.add_parameter("K", -1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  m.add_output("extra", K * a.current); // would be silently dropped
+  EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+}
+
+TEST(NumSimMaterialTarget, RejectsDeclaredInput) {
+  ConstitutiveModel m("WithInput");
+  auto K = m.add_parameter("K", -1.0);
+  m.add_scalar_input("temperature"); // scalar inputs are a follow-up
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+}
+
+// Review #88 (cpp-pro): a parameter named like an emitted fixed member would
+// produce a duplicate member / ctor initializer in the generated material.
+TEST(NumSimMaterialTarget, RejectsReservedParameterName) {
+  ConstitutiveModel m("ReservedParam");
+  auto rate = m.add_parameter("rate", 1.0); // collides with m_rate
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, rate * a.current);
+  EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+}
+
+// Review #88 (cpp-pro): a rate function cannot depend on dt / old-state /
+// inputs — the integrator owns discretization. Reject at emit time rather than
+// emitting an unbound identifier that fails the consumer's build.
+TEST(NumSimMaterialTarget, RejectsRateDependingOnOldState) {
+  ConstitutiveModel m("UsesOldState");
+  auto K = m.add_parameter("K", -1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  // rate references a.previous (the old-step value) — invalid for a rate fn.
+  m.add_scalar_evolution_equation(a, K * (a.current - a.previous));
+  EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+}
+
+// Review #88 (cpp-pro / code-reviewer): non-round float defaults must round-trip
+// exactly into the emitted C++ and JSON (not truncate to ~6 sig figs).
+TEST(NumSimMaterialTarget, FloatDefaultRoundTrips) {
+  ConstitutiveModel m("Precise");
+  auto K = m.add_parameter("K", 1.0 / 3.0); // 0.3333333333333333
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  auto const src = header_of(NumSimMaterialTarget{}.emit(m));
+  // 6-sig-fig truncation would emit "0.333333"; the emitter uses the shortest
+  // round-tripping representation (std::format), reproduced here so the
+  // assertion can't drift from the formatter.
+  EXPECT_EQ(src.find("value_type{0.333333}"), std::string::npos) << src;
+  EXPECT_NE(src.find("value_type{" + std::format("{}", 1.0 / 3.0) + "}"),
+            std::string::npos)
+      << src;
 }
 
 } // namespace
