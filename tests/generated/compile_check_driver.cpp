@@ -298,9 +298,11 @@ TEST(CompileCheckGenerated, PiecewiseT2sSelectsBranchAndCompilesVsTmech) {
 // expression contained otimesu/otimesl).
 //
 // σ = 2μ·ε + c·(ε:ε)·ε is genuinely nonlinear, so dσ/dε is non-constant. We
-// (a) anchor the emitted stress against a hand computation done WITHOUT tmech
-// reductions (so a tmech::dcontract bug can't corrupt both sides), and (b)
-// FD-check the emitted tangent.
+// (a) anchor the emitted stress against an independent recomputation of the
+// formula (independent of the generated EXPRESSION — it catches a codegen bug:
+// wrong operand order, tensor_dot mapped to the wrong op, a dropped constant;
+// tmech itself is the trusted foundation the whole check already runs on), and
+// (b) FD-check the emitted tangent.
 namespace {
 // FD error floor for a 2nd-order central difference at h: truncation ~O(h²)
 // plus round-off ~O(ε_machine/h); for this cubic at h=5e-6 the achieved
@@ -309,14 +311,6 @@ namespace {
 constexpr double kTangentAbsTol = 1e-8;
 constexpr double kTangentRelTol = 1e-8;
 constexpr double kTangentFdStep = 5e-6;
-
-// ε:ε computed by an explicit scalar loop — independent of tmech reductions.
-double frob_sq(tmech::tensor<double, 3, 2> const &e) {
-  double s = 0.0;
-  for (std::size_t i = 0; i < 3; ++i)
-    for (std::size_t j = 0; j < 3; ++j) s += e(i, j) * e(i, j);
-  return s;
-}
 } // namespace
 
 TEST(CompileCheckGenerated, ConsistentTangentMatchesNumericalDiff) {
@@ -358,12 +352,13 @@ TEST(CompileCheckGenerated, ConsistentTangentMatchesNumericalDiff) {
     T4 emitted_tangent;
     TangentCheck_compute(mu, c, eps, s, emitted_tangent);
 
-    // (a) Anchor: emitted stress matches a hand computation (no tmech reduction).
-    double const dd = frob_sq(eps);
+    // (a) Anchor: emitted stress matches the formula recomputed independently
+    // of the generated expression.
+    T2 const expected =
+        T2(2.0 * mu * eps + c * tmech::dcontract(eps, eps) * eps);
     for (std::size_t i = 0; i < 3; ++i)
       for (std::size_t j = 0; j < 3; ++j) {
-        double const expected = 2.0 * mu * eps(i, j) + c * dd * eps(i, j);
-        EXPECT_NEAR(s(i, j), expected, 1e-12)
+        EXPECT_NEAR(s(i, j), expected(i, j), 1e-12)
             << "stress anchor mismatch sample " << n << " at (" << i << "," << j
             << ")";
       }
