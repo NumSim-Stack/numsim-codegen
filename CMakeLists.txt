@@ -173,7 +173,8 @@ target_compile_features(numsim_codegen_headers INTERFACE cxx_std_23)
 add_library(numsim_codegen STATIC
     src/targets/standalone_cxx.cpp
     src/targets/moose_material.cpp
-    src/targets/numsim_material.cpp)
+    src/targets/numsim_material.cpp
+    src/targets/target_factory.cpp)
 add_library(numsim::codegen ALIAS numsim_codegen)
 target_link_libraries(numsim_codegen
     PUBLIC numsim_codegen_headers
