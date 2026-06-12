@@ -31,11 +31,13 @@ add_executable(numsim_codegen_tests
     LocalNewtonTest.cpp
     AlgorithmicTangentTest.cpp
     LinearAlgebraEmitterTest.cpp
+    NumSimMaterialTargetTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests
     PRIVATE
         numsim::codegen
+        numsim_codegen_warnings
         GTest::gtest
 )
 # The registry smoke test consumes examples/recipe_registry.h directly.
@@ -54,7 +56,8 @@ gtest_discover_tests(numsim_codegen_tests)
 
 add_executable(generate_compile_check_recipe
     generated/generate_compile_check_recipe.cpp)
-target_link_libraries(generate_compile_check_recipe PRIVATE numsim::codegen)
+target_link_libraries(generate_compile_check_recipe
+    PRIVATE numsim::codegen numsim_codegen_warnings)
 
 set(GENERATED_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/CompileCheck.h)
 set(GENERATED_HARDENING_HEADER

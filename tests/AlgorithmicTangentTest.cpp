@@ -97,7 +97,9 @@ TEST(AlgorithmicTangent, CanonicalArgumentsTagsTangentAsTensorTangentOutput) {
   EXPECT_EQ(tan->dim, 3u);
   // The ordinary stress output stays a plain TensorOutput.
   for (auto const &a : args)
-    if (a.name == "stress") EXPECT_EQ(a.role, R::TensorOutput);
+    if (a.name == "stress") {
+      EXPECT_EQ(a.role, R::TensorOutput); // braces: EXPECT_EQ has an inner else
+    }
 }
 
 // The MOOSE call-site arg count must equal canonical_arguments — i.e. the

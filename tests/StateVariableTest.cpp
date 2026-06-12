@@ -247,7 +247,7 @@ TEST(StateVariable, StateVarsOnlyNoOutputsRecipeBuilds) {
   auto zero = cas::make_expression<cas::scalar_constant>(0.0);
   model.add_scalar_state_variable("alpha", zero);
   EXPECT_NO_THROW(model.validate());
-  EXPECT_NO_THROW(model.emit_compute_function());
+  EXPECT_NO_THROW((void)model.emit_compute_function());
 }
 
 TEST(StateVariable, MixedInputAndStateVarInOutput) {
@@ -264,7 +264,7 @@ TEST(StateVariable, MixedInputAndStateVarInOutput) {
   // sigma = K * (eps + alpha.current) — uses input + parameter +
   // state-var current in one expression.
   model.add_output("sigma", K * (eps + alpha.current));
-  EXPECT_NO_THROW(model.emit_compute_function());
+  EXPECT_NO_THROW((void)model.emit_compute_function());
 }
 
 // ─── StateVariable carries paired symbol indices (architect Q1) ─────
