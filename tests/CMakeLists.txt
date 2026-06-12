@@ -78,19 +78,22 @@ set(GENERATED_PIECEWISE_HEADER
 # only as a subterm (lifted into a tensor output via with_tensor_mul).
 set(GENERATED_PIECEWISE_T2S_HEADER
     ${CMAKE_CURRENT_BINARY_DIR}/generated/PiecewiseT2sCheck.h)
+# Verification spine (#90): nonlinear-stress consistent-tangent FD compile-check.
+set(GENERATED_TANGENT_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/TangentCheck.h)
 
 add_custom_command(
     OUTPUT ${GENERATED_HEADER} ${GENERATED_HARDENING_HEADER}
            ${GENERATED_NEWTON_HEADER} ${GENERATED_AUTOCAT_HEADER}
            ${GENERATED_COUPLED_HEADER} ${GENERATED_PIECEWISE_HEADER}
-           ${GENERATED_PIECEWISE_T2S_HEADER}
+           ${GENERATED_PIECEWISE_T2S_HEADER} ${GENERATED_TANGENT_HEADER}
     COMMAND ${CMAKE_COMMAND} -E make_directory
             ${CMAKE_CURRENT_BINARY_DIR}/generated
     COMMAND $<TARGET_FILE:generate_compile_check_recipe>
             ${GENERATED_HEADER} ${GENERATED_HARDENING_HEADER}
             ${GENERATED_NEWTON_HEADER} ${GENERATED_AUTOCAT_HEADER}
             ${GENERATED_COUPLED_HEADER} ${GENERATED_PIECEWISE_HEADER}
-            ${GENERATED_PIECEWISE_T2S_HEADER}
+            ${GENERATED_PIECEWISE_T2S_HEADER} ${GENERATED_TANGENT_HEADER}
     DEPENDS generate_compile_check_recipe
     COMMENT "Generating compile-check headers via numsim-codegen"
     VERBATIM)
@@ -113,9 +116,11 @@ add_executable(compile_check_driver
     ${GENERATED_AUTOCAT_HEADER}
     ${GENERATED_COUPLED_HEADER}
     ${GENERATED_PIECEWISE_HEADER}
-    ${GENERATED_PIECEWISE_T2S_HEADER})
+    ${GENERATED_PIECEWISE_T2S_HEADER}
+    ${GENERATED_TANGENT_HEADER})
 target_include_directories(compile_check_driver
-    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated ${eigen3_SOURCE_DIR})
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated ${eigen3_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(compile_check_driver
     PRIVATE numsim::codegen GTest::gtest GTest::gtest_main)
 

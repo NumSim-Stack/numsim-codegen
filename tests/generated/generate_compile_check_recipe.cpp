@@ -3,16 +3,16 @@
 // outputs are self-contained headers that the compile-check driver then
 // #include's.
 //
-// The recipes (kept in sync with compile_check_driver.cpp + tests/CMakeLists):
-//   1. **CompileCheck** — scalar/tensor inputs + parameters + outputs.
-//      Exercises the full elastic-recipe pipeline + adaptor zero-copy.
-//   2. **HardeningCheck** (Phase 3a-1) — scalar state variable +
-//      linear-hardening evolution equation. The generated function gains
-//      paired `_residual_out` + `_jacobian_out` parameters, and the
-//      driver verifies their numerical values match `(α−α_old)/dt − K·α`
-//      and `1/dt − K` respectively. End-to-end check that catches
-//      `cas::diff` regressions which substring-matching in
-//      `tests/LocalJacobianTest.cpp` cannot.
+// The recipes (each documented at its block below; kept in sync with
+// compile_check_driver.cpp + tests/CMakeLists, one argv path per recipe):
+//   1. CompileCheck       — elastic recipe pipeline + adaptor zero-copy
+//   2. HardeningCheck      — scalar state var + residual/jacobian emission
+//   3. NewtonCheck         — in-function local Newton (linear)
+//   4. AutocatalyticCheck  — in-function local Newton (nonlinear, iterates)
+//   5. CoupledCheck        — coupled 2×2 Newton (Eigen dense solve)
+//   6. PiecewiseCheck      — tensor_if_then_else emission vs tmech
+//   7. PiecewiseT2sCheck   — tensor_to_scalar_if_then_else (subterm)
+//   8. TangentCheck        — FD consistent-tangent verification (#90)
 
 #include <numsim_codegen/numsim_codegen.h>
 
@@ -22,6 +22,7 @@
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_operators.h>
 #include <numsim_cas/tensor/tensor_std.h>
+#include <numsim_cas/tensor_to_scalar/tensor_dot.h>
 #include <numsim_cas/tensor_to_scalar/tensor_norm.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_std.h>
 #include <numsim_cas/tensor_to_scalar/tensor_trace.h>
@@ -51,11 +52,11 @@ auto write_single_file(numsim::codegen::ConstitutiveModel const &model,
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc < 8) {
+  if (argc < 9) {
     std::cerr << "usage: " << argv[0]
               << " <CompileCheck.h> <HardeningCheck.h> <NewtonCheck.h>"
                  " <AutocatalyticCheck.h> <CoupledCheck.h> <PiecewiseCheck.h>"
-                 " <PiecewiseT2sCheck.h>\n";
+                 " <PiecewiseT2sCheck.h> <TangentCheck.h>\n";
     return 1;
   }
 
@@ -194,6 +195,32 @@ int main(int argc, char *argv[]) {
     auto sigma = make_expression<tensor_to_scalar_with_tensor_mul>(eps, pick);
     model.add_output("sigma", sigma);
     if (int rc = write_single_file(model, argv[7]); rc != 0) return rc;
+  }
+
+  // ── Recipe 8: consistent-tangent FD check (verification spine #90) ───
+  //
+  // Nonlinear hyperelastic stress σ = 2μ·ε + c·(ε:ε)·ε, so the consistent
+  // tangent dσ/dε is NON-constant (a linear σ would make FD trivially exact
+  // and test nothing). `add_algorithmic_tangent` emits dσ/dε via cas::diff.
+  // SCOPE: no state variable / no local Newton, so only the EXPLICIT term
+  // ∂σ/∂ε is exercised — the strain-coupled implicit correction (gated on
+  // numsim-cas#275) is absent and not verified here. See the driver test.
+  {
+    ConstitutiveModel model("TangentCheck");
+    auto mu = model.add_parameter("mu", 0.7);
+    auto c = model.add_parameter("c", 1.5);
+    // roles::Strain marks eps SYMMETRIC, so cas::diff returns the minor-
+    // symmetric rank-4 identity and the tangent is minor-symmetric (C_ijkl =
+    // C_ijlk) — as a stress-strain tangent must be, and as the symmetric FD
+    // reference (num_diff_sym_central) expects. (A plain input would give the
+    // non-symmetric δ_ik δ_jl identity — the FD harness catches that.)
+    auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
+    auto dot = make_expression<tensor_dot>(eps); // ε:ε (t2s)
+    auto sigma = 2 * mu * eps +
+                 make_expression<tensor_to_scalar_with_tensor_mul>(c * eps, dot);
+    model.add_output("stress", sigma, roles::Stress);
+    model.add_algorithmic_tangent("dstress_deps", "stress", "eps");
+    if (int rc = write_single_file(model, argv[8]); rc != 0) return rc;
   }
 
   return 0;
