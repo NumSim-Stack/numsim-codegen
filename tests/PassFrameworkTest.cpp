@@ -462,7 +462,7 @@ TEST(TensorSpaceConsistencyPass, RegistersAsSecondValidator) {
   auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
   auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
   model.add_output("stress", 2 * mu * eps, roles::Stress);
-  EXPECT_NO_THROW(model.emit_compute_function());
+  EXPECT_NO_THROW((void)model.emit_compute_function());
 }
 
 // ─── CodeEmitPass ────────────────────────────────────────────────────

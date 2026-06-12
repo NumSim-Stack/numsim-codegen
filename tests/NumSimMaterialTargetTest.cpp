@@ -126,7 +126,7 @@ TEST(NumSimMaterialTarget, RejectsTensorStateMissingEvolution) {
   // guard (the tensor-kind branch is defensive/unreachable via the public API).
   ConstitutiveModel m("TensorState");
   m.add_tensor_state_variable("ep", 3, 2, make_expression<tensor_zero>(3, 2));
-  EXPECT_THROW(NumSimMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_THROW((void)NumSimMaterialTarget{}.emit(m), std::runtime_error);
 }
 
 TEST(NumSimMaterialTarget, RejectsMultipleCoupledStates) {
