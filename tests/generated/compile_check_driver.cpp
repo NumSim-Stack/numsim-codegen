@@ -13,7 +13,10 @@
 #include "NewtonCheck.h"
 #include "PiecewiseCheck.h"
 #include "PiecewiseT2sCheck.h"
+#include "TangentCheck.h"
+#include "numerical_tangent_verifier.h"
 #include <cmath>
+#include <vector>
 #include <gtest/gtest.h>
 #include <tmech/tmech.h>
 
@@ -279,5 +282,64 @@ TEST(CompileCheckGenerated, PiecewiseT2sSelectsBranchAndCompilesVsTmech) {
     EXPECT_NEAR(sigma(0, 1), norm * 0.5, 1e-12);
     EXPECT_NEAR(sigma(1, 0), norm * 0.5, 1e-12);
     EXPECT_NEAR(sigma(0, 0), 0.0, 1e-12);
+  }
+}
+
+// Verification spine (numsim-codegen#90, item 1): the FIRST numerical check that
+// the emitted consistent tangent dσ/dε is correct — not just that it contains
+// the right tmech ops. TangentCheck emits σ = 2μ·ε + c·(ε:ε)·ε (nonlinear, so
+// dσ/dε is non-constant) + the algorithmic tangent via add_algorithmic_tangent.
+// We (a) anchor the emitted stress against an independent hand computation, and
+// (b) FD-check the emitted tangent against tmech::num_diff_sym_central of the
+// emitted stress, via the parameterized NumericalTangentVerifier.
+TEST(CompileCheckGenerated, ConsistentTangentMatchesNumericalDiff) {
+  using T2 = tmech::tensor<double, 3, 2>;
+  using T4 = tmech::tensor<double, 3, 4>;
+  double const mu = 0.7, c = 1.5;
+
+  // Generated signature: (mu, c, eps, stress_out, dstress_deps_out).
+  auto stress_only = [&](auto const &e) -> T2 {
+    T2 s;
+    T4 t;
+    TangentCheck_compute(mu, c, e, s, t);
+    return s;
+  };
+
+  // Moderate-magnitude symmetric strains, including shear, so the cubic term is
+  // a material fraction of the tangent (a tiny strain would mostly test 2μ).
+  std::vector<T2> samples(3);
+  samples[0].fill(0.0);
+  samples[0](0, 0) = 0.20; samples[0](1, 1) = -0.10; samples[0](2, 2) = 0.05;
+  samples[1].fill(0.0);
+  samples[1](0, 1) = samples[1](1, 0) = 0.25; samples[1](0, 0) = 0.15;
+  samples[2].fill(0.0);
+  samples[2](0, 0) = 0.30; samples[2](1, 1) = 0.20; samples[2](2, 2) = -0.25;
+  samples[2](0, 2) = samples[2](2, 0) = 0.12;
+
+  numsim::codegen::verify::NumericalTangentVerifier<3> const verifier(
+      {.abs_tol = 1e-7, .rel_tol = 1e-6, .fd_step = 5e-6});
+
+  for (std::size_t n = 0; n < samples.size(); ++n) {
+    auto const &eps = samples[n];
+    T2 s;
+    T4 emitted_tangent;
+    TangentCheck_compute(mu, c, eps, s, emitted_tangent);
+
+    // (a) Anchor: emitted stress matches the independent formula.
+    T2 const expected =
+        T2(2.0 * mu * eps + c * tmech::dcontract(eps, eps) * eps);
+    for (std::size_t i = 0; i < 3; ++i)
+      for (std::size_t j = 0; j < 3; ++j) {
+        EXPECT_NEAR(s(i, j), expected(i, j), 1e-12)
+            << "stress anchor mismatch sample " << n << " at (" << i << "," << j
+            << ")";
+      }
+
+    // (b) Emitted tangent vs central-difference of the emitted stress.
+    auto const r = verifier.verify(stress_only, eps, emitted_tangent);
+    EXPECT_TRUE(r.passed)
+        << "tangent FD mismatch sample " << n << ": max_abs=" << r.max_abs_dev
+        << " max_rel=" << r.max_rel_dev << " at [" << r.worst_index[0]
+        << r.worst_index[1] << r.worst_index[2] << r.worst_index[3] << "]";
   }
 }

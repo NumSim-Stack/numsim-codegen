@@ -22,6 +22,7 @@
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_operators.h>
 #include <numsim_cas/tensor/tensor_std.h>
+#include <numsim_cas/tensor_to_scalar/tensor_dot.h>
 #include <numsim_cas/tensor_to_scalar/tensor_norm.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_std.h>
 #include <numsim_cas/tensor_to_scalar/tensor_trace.h>
@@ -51,11 +52,11 @@ auto write_single_file(numsim::codegen::ConstitutiveModel const &model,
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc < 8) {
+  if (argc < 9) {
     std::cerr << "usage: " << argv[0]
               << " <CompileCheck.h> <HardeningCheck.h> <NewtonCheck.h>"
                  " <AutocatalyticCheck.h> <CoupledCheck.h> <PiecewiseCheck.h>"
-                 " <PiecewiseT2sCheck.h>\n";
+                 " <PiecewiseT2sCheck.h> <TangentCheck.h>\n";
     return 1;
   }
 
@@ -194,6 +195,32 @@ int main(int argc, char *argv[]) {
     auto sigma = make_expression<tensor_to_scalar_with_tensor_mul>(eps, pick);
     model.add_output("sigma", sigma);
     if (int rc = write_single_file(model, argv[7]); rc != 0) return rc;
+  }
+
+  // ── Recipe 8: consistent-tangent FD check (verification spine #90) ───
+  //
+  // Nonlinear hyperelastic stress σ = 2μ·ε + c·(ε:ε)·ε, so the consistent
+  // tangent dσ/dε is NON-constant (a linear σ would make FD trivially exact
+  // and test nothing). `add_algorithmic_tangent` emits dσ/dε via cas::diff;
+  // the driver FD-checks it against `tmech::num_diff_sym_central` of the
+  // emitted stress and anchors the stress against a hand value. First
+  // NUMERICAL tangent verification — prior tangent tests were structural only.
+  {
+    ConstitutiveModel model("TangentCheck");
+    auto mu = model.add_parameter("mu", 0.7);
+    auto c = model.add_parameter("c", 1.5);
+    // roles::Strain marks eps SYMMETRIC, so cas::diff returns the minor-
+    // symmetric rank-4 identity and the tangent is minor-symmetric (C_ijkl =
+    // C_ijlk) — as a stress-strain tangent must be, and as the symmetric FD
+    // reference (num_diff_sym_central) expects. (A plain input would give the
+    // non-symmetric δ_ik δ_jl identity — the FD harness catches that.)
+    auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
+    auto dot = make_expression<tensor_dot>(eps); // ε:ε (t2s)
+    auto sigma = 2 * mu * eps +
+                 make_expression<tensor_to_scalar_with_tensor_mul>(c * eps, dot);
+    model.add_output("stress", sigma, roles::Stress);
+    model.add_algorithmic_tangent("dstress_deps", "stress", "eps");
+    if (int rc = write_single_file(model, argv[8]); rc != 0) return rc;
   }
 
   return 0;
