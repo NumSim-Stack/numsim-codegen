@@ -4,10 +4,12 @@
 #include <numsim_cas/scalar/scalar_all.h>
 #include <numsim_cas/scalar/scalar_visitor_typedef.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
+#include <numsim_cas/tensor/tensor_if_then_else.h>
 #include <numsim_cas/tensor/tensor_visitor_typedef.h>
 #include <numsim_cas/tensor_to_scalar/operators/tensor_to_scalar_add.h>
 #include <numsim_cas/tensor_to_scalar/operators/tensor_to_scalar_mul.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_definitions.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_if_then_else.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_visitor_typedef.h>
 
 #include <ranges>
@@ -170,6 +172,11 @@ private:
       m_p.collect_tensor(v.expr_lhs());
       m_p.collect_t2s(v.expr_rhs());
     }
+    void operator()(cas::tensor_if_then_else const &v) override {
+      m_p.collect_scalar(v.expr_cond()); // scalar condition
+      m_p.collect_tensor(v.expr_then());
+      m_p.collect_tensor(v.expr_else());
+    }
 
   private:
     LeafCollector &m_p;
@@ -224,6 +231,11 @@ private:
     void operator()(cas::tensor_inner_product_to_scalar const &v) override {
       m_p.collect_tensor(v.expr_lhs());
       m_p.collect_tensor(v.expr_rhs());
+    }
+    void operator()(cas::tensor_to_scalar_if_then_else const &v) override {
+      m_p.collect_t2s(v.expr_cond()); // cond is t2s, not scalar
+      m_p.collect_t2s(v.expr_then());
+      m_p.collect_t2s(v.expr_else());
     }
 
   private:

@@ -11,6 +11,8 @@
 #include "CoupledCheck.h"
 #include "HardeningCheck.h"
 #include "NewtonCheck.h"
+#include "PiecewiseCheck.h"
+#include "PiecewiseT2sCheck.h"
 #include <cmath>
 #include <gtest/gtest.h>
 #include <tmech/tmech.h>
@@ -221,4 +223,61 @@ TEST(CompileCheckGenerated, CoupledNewtonMatchesAnalyticLinearSolve) {
   // off-diagonals) would NOT satisfy the residuals — a_ref != b_ref so the
   // answer is genuinely orientation-sensitive.
   EXPECT_GT(std::abs(a_ref - b_ref), 0.1);
+}
+
+// CAS f3e799e catch-up (#275/#285): the `tensor_if_then_else` node — a SCALAR
+// condition selecting between two TENSOR branches — emits as a materialized
+// ternary `(cond != 0.0 ? tmech::tensor<…>(then) : tmech::tensor<…>(else))`.
+// The move_to_virtual refactor turned codegen's tensor/t2s visitor overrides
+// into pure-virtuals; this compile-AND-RUN check is the lock that the emitted
+// construct is a valid tmech expression AND that both branches are selected
+// correctly — neither of which a string test can prove. PiecewiseCheck emits
+// `sigma = (x != 0 ? 2*eps : -eps)`.
+TEST(CompileCheckGenerated, PiecewiseTensorSelectsBranchAndCompilesVsTmech) {
+  tmech::tensor<double, 3, 2> eps;  // zero-initialised
+  eps(0, 0) = 1.0;
+  eps(1, 1) = 2.0;
+  eps(0, 1) = eps(1, 0) = 0.5;
+  tmech::tensor<double, 3, 2> sigma;
+
+  // x != 0 ⇒ then branch (2*eps)
+  PiecewiseCheck_compute(1.0, eps, sigma);
+  EXPECT_NEAR(sigma(0, 0), 2.0, 1e-12);
+  EXPECT_NEAR(sigma(1, 1), 4.0, 1e-12);
+  EXPECT_NEAR(sigma(0, 1), 1.0, 1e-12);
+
+  // x == 0 ⇒ else branch (-eps)
+  PiecewiseCheck_compute(0.0, eps, sigma);
+  EXPECT_NEAR(sigma(0, 0), -1.0, 1e-12);
+  EXPECT_NEAR(sigma(1, 1), -2.0, 1e-12);
+  EXPECT_NEAR(sigma(0, 1), -0.5, 1e-12);
+}
+
+// Review #87 t2s coverage: the SIBLING node tensor_to_scalar_if_then_else —
+// cond/then/else ALL t2s, with the condition itself in the t2s domain. Emits
+// `sigma = (trace(eps) != 0 ? trace(eps) : norm(eps)) * eps`. This is the
+// end-to-end lock the original PR #87 lacked for the t2s override (a t2s
+// output is inexpressible, so it's lifted into a tensor via with_tensor_mul).
+TEST(CompileCheckGenerated, PiecewiseT2sSelectsBranchAndCompilesVsTmech) {
+  // trace ≠ 0 ⇒ then branch: pick = trace(eps) = 3, sigma = 3*eps.
+  {
+    tmech::tensor<double, 3, 2> eps;  // zero-initialised
+    eps(0, 0) = 1.0;
+    eps(1, 1) = 2.0;                  // trace = 3
+    tmech::tensor<double, 3, 2> sigma;
+    PiecewiseT2sCheck_compute(eps, sigma);
+    EXPECT_NEAR(sigma(0, 0), 3.0 * 1.0, 1e-12);
+    EXPECT_NEAR(sigma(1, 1), 3.0 * 2.0, 1e-12);
+  }
+  // traceless ⇒ else branch: pick = norm(eps) = sqrt(0.5), sigma = norm*eps.
+  {
+    tmech::tensor<double, 3, 2> eps;  // zero-initialised, trace = 0
+    eps(0, 1) = eps(1, 0) = 0.5;
+    tmech::tensor<double, 3, 2> sigma;
+    PiecewiseT2sCheck_compute(eps, sigma);
+    double const norm = std::sqrt(0.5 * 0.5 + 0.5 * 0.5);  // = sqrt(0.5)
+    EXPECT_NEAR(sigma(0, 1), norm * 0.5, 1e-12);
+    EXPECT_NEAR(sigma(1, 0), norm * 0.5, 1e-12);
+    EXPECT_NEAR(sigma(0, 0), 0.0, 1e-12);
+  }
 }

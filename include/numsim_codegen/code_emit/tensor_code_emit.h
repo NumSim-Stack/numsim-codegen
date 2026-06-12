@@ -8,6 +8,7 @@
 #include <numsim_cas/tensor/identity_tensor.h>
 #include <numsim_cas/tensor/levi_civita_tensor.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
+#include <numsim_cas/tensor/tensor_if_then_else.h>
 #include <numsim_cas/tensor/tensor_visitor_typedef.h>
 #include <numsim_cas/tensor/wrappers/tensor_inv.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_expression.h>
@@ -145,6 +146,29 @@ public:
     auto rhs = apply(v.expr_rhs());
     m_result = register_temp(&v, wrap_if_compound(lhs) + " * " +
                                      wrap_if_compound(rhs));
+  }
+
+  // Piecewise tensor selection with a SCALAR condition. The two branches are
+  // tmech expression templates of (generally) different types, so a C++
+  // ternary needs a common type — materialise both to a concrete
+  // `tmech::tensor<double, dim, rank>` (same dim/rank, asserted equal in the
+  // node). The condition goes through the scalar emitter.
+  //
+  // EAGER-BRANCH limitation (shared with scalar_if_then_else): both branches'
+  // sub-expression temporaries are emitted into the flat preamble, so BOTH are
+  // always evaluated — the ternary only selects the result. A partial function
+  // on the untaken branch (e.g. inv() of a tensor singular only there) still
+  // computes and may produce NaN/Inf. Total functions are unaffected. A real
+  // fix needs branch bodies lowered into a C++ if/else, not a ternary.
+  void operator()(cas::tensor_if_then_else const &v) override {
+    auto cond = m_scalar.apply(v.expr_cond());
+    auto then_branch = apply(v.expr_then());
+    auto else_branch = apply(v.expr_else());
+    std::string const tt = "tmech::tensor<double, " + std::to_string(v.dim()) +
+                           ", " + std::to_string(v.rank()) + ">";
+    m_result = register_temp(
+        &v, "(" + wrap_if_compound(cond) + " != 0.0 ? " + tt + "(" +
+                then_branch + ") : " + tt + "(" + else_branch + "))");
   }
 
   // ─── Phase A stubs — node types not yet implemented ─────────────

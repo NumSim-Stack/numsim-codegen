@@ -8,6 +8,7 @@
 #include <numsim_cas/tensor_to_scalar/operators/tensor_to_scalar_add.h>
 #include <numsim_cas/tensor_to_scalar/operators/tensor_to_scalar_mul.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_definitions.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_if_then_else.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_visitor_typedef.h>
 
 #include <ranges>
@@ -58,6 +59,23 @@ public:
 
   void operator()(cas::tensor_to_scalar_scalar_wrapper const &v) override {
     m_result = m_scalar.apply(v.expr());
+  }
+
+  // Piecewise selection. For this node cond/then/else are ALL
+  // tensor-to-scalar (scalar-VALUED), so it is an ordinary scalar ternary —
+  // the condition is also t2s (compared `!= 0.0`), not a separate scalar.
+  //
+  // Shares the EAGER-BRANCH limitation of tensor_if_then_else / the scalar
+  // ternary: both branches' temporaries are emitted into the flat preamble and
+  // always evaluated; the ternary only selects the result.
+  void operator()(cas::tensor_to_scalar_if_then_else const &v) override {
+    auto cond = apply(v.expr_cond());
+    auto then_branch = apply(v.expr_then());
+    auto else_branch = apply(v.expr_else());
+    m_result = register_temp(
+        &v, "(" + wrap_if_compound(cond) + " != 0.0 ? " +
+                wrap_if_compound(then_branch) + " : " +
+                wrap_if_compound(else_branch) + ")");
   }
 
   // ─── Tensor reductions ───────────────────────────────────────────

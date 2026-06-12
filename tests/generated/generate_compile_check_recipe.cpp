@@ -1,9 +1,9 @@
 // Generator program for the compile-check test. CMake runs this at build
-// time with TWO destination header paths as argv[1] and argv[2]. The
+// time with one destination header path per emitted recipe (argv[1..N]). The
 // outputs are self-contained headers that the compile-check driver then
 // #include's.
 //
-// Two recipes are emitted:
+// The recipes (kept in sync with compile_check_driver.cpp + tests/CMakeLists):
 //   1. **CompileCheck** — scalar/tensor inputs + parameters + outputs.
 //      Exercises the full elastic-recipe pipeline + adaptor zero-copy.
 //   2. **HardeningCheck** (Phase 3a-1) — scalar state variable +
@@ -18,8 +18,13 @@
 
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/scalar/scalar_std.h>
+#include <numsim_cas/tensor/operators/tensor_to_scalar/tensor_to_scalar_with_tensor_mul.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_operators.h>
+#include <numsim_cas/tensor/tensor_std.h>
+#include <numsim_cas/tensor_to_scalar/tensor_norm.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_std.h>
+#include <numsim_cas/tensor_to_scalar/tensor_trace.h>
 
 #include <fstream>
 #include <iostream>
@@ -46,10 +51,11 @@ auto write_single_file(numsim::codegen::ConstitutiveModel const &model,
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc < 6) {
+  if (argc < 8) {
     std::cerr << "usage: " << argv[0]
               << " <CompileCheck.h> <HardeningCheck.h> <NewtonCheck.h>"
-                 " <AutocatalyticCheck.h> <CoupledCheck.h>\n";
+                 " <AutocatalyticCheck.h> <CoupledCheck.h> <PiecewiseCheck.h>"
+                 " <PiecewiseT2sCheck.h>\n";
     return 1;
   }
 
@@ -147,6 +153,47 @@ int main(int argc, char *argv[]) {
     model.add_scalar_evolution_equation(b, K2 * a.current);
     model.enable_local_newton();
     if (int rc = write_single_file(model, argv[5]); rc != 0) return rc;
+  }
+
+  // ── Recipe 6: PIECEWISE tensor output (CAS f3e799e if_then_else) ─────
+  //
+  // `if_then_else(x, 2*eps, -eps)` builds a `tensor_if_then_else` node —
+  // a SCALAR condition selecting between two TENSOR branches. The CAS pin
+  // bump (#275/#285, move_to_virtual) made codegen's tensor/t2s visitors
+  // grow these as pure-virtuals; this exercises the materialized-ternary
+  // emission `(cond != 0.0 ? tmech::tensor<…>(then) : tmech::tensor<…>(else))`
+  // end-to-end. The driver compiles it against real tmech and verifies both
+  // branches numerically — the lock that proves the emitted construct is a
+  // valid tmech expression, which a string test cannot.
+  {
+    ConstitutiveModel model("PiecewiseCheck");
+    auto x = model.add_scalar_input("x");
+    auto eps = model.add_tensor_input("eps", 3, 2);
+    model.add_output("sigma", if_then_else(x, 2.0 * eps, -eps));
+    if (int rc = write_single_file(model, argv[6]); rc != 0) return rc;
+  }
+
+  // ── Recipe 7: PIECEWISE tensor-to-scalar (review #87 t2s coverage) ──
+  //
+  // The SIBLING node `tensor_to_scalar_if_then_else` — cond/then/else ALL
+  // t2s — was implemented in the same catch-up but had no end-to-end test
+  // (a t2s output is inexpressible: `add_output` takes only scalar/tensor).
+  // A t2s if_then_else is only reachable as a SUBTERM, so we lift it into a
+  // tensor output via `tensor_to_scalar_with_tensor_mul`:
+  //   sigma = (trace(eps) != 0 ? trace(eps) : norm(eps)) * eps
+  // The condition is itself t2s (`trace(eps)`), exercising the t2s emitter's
+  // condition path (NOT the scalar one) — the one subtlety this node has.
+  // The driver picks a trace≠0 strain and a traceless one to hit both
+  // branches numerically.
+  {
+    ConstitutiveModel model("PiecewiseT2sCheck");
+    auto eps = model.add_tensor_input("eps", 3, 2);
+    auto tr = make_expression<tensor_trace>(eps);  // t2s
+    auto nrm = make_expression<tensor_norm>(eps);   // t2s
+    auto pick = if_then_else(tr, tr, nrm);          // t2s if_then_else
+    auto sigma = make_expression<tensor_to_scalar_with_tensor_mul>(eps, pick);
+    model.add_output("sigma", sigma);
+    if (int rc = write_single_file(model, argv[7]); rc != 0) return rc;
   }
 
   return 0;
