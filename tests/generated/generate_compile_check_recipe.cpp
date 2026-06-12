@@ -3,16 +3,16 @@
 // outputs are self-contained headers that the compile-check driver then
 // #include's.
 //
-// The recipes (kept in sync with compile_check_driver.cpp + tests/CMakeLists):
-//   1. **CompileCheck** — scalar/tensor inputs + parameters + outputs.
-//      Exercises the full elastic-recipe pipeline + adaptor zero-copy.
-//   2. **HardeningCheck** (Phase 3a-1) — scalar state variable +
-//      linear-hardening evolution equation. The generated function gains
-//      paired `_residual_out` + `_jacobian_out` parameters, and the
-//      driver verifies their numerical values match `(α−α_old)/dt − K·α`
-//      and `1/dt − K` respectively. End-to-end check that catches
-//      `cas::diff` regressions which substring-matching in
-//      `tests/LocalJacobianTest.cpp` cannot.
+// The recipes (each documented at its block below; kept in sync with
+// compile_check_driver.cpp + tests/CMakeLists, one argv path per recipe):
+//   1. CompileCheck       — elastic recipe pipeline + adaptor zero-copy
+//   2. HardeningCheck      — scalar state var + residual/jacobian emission
+//   3. NewtonCheck         — in-function local Newton (linear)
+//   4. AutocatalyticCheck  — in-function local Newton (nonlinear, iterates)
+//   5. CoupledCheck        — coupled 2×2 Newton (Eigen dense solve)
+//   6. PiecewiseCheck      — tensor_if_then_else emission vs tmech
+//   7. PiecewiseT2sCheck   — tensor_to_scalar_if_then_else (subterm)
+//   8. TangentCheck        — FD consistent-tangent verification (#90)
 
 #include <numsim_codegen/numsim_codegen.h>
 

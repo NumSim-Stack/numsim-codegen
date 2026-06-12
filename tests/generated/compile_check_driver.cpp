@@ -405,10 +405,23 @@ TEST(CompileCheckGenerated, TangentVerifierRejectsWrongTangent) {
   EXPECT_TRUE(verifier.verify(stress_only, eps, emitted).passed);
 
   // Corrupt one component by far more than tolerance — must be rejected, and
-  // localized to (0,0,0,0).
-  T4 wrong = emitted;
-  wrong(0, 0, 0, 0) += 0.1;
-  auto const r = verifier.verify(stress_only, eps, wrong);
-  EXPECT_FALSE(r.passed) << "verifier failed to reject a perturbed tangent";
-  EXPECT_EQ(r.worst_index, (std::array<std::size_t, 4>{{0, 0, 0, 0}}));
+  // localized to it. (0,0,0,0) is self-symmetric under minor symmetry.
+  {
+    T4 wrong = emitted;
+    wrong(0, 0, 0, 0) += 0.1;
+    auto const r = verifier.verify(stress_only, eps, wrong);
+    EXPECT_FALSE(r.passed) << "verifier failed to reject a perturbed tangent";
+    EXPECT_EQ(r.worst_index, (std::array<std::size_t, 4>{{0, 0, 0, 0}}));
+  }
+  // An OFF-diagonal component: the comparison is per-component vs a minor-
+  // symmetric FD reference, so perturbing only (0,1,0,1) (not its symmetric
+  // partners) must still localize there — confirms the symmetric FD doesn't
+  // smear the error and that localization isn't hardcoded to the origin.
+  {
+    T4 wrong = emitted;
+    wrong(0, 1, 0, 1) += 0.1;
+    auto const r = verifier.verify(stress_only, eps, wrong);
+    EXPECT_FALSE(r.passed);
+    EXPECT_EQ(r.worst_index, (std::array<std::size_t, 4>{{0, 1, 0, 1}}));
+  }
 }
