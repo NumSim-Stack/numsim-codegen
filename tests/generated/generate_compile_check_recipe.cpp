@@ -201,10 +201,10 @@ int main(int argc, char *argv[]) {
   //
   // Nonlinear hyperelastic stress σ = 2μ·ε + c·(ε:ε)·ε, so the consistent
   // tangent dσ/dε is NON-constant (a linear σ would make FD trivially exact
-  // and test nothing). `add_algorithmic_tangent` emits dσ/dε via cas::diff;
-  // the driver FD-checks it against `tmech::num_diff_sym_central` of the
-  // emitted stress and anchors the stress against a hand value. First
-  // NUMERICAL tangent verification — prior tangent tests were structural only.
+  // and test nothing). `add_algorithmic_tangent` emits dσ/dε via cas::diff.
+  // SCOPE: no state variable / no local Newton, so only the EXPLICIT term
+  // ∂σ/∂ε is exercised — the strain-coupled implicit correction (gated on
+  // numsim-cas#275) is absent and not verified here. See the driver test.
   {
     ConstitutiveModel model("TangentCheck");
     auto mu = model.add_parameter("mu", 0.7);

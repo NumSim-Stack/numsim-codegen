@@ -15,7 +15,9 @@
 #include "PiecewiseT2sCheck.h"
 #include "TangentCheck.h"
 #include "numerical_tangent_verifier.h"
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <vector>
 #include <gtest/gtest.h>
 #include <tmech/tmech.h>
@@ -285,13 +287,38 @@ TEST(CompileCheckGenerated, PiecewiseT2sSelectsBranchAndCompilesVsTmech) {
   }
 }
 
-// Verification spine (numsim-codegen#90, item 1): the FIRST numerical check that
-// the emitted consistent tangent dσ/dε is correct — not just that it contains
-// the right tmech ops. TangentCheck emits σ = 2μ·ε + c·(ε:ε)·ε (nonlinear, so
-// dσ/dε is non-constant) + the algorithmic tangent via add_algorithmic_tangent.
-// We (a) anchor the emitted stress against an independent hand computation, and
-// (b) FD-check the emitted tangent against tmech::num_diff_sym_central of the
-// emitted stress, via the parameterized NumericalTangentVerifier.
+// Verification spine (numsim-codegen#90, item 1). SCOPE: this verifies the
+// EXPLICIT tangent term ∂σ/∂ε (= cas::diff(tensor,tensor)) only. TangentCheck
+// has no state variable / no local Newton, so the strain-coupled implicit
+// correction (∂σ/∂x·dx/dε) — the genuinely risky path, still gated on
+// numsim-cas#275 and not yet emitted — is structurally absent and NOT verified
+// here. The reusable artifact is `NumericalTangentVerifier`; coupled-tangent FD
+// coverage is a later #90 item. Within that scope this is the first NUMERICAL
+// tangent check (prior tests were structural — they only asserted the emitted
+// expression contained otimesu/otimesl).
+//
+// σ = 2μ·ε + c·(ε:ε)·ε is genuinely nonlinear, so dσ/dε is non-constant. We
+// (a) anchor the emitted stress against a hand computation done WITHOUT tmech
+// reductions (so a tmech::dcontract bug can't corrupt both sides), and (b)
+// FD-check the emitted tangent.
+namespace {
+// FD error floor for a 2nd-order central difference at h: truncation ~O(h²)
+// plus round-off ~O(ε_machine/h); for this cubic at h=5e-6 the achieved
+// deviation is ~1e-10, so 1e-8 tolerances leave ~2 orders of margin while still
+// having real teeth (the old 1e-6 was ~4 orders too loose to catch much).
+constexpr double kTangentAbsTol = 1e-8;
+constexpr double kTangentRelTol = 1e-8;
+constexpr double kTangentFdStep = 5e-6;
+
+// ε:ε computed by an explicit scalar loop — independent of tmech reductions.
+double frob_sq(tmech::tensor<double, 3, 2> const &e) {
+  double s = 0.0;
+  for (std::size_t i = 0; i < 3; ++i)
+    for (std::size_t j = 0; j < 3; ++j) s += e(i, j) * e(i, j);
+  return s;
+}
+} // namespace
+
 TEST(CompileCheckGenerated, ConsistentTangentMatchesNumericalDiff) {
   using T2 = tmech::tensor<double, 3, 2>;
   using T4 = tmech::tensor<double, 3, 4>;
@@ -305,9 +332,10 @@ TEST(CompileCheckGenerated, ConsistentTangentMatchesNumericalDiff) {
     return s;
   };
 
-  // Moderate-magnitude symmetric strains, including shear, so the cubic term is
-  // a material fraction of the tangent (a tiny strain would mostly test 2μ).
-  std::vector<T2> samples(3);
+  // Symmetric strains. The last is HIGH-magnitude so the cubic term is a
+  // majority of the tangent (c·(ε:ε) vs 2μ), not a ~4% perturbation — without
+  // it a partly-wrong nonlinear term could hide under the elastic 2μ·I.
+  std::vector<T2> samples(4);
   samples[0].fill(0.0);
   samples[0](0, 0) = 0.20; samples[0](1, 1) = -0.10; samples[0](2, 2) = 0.05;
   samples[1].fill(0.0);
@@ -315,9 +343,14 @@ TEST(CompileCheckGenerated, ConsistentTangentMatchesNumericalDiff) {
   samples[2].fill(0.0);
   samples[2](0, 0) = 0.30; samples[2](1, 1) = 0.20; samples[2](2, 2) = -0.25;
   samples[2](0, 2) = samples[2](2, 0) = 0.12;
+  samples[3].fill(0.0); // cubic-dominant: c·(ε:ε) ≈ 0.9 vs 2μ = 1.4
+  samples[3](0, 0) = 0.55; samples[3](1, 1) = -0.45; samples[3](2, 2) = 0.35;
+  samples[3](0, 1) = samples[3](1, 0) = 0.20;
 
   numsim::codegen::verify::NumericalTangentVerifier<3> const verifier(
-      {.abs_tol = 1e-7, .rel_tol = 1e-6, .fd_step = 5e-6});
+      {.abs_tol = kTangentAbsTol,
+       .rel_tol = kTangentRelTol,
+       .fd_step = kTangentFdStep});
 
   for (std::size_t n = 0; n < samples.size(); ++n) {
     auto const &eps = samples[n];
@@ -325,12 +358,12 @@ TEST(CompileCheckGenerated, ConsistentTangentMatchesNumericalDiff) {
     T4 emitted_tangent;
     TangentCheck_compute(mu, c, eps, s, emitted_tangent);
 
-    // (a) Anchor: emitted stress matches the independent formula.
-    T2 const expected =
-        T2(2.0 * mu * eps + c * tmech::dcontract(eps, eps) * eps);
+    // (a) Anchor: emitted stress matches a hand computation (no tmech reduction).
+    double const dd = frob_sq(eps);
     for (std::size_t i = 0; i < 3; ++i)
       for (std::size_t j = 0; j < 3; ++j) {
-        EXPECT_NEAR(s(i, j), expected(i, j), 1e-12)
+        double const expected = 2.0 * mu * eps(i, j) + c * dd * eps(i, j);
+        EXPECT_NEAR(s(i, j), expected, 1e-12)
             << "stress anchor mismatch sample " << n << " at (" << i << "," << j
             << ")";
       }
@@ -339,7 +372,48 @@ TEST(CompileCheckGenerated, ConsistentTangentMatchesNumericalDiff) {
     auto const r = verifier.verify(stress_only, eps, emitted_tangent);
     EXPECT_TRUE(r.passed)
         << "tangent FD mismatch sample " << n << ": max_abs=" << r.max_abs_dev
-        << " max_rel=" << r.max_rel_dev << " at [" << r.worst_index[0]
-        << r.worst_index[1] << r.worst_index[2] << r.worst_index[3] << "]";
+        << " max_rel=" << r.max_rel_dev << " at (" << r.worst_index[0] << ","
+        << r.worst_index[1] << "," << r.worst_index[2] << ","
+        << r.worst_index[3] << ")";
   }
+}
+
+// Negative control (review #91 H2): the verifier must have discriminating
+// power — a correct tangent passes, a deliberately-wrong one FAILS, and the
+// worst index points at the corrupted component. Without this, a verifier that
+// returned passed=true unconditionally would look identical to a working one.
+TEST(CompileCheckGenerated, TangentVerifierRejectsWrongTangent) {
+  using T2 = tmech::tensor<double, 3, 2>;
+  using T4 = tmech::tensor<double, 3, 4>;
+  double const mu = 0.7, c = 1.5;
+  auto stress_only = [&](auto const &e) -> T2 {
+    T2 s;
+    T4 t;
+    TangentCheck_compute(mu, c, e, s, t);
+    return s;
+  };
+  T2 eps;
+  eps.fill(0.0);
+  eps(0, 0) = 0.20; eps(1, 1) = -0.10;
+  eps(0, 1) = eps(1, 0) = 0.15;
+
+  T2 s;
+  T4 emitted;
+  TangentCheck_compute(mu, c, eps, s, emitted);
+
+  numsim::codegen::verify::NumericalTangentVerifier<3> const verifier(
+      {.abs_tol = kTangentAbsTol,
+       .rel_tol = kTangentRelTol,
+       .fd_step = kTangentFdStep});
+
+  // The correct tangent passes.
+  EXPECT_TRUE(verifier.verify(stress_only, eps, emitted).passed);
+
+  // Corrupt one component by far more than tolerance — must be rejected, and
+  // localized to (0,0,0,0).
+  T4 wrong = emitted;
+  wrong(0, 0, 0, 0) += 0.1;
+  auto const r = verifier.verify(stress_only, eps, wrong);
+  EXPECT_FALSE(r.passed) << "verifier failed to reject a perturbed tangent";
+  EXPECT_EQ(r.worst_index, (std::array<std::size_t, 4>{{0, 0, 0, 0}}));
 }

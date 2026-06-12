@@ -59,6 +59,7 @@ public:
 
     Result r;
     bool all_ok = true;
+    double worst_fail_abs = -1.0; // largest abs_dev among FAILING components
     for (std::size_t i = 0; i < Dim; ++i)
       for (std::size_t j = 0; j < Dim; ++j)
         for (std::size_t k = 0; k < Dim; ++k)
@@ -68,14 +69,20 @@ public:
             double const abs_dev = std::abs(a - f);
             double const scale = std::max(std::abs(a), std::abs(f));
             double const rel_dev = scale > 0.0 ? abs_dev / scale : 0.0;
-            // Per-component pass: within abs OR rel tolerance.
-            if (!(abs_dev <= m_p.abs_tol || rel_dev <= m_p.rel_tol))
-              all_ok = false;
-            if (abs_dev > r.max_abs_dev) {
-              r.max_abs_dev = abs_dev;
-              r.worst_index = {{i, j, k, l}};
-            }
+            r.max_abs_dev = std::max(r.max_abs_dev, abs_dev);
             r.max_rel_dev = std::max(r.max_rel_dev, rel_dev);
+            // Per-component pass: within abs OR rel tolerance.
+            bool const ok = (abs_dev <= m_p.abs_tol || rel_dev <= m_p.rel_tol);
+            if (!ok) {
+              all_ok = false;
+              // worst_index points at the worst FAILING component (the one a
+              // caller needs to debug), not the global abs-worst (which may pass
+              // on relative tolerance for a large-magnitude entry).
+              if (abs_dev > worst_fail_abs) {
+                worst_fail_abs = abs_dev;
+                r.worst_index = {{i, j, k, l}};
+              }
+            }
           }
     r.passed = all_ok;
     return r;
