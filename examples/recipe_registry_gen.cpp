@@ -10,6 +10,9 @@
 
 #include "recipe_registry.h"
 
+#include <numsim_codegen/targets/target_factory.h>
+
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -53,28 +56,23 @@ namespace {
   return true;
 }
 
-auto make_target(std::string const &kind)
-    -> std::unique_ptr<numsim::codegen::Target> {
-  using namespace numsim::codegen;
-  if (kind == "standalone") return std::make_unique<StandaloneCxxTarget>();
-  if (kind == "moose")      return std::make_unique<MooseMaterialTarget>("ExampleApp");
-  return nullptr;
-}
-
 } // namespace
 
 int main(int argc, char **argv) {
   if (argc != 3) {
-    std::cerr << "usage: " << argv[0] << " <out-dir> <target: standalone|moose>\n";
+    std::cerr << "usage: " << argv[0]
+              << " <out-dir> <target: numsim_material|standalone|moose>\n";
     return 1;
   }
   fs::path const out_dir = argv[1];
   std::string const target_kind = argv[2];
 
-  auto target = make_target(target_kind);
-  if (!target) {
-    std::cerr << "unknown target: " << target_kind
-              << " (expected 'standalone' or 'moose')\n";
+  // The library's name-keyed factory (throws on an unknown name).
+  std::unique_ptr<numsim::codegen::Target> target;
+  try {
+    target = numsim::codegen::make_target(target_kind);
+  } catch (std::exception const &e) {
+    std::cerr << e.what() << "\n";
     return 1;
   }
 

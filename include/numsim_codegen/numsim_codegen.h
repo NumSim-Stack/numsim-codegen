@@ -11,5 +11,6 @@
 #include <numsim_codegen/targets/numsim_material.h>
 #include <numsim_codegen/targets/standalone_cxx.h>
 #include <numsim_codegen/targets/target.h>
+#include <numsim_codegen/targets/target_factory.h>
 
 #endif // NUMSIM_CODEGEN_H

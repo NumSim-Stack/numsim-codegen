@@ -32,6 +32,7 @@ add_executable(numsim_codegen_tests
     AlgorithmicTangentTest.cpp
     LinearAlgebraEmitterTest.cpp
     NumSimMaterialTargetTest.cpp
+    TargetFactoryTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests
@@ -122,7 +123,8 @@ target_include_directories(compile_check_driver
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated ${eigen3_SOURCE_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/support)
 target_link_libraries(compile_check_driver
-    PRIVATE numsim::codegen GTest::gtest GTest::gtest_main)
+    PRIVATE numsim::codegen numsim_codegen_warnings_light
+            GTest::gtest GTest::gtest_main)
 
 gtest_discover_tests(compile_check_driver)
 
