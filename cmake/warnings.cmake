@@ -66,3 +66,23 @@ target_compile_options(numsim_codegen_warnings INTERFACE
 
 # Convenience alias matching the project's `numsim::` namespace.
 add_library(numsim::codegen_warnings ALIAS numsim_codegen_warnings)
+
+# ─── Light warning set for GENERATED-code + tmech-heavy targets ──────────────
+#
+# `compile_check_driver` compiles codegen-EMITTED standalone headers (and heavy
+# tmech expression templates in the same TU). The full set above (-Wconversion,
+# -Wold-style-cast, -Wuseless-cast, …) fires on tmech-interaction and generated
+# arithmetic, so it cannot gate that target. This lighter set — `-Wall -Wextra`
+# only — catches the unused-variable / dead-code class in the StandaloneCxxTarget
+# output that this driver compiles, so a future standalone-emit regression that
+# reintroduces them fails CI. Same Debug/option `-Werror` gating as the full set.
+#
+# SCOPE LIMIT (do not overstate): this driver compiles ONLY StandaloneCxxTarget
+# output. NumSimMaterialTarget-emitted code — where the `[[maybe_unused]]` fixes
+# actually live — is NOT compiled anywhere in CI yet, so it is NOT gated here.
+# Closing that is the end-to-end NumSimMaterialTarget CI gap (#89), not this.
+add_library(numsim_codegen_warnings_light INTERFACE)
+target_compile_options(numsim_codegen_warnings_light INTERFACE
+    $<$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang,AppleClang>>:-Wall;-Wextra>
+    $<$<AND:$<OR:$<CONFIG:Debug>,$<BOOL:${NUMSIM_CODEGEN_WERROR}>>,$<OR:$<CXX_COMPILER_ID:GNU>,$<CXX_COMPILER_ID:Clang,AppleClang>>>:-Werror>
+)

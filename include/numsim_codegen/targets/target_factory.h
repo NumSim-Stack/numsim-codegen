@@ -14,7 +14,10 @@ namespace numsim::codegen {
 // driver (numsim-codegen#93). The keys are the stable SELECTOR (a future
 // `target.type` in JSON config) and are intentionally independent of each
 // `Target::target_name()` (a human-readable display label, e.g. "NumSimMaterial")
-// — do not assume they match or couple one to the other.
+// — do not assume they match or couple one to the other. (A THIRD, unrelated
+// namespace is the `type` field in a generated material's emitted JSON config —
+// those are numsim-materials *runtime* type names, e.g. "rk_integrator", not
+// codegen target selectors.)
 //
 // `make_target` constructs targets with their DEFAULT app-name / linear-algebra
 // backend; passing those (e.g. a non-default MOOSE app name or Armadillo) is the
