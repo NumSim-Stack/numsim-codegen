@@ -128,6 +128,66 @@ target_link_libraries(compile_check_driver
 
 gtest_discover_tests(compile_check_driver)
 
+# ─── numsim-materials end-to-end gate (Phase B) ──────────────────────────────
+#
+# The string-asserting NumSimMaterialTargetTest proves the emitted TEXT matches
+# the rk_integrator contract; it CANNOT prove the emitted code compiles and runs
+# against the real solver. This gate does: it generates a NumSimMaterialTarget
+# rate material, compiles it against the REAL numsim-materials + numsim-core
+# headers, and integrates dα/dt = K·α (K=-1) through the real rk_integrator,
+# asserting convergence to e^-1 (closing the dominant gap behind #89).
+#
+# Gated on locating the sibling header-only repos (numsim-materials needs only
+# numsim-core + Eigen on the scalar path — no tmech). SKIPPED if absent; wiring
+# these via FetchContent so the gate also runs in CI is the remaining part of
+# #89. Override the locations with -DNUMSIM_MATERIALS_DIR / -DNUMSIM_CORE_DIR.
+set(NUMSIM_MATERIALS_DIR "${CMAKE_SOURCE_DIR}/../numsim-materials"
+    CACHE PATH "numsim-materials checkout (header-only) for the Phase B e2e gate")
+set(NUMSIM_CORE_DIR "${CMAKE_SOURCE_DIR}/../numsim-core"
+    CACHE PATH "numsim-core checkout (header-only) for the Phase B e2e gate")
+
+if(EXISTS "${NUMSIM_MATERIALS_DIR}/include/numsim-materials/solvers/rk_integrator.h"
+   AND EXISTS "${NUMSIM_CORE_DIR}/include/numsim-core/input_parameter_controller.h")
+    add_executable(generate_numsim_material_check
+        generated/generate_numsim_material_check.cpp)
+    target_link_libraries(generate_numsim_material_check
+        PRIVATE numsim::codegen numsim_codegen_warnings)
+
+    set(GENERATED_MATERIAL_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/LinearHardening.h)
+    add_custom_command(
+        OUTPUT ${GENERATED_MATERIAL_HEADER}
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                ${CMAKE_CURRENT_BINARY_DIR}/generated
+        COMMAND $<TARGET_FILE:generate_numsim_material_check>
+                ${GENERATED_MATERIAL_HEADER}
+        DEPENDS generate_numsim_material_check
+        COMMENT "Generating numsim-materials rate material via NumSimMaterialTarget"
+        VERBATIM)
+
+    add_executable(numsim_material_check_driver
+        generated/numsim_material_check_driver.cpp
+        ${GENERATED_MATERIAL_HEADER})
+    # numsim-materials, numsim-core and Eigen are header-only and included as
+    # SYSTEM so their warnings stay silent under the first-party -Werror gate.
+    target_include_directories(numsim_material_check_driver SYSTEM PRIVATE
+        ${NUMSIM_MATERIALS_DIR}/include
+        ${NUMSIM_CORE_DIR}/include
+        ${eigen3_SOURCE_DIR})
+    target_include_directories(numsim_material_check_driver PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    # The generated material is first-party emitted code — gate it -Wall -Wextra.
+    target_link_libraries(numsim_material_check_driver
+        PRIVATE numsim_codegen_warnings_light GTest::gtest GTest::gtest_main)
+    gtest_discover_tests(numsim_material_check_driver)
+    message(STATUS "Phase B e2e gate ENABLED (numsim-materials at "
+                   "${NUMSIM_MATERIALS_DIR})")
+else()
+    message(STATUS "Phase B e2e gate SKIPPED: numsim-materials/numsim-core not "
+                   "found at ${NUMSIM_MATERIALS_DIR} / ${NUMSIM_CORE_DIR} "
+                   "(set -DNUMSIM_MATERIALS_DIR / -DNUMSIM_CORE_DIR to enable)")
+endif()
+
 # ─── Header-purity guard ───────────────────────────────────────────────────
 #
 # Public headers under include/ must never #include heavy template libraries
