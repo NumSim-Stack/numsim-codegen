@@ -10,6 +10,9 @@
 
 #include "recipe_registry.h"
 
+#include <numsim_codegen/targets/target_factory.h>
+
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>

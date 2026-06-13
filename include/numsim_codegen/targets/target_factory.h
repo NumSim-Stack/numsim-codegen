@@ -11,8 +11,15 @@ namespace numsim::codegen {
 
 // Name-keyed construction of a Target backend — the single source of truth for
 // "which backend", promoted out of the hand-written if/else in the example
-// driver (numsim-codegen#93). The snake_case keys are the stable selector
-// (a future `target.type` in JSON config).
+// driver (numsim-codegen#93). The keys are the stable SELECTOR (a future
+// `target.type` in JSON config) and are intentionally independent of each
+// `Target::target_name()` (a human-readable display label, e.g. "NumSimMaterial")
+// — do not assume they match or couple one to the other.
+//
+// `make_target` constructs targets with their DEFAULT app-name / linear-algebra
+// backend; passing those (e.g. a non-default MOOSE app name or Armadillo) is the
+// deferred config-driven path (#93), so for now construct the target directly if
+// you need non-defaults.
 //
 // Deliberately a flat function, NOT an extensible registry: there are three
 // first-party targets and no third-party-registration consumer yet. The

@@ -95,7 +95,7 @@ factories; one generator binary iterates the catalogue and emits source
 files for every recipe through a chosen target.
 
 ```bash
-./build/examples/recipe_registry_gen <out-dir> <target: standalone|moose>
+./build/examples/recipe_registry_gen <out-dir> <target: numsim_material|standalone|moose>
 ```
 
 Six worked recipes are shipped (linear-elastic shear, thermo-elastic shear,
