@@ -77,10 +77,49 @@ TEST(NumSimMaterialEndToEnd, RK4HitsHighAccuracy) {
   EXPECT_NEAR(run(100, numsim::materials::rk4()), kExact, 1e-8);
 }
 
-// Implicit path: exercises the generated `rate_derivative` Local edge inside the
-// integrator's per-stage Newton solve.
-TEST(NumSimMaterialEndToEnd, ImplicitEulerUsesRateDerivative) {
+// Implicit path: wires and reads the generated `rate_derivative` Local edge
+// inside the integrator's per-stage Newton solve (so a MISSING/unwired
+// rate_derivative fails here). NOTE: convergence alone does NOT verify the
+// derivative VALUE — at this conditioning the per-stage Newton converges as a
+// contraction regardless of the Jacobian. The value is verified separately by
+// EmittedRateAndDerivativeValuesAreCorrect below.
+TEST(NumSimMaterialEndToEnd, ImplicitEulerWiresRateDerivative) {
   EXPECT_NEAR(run(1000, numsim::materials::implicit_euler()), kExact, 1e-3);
+}
+
+// Directly verify the emitted VALUES (not just convergence): fire the generated
+// material's compute() at a known α and read its rate / rate_derivative
+// properties. For dα/dt = K·α this must give rate = K·α and rate_derivative = K.
+// This is the check that catches a wrong-but-convergent emitted derivative.
+TEST(NumSimMaterialEndToEnd, EmittedRateAndDerivativeValuesAreCorrect) {
+  ctx_type ctx;
+  param_type p;
+  auto fe = numsim::materials::forward_euler();
+  p.insert<std::string>("name", "integrator");
+  p.insert<std::string>("function", "LinearHardening");
+  p.insert<T>("step_size", T{0.1});
+  p.insert<const numsim::materials::butcher_tableau*>("tableau", &fe);
+  ctx.create<RK>(p);
+  p.clear();
+  p.insert<std::string>("name", "LinearHardening");
+  p.insert<std::string>("integrator_source", "integrator");
+  p.insert<T>("K", T{-1.0});
+  ctx.create<Gen>(p);
+  ctx.finalize();
+
+  auto* sp = ctx.find_property("integrator", "state");
+  auto* hist = dynamic_cast<
+      numsim_core::history_property<T, numsim::materials::property_traits>*>(sp);
+  ASSERT_NE(hist, nullptr);
+  const T alpha = T{2.0};
+  hist->new_value() = alpha; // input_property::get() reads the trial new_value
+
+  // Fire the generated material's compute() via the rate property's callback.
+  ctx.find_property("LinearHardening", "rate")->traits().update();
+
+  const T K = T{-1.0};
+  EXPECT_NEAR(ctx.get<T>("LinearHardening", "rate"), K * alpha, 1e-12);
+  EXPECT_NEAR(ctx.get<T>("LinearHardening", "rate_derivative"), K, 1e-12);
 }
 
 } // namespace
