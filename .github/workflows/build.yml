@@ -50,7 +50,14 @@ jobs:
         env:
           CC: ${{ matrix.compiler.cc }}
           CXX: ${{ matrix.compiler.cxx }}
-        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        # NUMSIM_CODEGEN_FETCH_MATERIALS=ON pulls numsim-materials/numsim-core
+        # (header-only, pinned SHAs) so the Phase B end-to-end gate — which
+        # compiles a generated material against the real solver and runs it —
+        # executes in CI (#89). No local checkout exists on the runner, so this
+        # triggers the CPM fetch path.
+        run: >
+          cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DNUMSIM_CODEGEN_FETCH_MATERIALS=ON
 
       - name: Build
         run: cmake --build build -j$(nproc)

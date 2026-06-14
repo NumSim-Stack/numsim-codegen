@@ -1,0 +1,80 @@
+// Phase B end-to-end gate — generator half.
+//
+// Emits NumSimMaterialTarget rate-function materials and writes their headers to
+// argv[1] (linear) and argv[2] (nonlinear). The companion driver compiles these
+// generated headers against the REAL numsim-materials / numsim-core headers and
+// runs them through the real rk_integrator — proving the emitted code conforms
+// to the solver contract, which the string-asserting NumSimMaterialTargetTest
+// cannot.
+//
+// Two recipes on purpose:
+//   * LinearHardening   dα/dt = K·α      — constant derivative (K); the plumbing
+//                                          floor, α(1) = e^-1 for K = -1.
+//   * NonlinearDecay    dα/dt = K·α²     — NON-constant derivative (2·K·α), so
+//                                          the value-check exercises real
+//                                          cas::diff, not a trivial constant.
+//                                          α(1) = 0.5 for K = -1, α(0) = 1.
+#include <numsim_codegen/numsim_codegen.h>
+
+#include <numsim_cas/scalar/scalar_operators.h>
+#include <numsim_cas/scalar/scalar_std.h>
+#include <numsim_cas/tensor/tensor_definitions.h>
+
+#include <fstream>
+#include <iostream>
+#include <string>
+
+using namespace numsim::cas;
+using namespace numsim::codegen;
+
+namespace {
+
+// Emit the single header for `model` to `path`. Returns false on failure.
+bool write_header(ConstitutiveModel const& model, char const* path) {
+  for (auto const& f : NumSimMaterialTarget{}.emit(model)) {
+    if (f.kind == EmittedFile::Kind::Header) {
+      std::ofstream os(path);
+      if (!os) {
+        std::cerr << "could not open " << path << " for writing\n";
+        return false;
+      }
+      os << f.contents;
+      return true;
+    }
+  }
+  std::cerr << "NumSimMaterialTarget emitted no header for " << model.name()
+            << "\n";
+  return false;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+  if (argc < 3) {
+    std::cerr << "usage: generate_numsim_material_check <linear.h> <nonlinear.h>\n";
+    return 2;
+  }
+
+  // dα/dt = K·α — rate = K·α, rate_derivative = K.
+  ConstitutiveModel linear("LinearHardening");
+  {
+    auto K = linear.add_parameter("K", -1.0);
+    auto alpha = linear.add_scalar_state_variable(
+        "alpha", make_expression<scalar_constant>(0.0));
+    linear.add_scalar_evolution_equation(alpha, K * alpha.current);
+  }
+
+  // dα/dt = K·α² — rate = K·α², rate_derivative = 2·K·α (cas::diff power rule).
+  ConstitutiveModel nonlinear("NonlinearDecay");
+  {
+    auto K = nonlinear.add_parameter("K", -1.0);
+    auto alpha = nonlinear.add_scalar_state_variable(
+        "alpha", make_expression<scalar_constant>(0.0));
+    nonlinear.add_scalar_evolution_equation(
+        alpha, K * alpha.current * alpha.current);
+  }
+
+  if (!write_header(linear, argv[1])) return 1;
+  if (!write_header(nonlinear, argv[2])) return 1;
+  return 0;
+}
