@@ -39,6 +39,11 @@ constexpr T kK = T{-1.0};
 
 // Build a graph of rk_integrator + the generated material `Mat` (registered
 // under `name`, matching the integrator's "function"), with parameter K = kK.
+// NOTE: the integrator stores the ADDRESS of `tab` (its "tableau" param), so
+// `tab` must outlive every subsequent ctx.update(). integrate() satisfies this
+// by passing a call-argument temporary (alive for the whole integrate(...)
+// expression); emitted_values() uses a named local because build() and the use
+// are separate statements.
 template <typename Mat>
 void build(ctx_type& ctx, const std::string& name,
            const numsim::materials::butcher_tableau& tab, T step_size) {
@@ -87,7 +92,8 @@ T integrate(const std::string& name, int N,
 template <typename Mat>
 std::pair<T, T> emitted_values(const std::string& name, T alpha) {
   ctx_type ctx;
-  build<Mat>(ctx, name, numsim::materials::forward_euler(), T{0.1});
+  const auto tab = numsim::materials::forward_euler(); // must outlive build()
+  build<Mat>(ctx, name, tab, T{0.1});
 
   auto* hist = dynamic_cast<
       numsim_core::history_property<T, numsim::materials::property_traits>*>(
@@ -95,7 +101,10 @@ std::pair<T, T> emitted_values(const std::string& name, T alpha) {
   EXPECT_NE(hist, nullptr);
   hist->new_value() = alpha; // input_property::get() reads the trial new_value
 
-  ctx.find_property(name, "rate")->traits().update();
+  auto* rate_prop = ctx.find_property(name, "rate");
+  EXPECT_NE(rate_prop, nullptr) << "generated material must publish a `rate`";
+  if (!rate_prop) return {std::nan(""), std::nan("")};
+  rate_prop->traits().update(); // fire compute()
   return {ctx.get<T>(name, "rate"), ctx.get<T>(name, "rate_derivative")};
 }
 
