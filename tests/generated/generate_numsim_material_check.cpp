@@ -19,6 +19,7 @@
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/scalar/scalar_std.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
+#include <numsim_cas/tensor/tensor_operators.h>
 
 #include <fstream>
 #include <iostream>
@@ -50,8 +51,9 @@ bool write_header(ConstitutiveModel const& model, char const* path) {
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 3) {
-    std::cerr << "usage: generate_numsim_material_check <linear.h> <nonlinear.h>\n";
+  if (argc < 4) {
+    std::cerr << "usage: generate_numsim_material_check <linear.h> "
+                 "<nonlinear.h> <viscoelastic.h>\n";
     return 2;
   }
 
@@ -76,7 +78,22 @@ int main(int argc, char** argv) {
         alpha, K * alpha.current * alpha.current);
   }
 
+  // Tensor stress from a SCALAR integrated state + a TENSOR strain input:
+  // dα/dt = K·α (scalar, for the integrator) and σ = α·ε (tensor stress).
+  // Exercises tensor input wiring + tensor output emission — no tensor state,
+  // no vector solver needed.
+  ConstitutiveModel viscoelastic("Viscoelastic");
+  {
+    auto K = viscoelastic.add_parameter("K", -1.0);
+    auto alpha = viscoelastic.add_scalar_state_variable(
+        "alpha", make_expression<scalar_constant>(0.0));
+    viscoelastic.add_scalar_evolution_equation(alpha, K * alpha.current);
+    auto eps = viscoelastic.add_tensor_input("strain", 3, 2, roles::Strain);
+    viscoelastic.add_output("stress", alpha.current * eps);
+  }
+
   if (!write_header(linear, argv[1])) return 1;
   if (!write_header(nonlinear, argv[2])) return 1;
+  if (!write_header(viscoelastic, argv[3])) return 1;
   return 0;
 }

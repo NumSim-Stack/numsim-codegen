@@ -161,24 +161,43 @@ TEST(NumSimMaterialTarget, EmitsScalarOutputProperty) {
   EXPECT_NE(h.find("value_type& m_out_energy;"), std::string::npos) << h;
 }
 
-// Tensor outputs (stress) still need the tensor input/state path — rejected.
-TEST(NumSimMaterialTarget, RejectsTensorOutput) {
-  ConstitutiveModel m("WithTensorOutput");
+// Phase B (tensor path): a tensor stress output computed from a scalar state and
+// a tensor strain input IS emitted — strain wired as a Global-edge input, stress
+// as a tmech tensor property with its own callback. (No tensor STATE here, so no
+// Mandel/vector solver needed.)
+TEST(NumSimMaterialTarget, EmitsTensorStressOutput) {
+  ConstitutiveModel m("WithTensorStress");
   auto mu = m.add_parameter("mu", 0.5);
   auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(a, mu * a.current);
-  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
-  m.add_output("stress", 2 * mu * eps, roles::Stress);
-  EXPECT_NE(emit_throw_message(m).find("tensor output"), std::string::npos);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  m.add_output("stress", a.current * eps, roles::Stress);
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+  EXPECT_NE(h.find("#include <tmech/tmech.h>"), std::string::npos) << h;
+  // strain wired as a Global-edge tensor input from a `strain_source` producer
+  EXPECT_NE(h.find("add_input<tmech::tensor<value_type, 3, 2>>"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("numsim::materials::EdgeKind::Global"), std::string::npos)
+      << h;
+  EXPECT_NE(h.find("insert<std::string>(\"strain_source\")"), std::string::npos)
+      << h;
+  // stress published as a tmech tensor property with its own callback
+  EXPECT_NE(h.find("add_output<tmech::tensor<value_type, 3, 2>>(\n"
+                   "            \"stress\", &WithTensorStress::update_stress"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("void update_stress() {"), std::string::npos) << h;
 }
 
-TEST(NumSimMaterialTarget, RejectsDeclaredInput) {
-  ConstitutiveModel m("WithInput");
+// Scalar inputs are not yet wired (tensor inputs ARE) — rejected loudly.
+TEST(NumSimMaterialTarget, RejectsScalarInput) {
+  ConstitutiveModel m("WithScalarInput");
   auto K = m.add_parameter("K", -1.0);
   m.add_scalar_input("temperature"); // scalar inputs are a follow-up
   auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(a, K * a.current);
-  EXPECT_NE(emit_throw_message(m).find("declared inputs"), std::string::npos);
+  EXPECT_NE(emit_throw_message(m).find("scalar input"), std::string::npos);
 }
 
 // Review #88 (cpp-pro): a parameter named like an emitted fixed member would
@@ -207,10 +226,9 @@ TEST(NumSimMaterialTarget, RejectsReservedStateName) {
             std::string::npos);
 }
 
-// A recipe carrying an algorithmic tangent necessarily also has the stress
-// TENSOR output the tangent differentiates, so it is rejected by the
-// tensor-output guard first (the tangents() guard is belt-and-braces until
-// tensor outputs land). Confirm such an unsupported recipe is rejected loudly.
+// The stress TENSOR output is now emitted, so a tangent-bearing recipe is no
+// longer caught by an output guard — the consistent tangent dσ/dε itself is
+// Phase D, so the tangents() guard is now the load-bearing rejection.
 TEST(NumSimMaterialTarget, RejectsTangentBearingRecipe) {
   ConstitutiveModel m("WithTangent");
   auto mu = m.add_parameter("mu", 0.5);
@@ -219,7 +237,8 @@ TEST(NumSimMaterialTarget, RejectsTangentBearingRecipe) {
   auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
   m.add_output("stress", 2 * mu * eps, roles::Stress);
   m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
-  EXPECT_NE(emit_throw_message(m).find("tensor output"), std::string::npos);
+  EXPECT_NE(emit_throw_message(m).find("algorithmic tangents"),
+            std::string::npos);
 }
 
 // Review #88 (cpp-pro): a rate function cannot depend on dt / old-state /

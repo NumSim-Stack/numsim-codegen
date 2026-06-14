@@ -13,14 +13,17 @@
 // that the emitted code actually compiles and runs against the solver contract.
 #include <cmath>
 #include <string>
+#include <tmech/tmech.h>
 
 #include "numsim-materials/core/material_context.h"
 #include "numsim-materials/core/history_property.h"
 #include "numsim-materials/solvers/butcher_tableau.h"
 #include "numsim-materials/solvers/rk_integrator.h"
+#include "numsim-materials/materials/tensor_component_stepper.h"
 
-#include "LinearHardening.h" // generated: dα/dt = K·α
+#include "LinearHardening.h" // generated: dα/dt = K·α (+ scalar output)
 #include "NonlinearDecay.h"  // generated: dα/dt = K·α²
+#include "Viscoelastic.h"    // generated: σ = α·ε (tensor stress from scalar state)
 
 #include <gtest/gtest.h>
 
@@ -34,6 +37,8 @@ using RK = numsim::materials::rk_integrator<policy>;
 
 using Linear = numsim::materials::generated::LinearHardening<policy>;
 using Nonlinear = numsim::materials::generated::NonlinearDecay<policy>;
+using Visco = numsim::materials::generated::Viscoelastic<policy>;
+using tensor2 = tmech::tensor<T, 3, 2>;
 
 constexpr T kK = T{-1.0};
 
@@ -183,6 +188,54 @@ TEST(NumSimMaterialEndToEnd, NonlinearEmittedValuesAreCorrect) {
   auto [rate, drate] = emitted_values<Nonlinear>("NonlinearDecay", T{3});
   EXPECT_NEAR(rate, kK * T{9}, 1e-12);       // K·α²
   EXPECT_NEAR(drate, T{2} * kK * T{3}, 1e-12); // 2·K·α
+}
+
+// ── Tensor stress: scalar integrated state + tensor strain input → σ = α·ε ────
+
+// Drive a strain producer + scalar integrator + the generated Viscoelastic
+// material through the real graph; check the tensor stress output σ = α·ε.
+TEST(NumSimMaterialEndToEnd, TensorStressFromScalarStateAndStrain) {
+  ctx_type ctx;
+  param_type p;
+
+  // strain producer: accumulates `increment` into component (0,0) per update.
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.01});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  p.clear();
+  const auto tab = numsim::materials::forward_euler();
+  p.insert<std::string>("name", "integrator");
+  p.insert<std::string>("function", "Viscoelastic");
+  p.insert<T>("step_size", T{0.1});
+  p.insert<const numsim::materials::butcher_tableau*>("tableau", &tab);
+  ctx.create<RK>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "Viscoelastic");
+  p.insert<std::string>("integrator_source", "integrator");
+  p.insert<std::string>("strain_source", "stepper");
+  p.insert<T>("K", kK);
+  ctx.create<Visco>(p);
+
+  ctx.finalize();
+  auto* hist = dynamic_cast<
+      numsim_core::history_property<T, numsim::materials::property_traits>*>(
+      ctx.find_property("integrator", "state"));
+  ASSERT_NE(hist, nullptr);
+  hist->old_value() = T{1};
+  hist->new_value() = T{1};
+  for (int i = 0; i < 5; ++i) {
+    ctx.update();
+    ctx.commit();
+  }
+
+  const T alpha = ctx.get<T>("integrator", "state");
+  const auto eps = ctx.get<tensor2>("stepper", "strain");
+  const auto sig = ctx.get<tensor2>("Viscoelastic", "stress");
+  EXPECT_NEAR(sig(0, 0), alpha * eps(0, 0), 1e-12); // σ = α·ε on the driven comp
+  EXPECT_NEAR(sig(0, 1), T{0}, 1e-12);              // off-diagonal strain is 0
 }
 
 } // namespace
