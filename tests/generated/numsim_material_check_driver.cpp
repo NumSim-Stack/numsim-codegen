@@ -190,6 +190,21 @@ TEST(NumSimMaterialEndToEnd, NonlinearEmittedValuesAreCorrect) {
   EXPECT_NEAR(drate, T{2} * kK * T{3}, 1e-12); // 2·K·α
 }
 
+// Read a PLAIN tensor property (stress/strain are add_output properties, not
+// history). We deliberately avoid ctx.get<tensor2>(): its generic reader does a
+// dynamic_cast to history_property<tensor2>, which instantiates that template's
+// serialize() — whose `static_assert(is_trivially_copyable_v<T>)` FAILS under
+// clang-19 (tmech::tensor is trivially copyable under gcc-14 but not clang-19;
+// an upstream numsim-core/tmech incompatibility, unrelated to the generated
+// code). Reading the plain property is the correct semantic and compiler-portable.
+tensor2 read_tensor(ctx_type& ctx, const char* mat, const char* prop) {
+  auto* tp = dynamic_cast<
+      numsim_core::property<tensor2, numsim::materials::property_traits>*>(
+      ctx.find_property(mat, prop));
+  EXPECT_NE(tp, nullptr) << "tensor property " << mat << "::" << prop;
+  return tp ? tp->get() : tensor2{};
+}
+
 // ── Tensor stress: scalar integrated state + tensor strain input → σ = α·ε ────
 
 // Drive a strain producer + scalar integrator + the generated Viscoelastic
@@ -231,9 +246,9 @@ TEST(NumSimMaterialEndToEnd, TensorStressFromScalarStateAndStrain) {
     ctx.commit();
   }
 
-  const T alpha = ctx.get<T>("integrator", "state");
-  const auto eps = ctx.get<tensor2>("stepper", "strain");
-  const auto sig = ctx.get<tensor2>("Viscoelastic", "stress");
+  const T alpha = ctx.get<T>("integrator", "state"); // scalar history — fine
+  const auto eps = read_tensor(ctx, "stepper", "strain");
+  const auto sig = read_tensor(ctx, "Viscoelastic", "stress");
   EXPECT_NEAR(sig(0, 0), alpha * eps(0, 0), 1e-12); // σ = α·ε on the driven comp
   EXPECT_NEAR(sig(0, 1), T{0}, 1e-12);              // off-diagonal strain is 0
 }
