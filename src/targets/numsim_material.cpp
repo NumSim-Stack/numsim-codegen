@@ -13,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace numsim::codegen {
@@ -75,17 +76,22 @@ void check_scope(ConstitutiveModel const &model) {
         "NumSimMaterialTarget: tensor-valued state is not yet supported "
         "(needs Mandel + the vector solver, numsim-materials#11/#12).");
   }
-  // Features this increment does not emit — reject loudly instead of dropping.
-  if (!model.outputs().empty()) {
-    throw std::runtime_error(
-        "NumSimMaterialTarget: add_output(...) outputs (stress, etc.) are not "
-        "yet emitted as material properties — Phase B follow-up. Got '" +
-        model.outputs().front().name + "'.");
+  // Scalar outputs ARE emitted (each as its own property + update callback);
+  // tensor outputs (stress) still need the tensor input/state path — reject
+  // those loudly rather than dropping them.
+  for (auto const &o : model.outputs()) {
+    if (o.kind != OutputDecl::Kind::Scalar) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: tensor output '" + o.name +
+          "' (e.g. stress) needs the tensor input/state path (Mandel + the "
+          "vector solver, numsim-materials#11/#12) — a later Phase B step. "
+          "Only scalar outputs are emitted today.");
+    }
   }
   if (!model.tangents().empty()) {
-    // Defensive: a tangent's `of_output` names an existing output, so any
-    // tangent-bearing recipe is already rejected by the outputs() guard above.
-    // Kept so the rejection is explicit if outputs ever become supported first.
+    // A tangent's `of_output` names a TENSOR stress output (rejected above), so
+    // today this is belt-and-braces; it becomes the load-bearing rejection once
+    // tensor outputs land. Phase D emits the tangent-block properties.
     throw std::runtime_error(
         "NumSimMaterialTarget: algorithmic tangents are out of scope for the "
         "rate material (Phase D emits tangent-block properties).");
@@ -192,6 +198,55 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
   auto const drate_rhs = pipeline.scalar().apply(cas::diff(eq.rate, cur_expr));
   auto const decls = ctx.render_statements("    ");
 
+  // Scalar outputs: each becomes its own `<name>` property with an
+  // `update_<name>()` callback, computed from the state + parameters (same leaf
+  // rule as the rate). Rendered in a FRESH context each so the temp-counter
+  // restarts per callback (independent statement scopes).
+  struct EmittedOutput {
+    std::string name, decls, rhs;
+  };
+  std::vector<EmittedOutput> outputs;
+  for (auto const &o : model.outputs()) {
+    auto const &oexpr =
+        std::get<cas::expression_holder<cas::scalar_expression>>(o.expr);
+
+    // Output-leaf guard (mirrors the rate-leaf guard): a scalar output may
+    // reference only the state or a parameter.
+    LeafCollector olc;
+    olc.collect_scalar(oexpr);
+    for (auto const &n : olc.scalar_names()) {
+      if (n != cur_name && !param_names.contains(n)) {
+        throw std::runtime_error(
+            "NumSimMaterialTarget: output '" + o.name + "' references '" + n +
+            "', which is neither the state '" + cur_name +
+            "' nor a parameter (scalar outputs cannot depend on dt, the "
+            "previous-step state, or inputs).");
+      }
+    }
+    // Name-collision guard: the output member `m_out_<name>` and its property
+    // key must not clash with the fixed emitted members or the state/params.
+    if (is_reserved_name(o.name) || o.name == cur_name ||
+        param_names.contains(o.name)) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: output name '" + o.name +
+          "' collides with an emitted member (rate/rate_derivative/"
+          "integrator_source) or the state/a parameter; rename it.");
+    }
+
+    CodeGenContext oc;
+    CodeEmitPipeline op(oc);
+    for (auto const &[name, expr] : model.scalar_symbol_map()) {
+      if (param_names.contains(name)) {
+        oc.register_symbol_scalar(expr, "m_" + name);
+      } else {
+        oc.register_symbol_scalar(expr, name);
+      }
+    }
+    oc.reset();
+    auto const orhs = op.scalar().apply(oexpr);
+    outputs.push_back({o.name, oc.render_statements("    "), orhs});
+  }
+
   auto const &cls = model.name();
 
   // ── Material header ────────────────────────────────────────────────
@@ -233,6 +288,12 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
   h << "        m_rate_derivative(\n";
   h << "            base::template add_output<value_type>(\""
     << contract::rate_derivative_property << "\")),\n";
+  for (auto const &o : outputs) {
+    h << "        m_out_" << o.name
+      << "(base::template add_output<value_type>(\n";
+    h << "            \"" << o.name << "\", &" << cls << "::update_" << o.name
+      << ")),\n";
+  }
   for (auto const &p : params) {
     h << "        m_" << p.name
       << "(base::template get_parameter<value_type>(\"" << p.name << "\")),\n";
@@ -282,10 +343,24 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
   h << "    m_rate_derivative = " << drate_rhs << ";\n";
   h << "  }\n\n";
 
+  // One update callback per scalar output (pulled independently by consumers).
+  for (auto const &o : outputs) {
+    h << "  // " << o.name << " = g(" << cur_name << ", params).\n";
+    h << "  void update_" << o.name << "() {\n";
+    h << "    [[maybe_unused]] const auto " << cur_name << " = m_" << cur_name
+      << ".get();\n";
+    if (!o.decls.empty()) h << o.decls;
+    h << "    m_out_" << o.name << " = " << o.rhs << ";\n";
+    h << "  }\n\n";
+  }
+
   // members
   h << "private:\n";
   h << "  value_type& m_rate;\n";
   h << "  value_type& m_rate_derivative;\n";
+  for (auto const &o : outputs) {
+    h << "  value_type& m_out_" << o.name << ";\n";
+  }
   for (auto const &p : params) {
     // [[maybe_unused]]: a parameter declared but not referenced by the rate is
     // still stored (it stays in the schema/JSON) — suppress clang's

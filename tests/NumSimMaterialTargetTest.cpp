@@ -145,13 +145,31 @@ TEST(NumSimMaterialTarget, RejectsMultipleCoupledStates) {
 // Review #88: silently dropping a declared output/tangent/input is worse than a
 // hard failure for a code generator — reject loudly instead. Round-2: each test
 // asserts WHICH guard fired (message substring), not just that it threw.
-TEST(NumSimMaterialTarget, RejectsDeclaredOutput) {
-  ConstitutiveModel m("WithOutput");
+// Phase B.1: a scalar output is now emitted as its own `<name>` property with an
+// `update_<name>()` callback computed from the state + parameters.
+TEST(NumSimMaterialTarget, EmitsScalarOutputProperty) {
+  ConstitutiveModel m("WithScalarOutput");
   auto K = m.add_parameter("K", -1.0);
   auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(a, K * a.current);
-  m.add_output("extra", K * a.current); // would be silently dropped
-  EXPECT_NE(emit_throw_message(m).find("add_output"), std::string::npos);
+  m.add_output("energy", K * a.current * a.current); // state + param, scalar
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+  EXPECT_NE(h.find("\"energy\", &WithScalarOutput::update_energy"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("void update_energy() {"), std::string::npos) << h;
+  EXPECT_NE(h.find("value_type& m_out_energy;"), std::string::npos) << h;
+}
+
+// Tensor outputs (stress) still need the tensor input/state path — rejected.
+TEST(NumSimMaterialTarget, RejectsTensorOutput) {
+  ConstitutiveModel m("WithTensorOutput");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, mu * a.current);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  EXPECT_NE(emit_throw_message(m).find("tensor output"), std::string::npos);
 }
 
 TEST(NumSimMaterialTarget, RejectsDeclaredInput) {
@@ -189,10 +207,10 @@ TEST(NumSimMaterialTarget, RejectsReservedStateName) {
             std::string::npos);
 }
 
-// Round-3: a recipe carrying an algorithmic tangent necessarily also has the
-// stress OUTPUT the tangent differentiates, so it is rejected by the outputs
-// guard first (the tangents() guard is therefore defensive/unreachable).
-// Confirm such a kitchen-sink unsupported recipe is rejected loudly.
+// A recipe carrying an algorithmic tangent necessarily also has the stress
+// TENSOR output the tangent differentiates, so it is rejected by the
+// tensor-output guard first (the tangents() guard is belt-and-braces until
+// tensor outputs land). Confirm such an unsupported recipe is rejected loudly.
 TEST(NumSimMaterialTarget, RejectsTangentBearingRecipe) {
   ConstitutiveModel m("WithTangent");
   auto mu = m.add_parameter("mu", 0.5);
@@ -201,7 +219,7 @@ TEST(NumSimMaterialTarget, RejectsTangentBearingRecipe) {
   auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
   m.add_output("stress", 2 * mu * eps, roles::Stress);
   m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
-  EXPECT_NE(emit_throw_message(m).find("add_output"), std::string::npos);
+  EXPECT_NE(emit_throw_message(m).find("tensor output"), std::string::npos);
 }
 
 // Review #88 (cpp-pro): a rate function cannot depend on dt / old-state /
