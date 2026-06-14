@@ -132,47 +132,84 @@ gtest_discover_tests(compile_check_driver)
 #
 # The string-asserting NumSimMaterialTargetTest proves the emitted TEXT matches
 # the rk_integrator contract; it CANNOT prove the emitted code compiles and runs
-# against the real solver. This gate does: it generates a NumSimMaterialTarget
-# rate material, compiles it against the REAL numsim-materials + numsim-core
-# headers, and integrates dα/dt = K·α (K=-1) through the real rk_integrator,
-# asserting convergence to e^-1 (closing the dominant gap behind #89).
+# against the real solver. This gate does: it generates NumSimMaterialTarget rate
+# materials (linear dα/dt=K·α and nonlinear dα/dt=K·α²), compiles them against
+# the REAL numsim-materials + numsim-core headers, runs them through the real
+# rk_integrator, and verifies both convergence (closed-form) and the emitted
+# rate / rate_derivative VALUES — closing the dominant gap behind #89.
 #
-# Gated on locating the sibling header-only repos (numsim-materials needs only
-# numsim-core + Eigen on the scalar path — no tmech). SKIPPED if absent; wiring
-# these via FetchContent so the gate also runs in CI is the remaining part of
-# #89. Override the locations with -DNUMSIM_MATERIALS_DIR / -DNUMSIM_CORE_DIR.
+# Source resolution (in order):
+#   1. a local checkout at NUMSIM_MATERIALS_DIR / NUMSIM_CORE_DIR if it has the
+#      headers (fast path for dev — no download);
+#   2. else, if NUMSIM_CODEGEN_FETCH_MATERIALS=ON, CPM-fetch them (DOWNLOAD_ONLY:
+#      headers only, so numsim-materials' own CMake / FetchContents never run and
+#      cannot collide with our tmech/Eigen). CI sets this ON.
+#   3. else SKIP.
+#
+# IMPORTANT (pins): the codegen↔solver contract this gate verifies is NOT on the
+# siblings' `main` yet — it lives on the feature branches below. The SHAs are
+# immutable so CI stays reproducible, but they MUST be bumped (and ideally
+# re-pointed at a `main` tag) once the contract lands upstream. Tracked in #89.
 set(NUMSIM_MATERIALS_DIR "${CMAKE_SOURCE_DIR}/../numsim-materials"
     CACHE PATH "numsim-materials checkout (header-only) for the Phase B e2e gate")
 set(NUMSIM_CORE_DIR "${CMAKE_SOURCE_DIR}/../numsim-core"
     CACHE PATH "numsim-core checkout (header-only) for the Phase B e2e gate")
+option(NUMSIM_CODEGEN_FETCH_MATERIALS
+    "CPM-fetch numsim-materials/numsim-core for the Phase B e2e gate when no \
+local checkout is present (headers only)" OFF)
+# Feature-branch pins — see the IMPORTANT note above. Single source of truth.
+set(_ncg_materials_pin "aaa6614c1aa9eebaa62f8d07a6306bb9defe47ab") # feature/drucker-prager
+set(_ncg_core_pin      "c462d9caf09cba8722076d68da7c7346e0c0623e") # feature/missing-param-names
 
+set(_ncg_materials_inc "")
+set(_ncg_core_inc "")
 if(EXISTS "${NUMSIM_MATERIALS_DIR}/include/numsim-materials/solvers/rk_integrator.h"
    AND EXISTS "${NUMSIM_CORE_DIR}/include/numsim-core/input_parameter_controller.h")
+    set(_ncg_materials_inc "${NUMSIM_MATERIALS_DIR}/include")
+    set(_ncg_core_inc "${NUMSIM_CORE_DIR}/include")
+    message(STATUS "Phase B e2e gate: using local checkouts "
+                   "(${NUMSIM_MATERIALS_DIR})")
+elseif(NUMSIM_CODEGEN_FETCH_MATERIALS)
+    # DOWNLOAD_ONLY: fetch sources without running their CMake (header-only use).
+    CPMAddPackage(NAME numsim_materials_e2e
+        GITHUB_REPOSITORY NumSim-Stack/numsim-materials
+        GIT_TAG ${_ncg_materials_pin} DOWNLOAD_ONLY YES)
+    CPMAddPackage(NAME numsim_core_e2e
+        GITHUB_REPOSITORY NumSim-Stack/numsim-core
+        GIT_TAG ${_ncg_core_pin} DOWNLOAD_ONLY YES)
+    set(_ncg_materials_inc "${numsim_materials_e2e_SOURCE_DIR}/include")
+    set(_ncg_core_inc "${numsim_core_e2e_SOURCE_DIR}/include")
+    message(STATUS "Phase B e2e gate: CPM-fetched siblings (pinned)")
+endif()
+
+if(_ncg_materials_inc AND _ncg_core_inc)
     add_executable(generate_numsim_material_check
         generated/generate_numsim_material_check.cpp)
     target_link_libraries(generate_numsim_material_check
         PRIVATE numsim::codegen numsim_codegen_warnings)
 
-    set(GENERATED_MATERIAL_HEADER
+    set(GENERATED_LINEAR_HEADER
         ${CMAKE_CURRENT_BINARY_DIR}/generated/LinearHardening.h)
+    set(GENERATED_NONLINEAR_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/NonlinearDecay.h)
     add_custom_command(
-        OUTPUT ${GENERATED_MATERIAL_HEADER}
+        OUTPUT ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 ${CMAKE_CURRENT_BINARY_DIR}/generated
         COMMAND $<TARGET_FILE:generate_numsim_material_check>
-                ${GENERATED_MATERIAL_HEADER}
+                ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
         DEPENDS generate_numsim_material_check
-        COMMENT "Generating numsim-materials rate material via NumSimMaterialTarget"
+        COMMENT "Generating numsim-materials rate materials via NumSimMaterialTarget"
         VERBATIM)
 
     add_executable(numsim_material_check_driver
         generated/numsim_material_check_driver.cpp
-        ${GENERATED_MATERIAL_HEADER})
+        ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER})
     # numsim-materials, numsim-core and Eigen are header-only and included as
     # SYSTEM so their warnings stay silent under the first-party -Werror gate.
     target_include_directories(numsim_material_check_driver SYSTEM PRIVATE
-        ${NUMSIM_MATERIALS_DIR}/include
-        ${NUMSIM_CORE_DIR}/include
+        ${_ncg_materials_inc}
+        ${_ncg_core_inc}
         ${eigen3_SOURCE_DIR})
     target_include_directories(numsim_material_check_driver PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}/generated)
@@ -180,12 +217,11 @@ if(EXISTS "${NUMSIM_MATERIALS_DIR}/include/numsim-materials/solvers/rk_integrato
     target_link_libraries(numsim_material_check_driver
         PRIVATE numsim_codegen_warnings_light GTest::gtest GTest::gtest_main)
     gtest_discover_tests(numsim_material_check_driver)
-    message(STATUS "Phase B e2e gate ENABLED (numsim-materials at "
-                   "${NUMSIM_MATERIALS_DIR})")
+    message(STATUS "Phase B e2e gate ENABLED")
 else()
-    message(STATUS "Phase B e2e gate SKIPPED: numsim-materials/numsim-core not "
-                   "found at ${NUMSIM_MATERIALS_DIR} / ${NUMSIM_CORE_DIR} "
-                   "(set -DNUMSIM_MATERIALS_DIR / -DNUMSIM_CORE_DIR to enable)")
+    message(STATUS "Phase B e2e gate SKIPPED: no local checkout at "
+                   "${NUMSIM_MATERIALS_DIR} / ${NUMSIM_CORE_DIR} and "
+                   "NUMSIM_CODEGEN_FETCH_MATERIALS=OFF")
 endif()
 
 # ─── Header-purity guard ───────────────────────────────────────────────────
