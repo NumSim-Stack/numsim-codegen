@@ -108,6 +108,27 @@ std::pair<T, T> emitted_values(const std::string& name, T alpha) {
   return {ctx.get<T>(name, "rate"), ctx.get<T>(name, "rate_derivative")};
 }
 
+// Fire a generated scalar OUTPUT's update callback at a known α and return its
+// emitted value — verifies B.1 output emission through the real material graph.
+template <typename Mat>
+T emitted_output(const std::string& name, const std::string& prop, T alpha) {
+  ctx_type ctx;
+  const auto tab = numsim::materials::forward_euler(); // must outlive build()
+  build<Mat>(ctx, name, tab, T{0.1});
+
+  auto* hist = dynamic_cast<
+      numsim_core::history_property<T, numsim::materials::property_traits>*>(
+      ctx.find_property("integrator", "state"));
+  EXPECT_NE(hist, nullptr);
+  hist->new_value() = alpha;
+
+  auto* p = ctx.find_property(name, prop);
+  EXPECT_NE(p, nullptr) << "generated material must publish output `" << prop << "`";
+  if (!p) return std::nan("");
+  p->traits().update();
+  return ctx.get<T>(name, prop);
+}
+
 // ── Linear: dα/dt = K·α (constant derivative) ────────────────────────────────
 
 const T kExactLinear = std::exp(-1.0); // α(1) for dα/dt = -α, α(0) = 1
@@ -138,6 +159,12 @@ TEST(NumSimMaterialEndToEnd, LinearEmittedValuesAreCorrect) {
   auto [rate, drate] = emitted_values<Linear>("LinearHardening", T{2});
   EXPECT_NEAR(rate, kK * T{2}, 1e-12);  // K·α
   EXPECT_NEAR(drate, kK, 1e-12);        // K
+}
+
+// B.1: a generated scalar output property computes correctly through the graph.
+TEST(NumSimMaterialEndToEnd, LinearEmittedScalarOutputIsCorrect) {
+  EXPECT_NEAR(emitted_output<Linear>("LinearHardening", "twice_state", T{2.5}),
+              T{5.0}, 1e-12); // 2·α
 }
 
 // ── Nonlinear: dα/dt = K·α² (non-constant derivative 2·K·α) ───────────────────

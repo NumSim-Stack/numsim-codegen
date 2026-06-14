@@ -55,13 +55,15 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  // dα/dt = K·α — rate = K·α, rate_derivative = K.
+  // dα/dt = K·α — rate = K·α, rate_derivative = K. Plus a scalar OUTPUT
+  // `twice_state` = 2·α (state-only) to exercise B.1 output emission end-to-end.
   ConstitutiveModel linear("LinearHardening");
   {
     auto K = linear.add_parameter("K", -1.0);
     auto alpha = linear.add_scalar_state_variable(
         "alpha", make_expression<scalar_constant>(0.0));
     linear.add_scalar_evolution_equation(alpha, K * alpha.current);
+    linear.add_output("twice_state", alpha.current + alpha.current);
   }
 
   // dα/dt = K·α² — rate = K·α², rate_derivative = 2·K·α (cas::diff power rule).
