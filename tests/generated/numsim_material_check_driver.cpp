@@ -19,8 +19,23 @@
 #include "numsim-materials/solvers/butcher_tableau.h"
 #include "numsim-materials/solvers/rk_integrator.h"
 
-#include "LinearHardening.h" // generated: dα/dt = K·α
+#include "LinearHardening.h" // generated: dα/dt = K·α (+ scalar output)
 #include "NonlinearDecay.h"  // generated: dα/dt = K·α²
+
+// The tensor-stress end-to-end case is GCC-only. Wiring a tensor input
+// (input_property<tmech::tensor>::wire) instantiates history_property<tensor>'s
+// `static_assert(is_trivially_copyable_v<T>)`, which FAILS under clang-19 because
+// tmech::tensor is trivially copyable under gcc-14 but not clang-19. This is an
+// UPSTREAM numsim-core/tmech incompatibility (it breaks numsim-materials' own
+// linear_elasticity under clang too), not a defect in the generated code — which
+// gcc compiles and runs correctly. Tracked: numsim-core#16. The emit shape itself
+// is verified compiler-independently by NumSimMaterialTargetTest.EmitsTensorStressOutput.
+#if defined(__GNUC__) && !defined(__clang__)
+#define NCG_TENSOR_E2E 1
+#include <tmech/tmech.h>
+#include "numsim-materials/materials/tensor_component_stepper.h"
+#include "Viscoelastic.h" // generated: σ = α·ε (tensor stress from scalar state)
+#endif
 
 #include <gtest/gtest.h>
 
@@ -34,6 +49,10 @@ using RK = numsim::materials::rk_integrator<policy>;
 
 using Linear = numsim::materials::generated::LinearHardening<policy>;
 using Nonlinear = numsim::materials::generated::NonlinearDecay<policy>;
+#ifdef NCG_TENSOR_E2E
+using Visco = numsim::materials::generated::Viscoelastic<policy>;
+using tensor2 = tmech::tensor<T, 3, 2>;
+#endif
 
 constexpr T kK = T{-1.0};
 
@@ -184,5 +203,65 @@ TEST(NumSimMaterialEndToEnd, NonlinearEmittedValuesAreCorrect) {
   EXPECT_NEAR(rate, kK * T{9}, 1e-12);       // K·α²
   EXPECT_NEAR(drate, T{2} * kK * T{3}, 1e-12); // 2·K·α
 }
+
+// ── Tensor stress (GCC-only — see the NCG_TENSOR_E2E note at the top) ─────────
+#ifdef NCG_TENSOR_E2E
+
+// Read a plain tensor property (stress/strain are add_output properties).
+tensor2 read_tensor(ctx_type& ctx, const char* mat, const char* prop) {
+  auto* tp = dynamic_cast<
+      numsim_core::property<tensor2, numsim::materials::property_traits>*>(
+      ctx.find_property(mat, prop));
+  EXPECT_NE(tp, nullptr) << "tensor property " << mat << "::" << prop;
+  return tp ? tp->get() : tensor2{};
+}
+
+// Drive a strain producer + scalar integrator + the generated Viscoelastic
+// material through the real graph; check the tensor stress output σ = α·ε.
+TEST(NumSimMaterialEndToEnd, TensorStressFromScalarStateAndStrain) {
+  ctx_type ctx;
+  param_type p;
+
+  // strain producer: accumulates `increment` into component (0,0) per update.
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.01});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  p.clear();
+  const auto tab = numsim::materials::forward_euler();
+  p.insert<std::string>("name", "integrator");
+  p.insert<std::string>("function", "Viscoelastic");
+  p.insert<T>("step_size", T{0.1});
+  p.insert<const numsim::materials::butcher_tableau*>("tableau", &tab);
+  ctx.create<RK>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "Viscoelastic");
+  p.insert<std::string>("integrator_source", "integrator");
+  p.insert<std::string>("strain_source", "stepper");
+  p.insert<T>("K", kK);
+  ctx.create<Visco>(p);
+
+  ctx.finalize();
+  auto* hist = dynamic_cast<
+      numsim_core::history_property<T, numsim::materials::property_traits>*>(
+      ctx.find_property("integrator", "state"));
+  ASSERT_NE(hist, nullptr);
+  hist->old_value() = T{1};
+  hist->new_value() = T{1};
+  for (int i = 0; i < 5; ++i) {
+    ctx.update();
+    ctx.commit();
+  }
+
+  const T alpha = ctx.get<T>("integrator", "state"); // scalar history — fine
+  const auto eps = read_tensor(ctx, "stepper", "strain");
+  const auto sig = read_tensor(ctx, "Viscoelastic", "stress");
+  EXPECT_NEAR(sig(0, 0), alpha * eps(0, 0), 1e-12); // σ = α·ε on the driven comp
+  EXPECT_NEAR(sig(0, 1), T{0}, 1e-12);              // off-diagonal strain is 0
+}
+
+#endif // NCG_TENSOR_E2E
 
 } // namespace

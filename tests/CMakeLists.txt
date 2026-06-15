@@ -192,25 +192,32 @@ if(_ncg_materials_inc AND _ncg_core_inc)
         ${CMAKE_CURRENT_BINARY_DIR}/generated/LinearHardening.h)
     set(GENERATED_NONLINEAR_HEADER
         ${CMAKE_CURRENT_BINARY_DIR}/generated/NonlinearDecay.h)
+    set(GENERATED_VISCO_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/Viscoelastic.h)
     add_custom_command(
         OUTPUT ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
+               ${GENERATED_VISCO_HEADER}
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 ${CMAKE_CURRENT_BINARY_DIR}/generated
         COMMAND $<TARGET_FILE:generate_numsim_material_check>
                 ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
+                ${GENERATED_VISCO_HEADER}
         DEPENDS generate_numsim_material_check
         COMMENT "Generating numsim-materials rate materials via NumSimMaterialTarget"
         VERBATIM)
 
     add_executable(numsim_material_check_driver
         generated/numsim_material_check_driver.cpp
-        ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER})
-    # numsim-materials, numsim-core and Eigen are header-only and included as
-    # SYSTEM so their warnings stay silent under the first-party -Werror gate.
+        ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
+        ${GENERATED_VISCO_HEADER})
+    # numsim-materials, numsim-core, Eigen and tmech are header-only and included
+    # as SYSTEM so their warnings stay silent under the first-party -Werror gate.
+    # tmech (via cas's CPM) is needed for the tensor-stress material/test.
     target_include_directories(numsim_material_check_driver SYSTEM PRIVATE
         ${_ncg_materials_inc}
         ${_ncg_core_inc}
-        ${eigen3_SOURCE_DIR})
+        ${eigen3_SOURCE_DIR}
+        ${tmech_SOURCE_DIR}/include)
     target_include_directories(numsim_material_check_driver PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}/generated)
     # The generated material is first-party emitted code — gate it -Wall -Wextra.
