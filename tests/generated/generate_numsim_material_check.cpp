@@ -90,6 +90,9 @@ int main(int argc, char** argv) {
     viscoelastic.add_scalar_evolution_equation(alpha, K * alpha.current);
     auto eps = viscoelastic.add_tensor_input("strain", 3, 2, roles::Strain);
     viscoelastic.add_output("stress", alpha.current * eps);
+    // Phase D: consistent tangent dσ/dε. Since the rate (K·α) is strain-
+    // independent, dα/dε=0, so dσ/dε = ∂σ/∂ε = α·P_sym (minor-symmetric).
+    viscoelastic.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
   }
 
   if (!write_header(linear, argv[1])) return 1;

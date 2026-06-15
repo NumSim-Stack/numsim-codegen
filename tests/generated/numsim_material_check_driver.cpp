@@ -260,6 +260,17 @@ TEST(NumSimMaterialEndToEnd, TensorStressFromScalarStateAndStrain) {
   const auto sig = read_tensor(ctx, "Viscoelastic", "stress");
   EXPECT_NEAR(sig(0, 0), alpha * eps(0, 0), 1e-12); // σ = α·ε on the driven comp
   EXPECT_NEAR(sig(0, 1), T{0}, 1e-12);              // off-diagonal strain is 0
+
+  // Phase D: consistent tangent dσ/dε = α·P_sym (rank-4, minor-symmetric).
+  using tensor4 = tmech::tensor<T, 3, 4>;
+  auto* cp = dynamic_cast<
+      numsim_core::property<tensor4, numsim::materials::property_traits>*>(
+      ctx.find_property("Viscoelastic", "dstress_dstrain"));
+  ASSERT_NE(cp, nullptr);
+  const auto C = cp->get();
+  EXPECT_NEAR(C(0, 0, 0, 0), alpha, 1e-12);       // P_sym(0,0,0,0)=1
+  EXPECT_NEAR(C(0, 1, 0, 1), alpha * 0.5, 1e-12); // minor-symmetric ½
+  EXPECT_NEAR(C(0, 0, 1, 1), T{0}, 1e-12);        // off-block zero
 }
 
 #endif // NCG_TENSOR_E2E

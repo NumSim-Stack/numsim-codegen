@@ -6,6 +6,7 @@
 #include <numsim_codegen/recipe.h>
 
 #include <numsim_cas/core/diff.h>
+#include <numsim_cas/tensor/tensor_diff.h>
 
 #include <cmath>
 #include <format>
@@ -89,13 +90,28 @@ void check_scope(ConstitutiveModel const &model) {
   // properties with their own update callbacks. Only tensor INTERNAL STATE is
   // still blocked (Mandel + vector solver) — a tensor stress from a scalar state
   // needs neither, so it is supported here.
-  if (!model.tangents().empty()) {
-    // Tensor stress outputs ARE emitted now, so a tangent's `of_output` resolves
-    // — but the consistent tangent dσ/dε itself is Phase D (it emits the
-    // tangent-block properties the solver assembles), so reject it here.
-    throw std::runtime_error(
-        "NumSimMaterialTarget: algorithmic tangents are out of scope for the "
-        "rate material (Phase D emits tangent-block properties).");
+  // Algorithmic/consistent tangents dσ/dε ARE emitted (Phase D) as rank-4 tensor
+  // properties via cas::diff. In THIS target's scope the rate cannot depend on
+  // strain (rate-leaf guard), so the integrated state is independent of the
+  // current strain (dx/dε ≡ 0) and dσ/dε = ∂σ/∂ε exactly — no J⁻¹ solve / no
+  // rank-4 inverse, just diff(stress, strain). Validate each spec resolves.
+  for (auto const &t : model.tangents()) {
+    bool of_ok = false;
+    for (auto const &o : model.outputs())
+      if (o.name == t.of_output && o.kind == OutputDecl::Kind::Tensor) of_ok = true;
+    if (!of_ok) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: tangent '" + t.name + "' differentiates '" +
+          t.of_output + "', which is not a declared tensor output (stress).");
+    }
+    bool wrt_ok = false;
+    for (auto const &in : model.inputs())
+      if (in.name == t.wrt_input && in.kind == SymbolDecl::Kind::Tensor) wrt_ok = true;
+    if (!wrt_ok) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: tangent '" + t.name + "' differentiates w.r.t. '" +
+          t.wrt_input + "', which is not a declared tensor input (strain).");
+    }
   }
   // Tensor inputs (e.g. strain) ARE wired (Global-edge input_property); scalar
   // inputs are a separate small follow-up — reject those loudly for now.
@@ -301,6 +317,44 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
       outputs.push_back(
           {o.name, oc.render_statements("    "), orhs, true, o.dim, o.rank});
     }
+  }
+
+  // Consistent tangents dσ/dε: a rank-4 tensor property = cas::diff(stress, strain).
+  // Folded into `outputs` as rank-4 tensor outputs, so the ctor/callback/member
+  // emission below handles them uniformly. The strain's roles::Strain symmetric
+  // space makes diff return the minor-symmetric rank-4 identity (P_sym), so the
+  // tangent is minor-symmetric as a stress-strain tangent must be.
+  for (auto const &t : model.tangents()) {
+    cas::expression_holder<cas::tensor_expression> sigma;
+    std::size_t tdim = 0;
+    for (auto const &o : model.outputs()) {
+      if (o.name == t.of_output && o.kind == OutputDecl::Kind::Tensor) {
+        sigma = std::get<cas::expression_holder<cas::tensor_expression>>(o.expr);
+        tdim = o.dim;
+      }
+    }
+    cas::expression_holder<cas::tensor_expression> eps;
+    for (auto const &[name, h] : model.tensor_symbol_map()) {
+      if (name == t.wrt_input) eps = h;
+    }
+    // check_scope already verified both resolve; guard belt-and-braces so a
+    // future check_scope/emit drift surfaces as a clear error, not cas::diff UB.
+    if (!sigma.is_valid() || !eps.is_valid()) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: tangent '" + t.name +
+          "' could not resolve its stress output / strain input handle.");
+    }
+    auto const tangent_expr = cas::diff(sigma, eps); // rank-4 ∂σ/∂ε
+
+    CodeGenContext tc;
+    CodeEmitPipeline tp(tc);
+    register_scalars(tc);
+    for (auto const &[name, expr] : model.tensor_symbol_map()) {
+      tc.register_symbol_tensor(expr, name);
+    }
+    tc.reset();
+    auto const trhs = tp.tensor().apply(tangent_expr);
+    outputs.push_back({t.name, tc.render_statements("    "), trhs, true, tdim, 4});
   }
 
   bool has_tensor = !tensor_inputs.empty();
