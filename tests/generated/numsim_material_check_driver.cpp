@@ -28,8 +28,8 @@
 // tmech::tensor is trivially copyable under gcc-14 but not clang-19. This is an
 // UPSTREAM numsim-core/tmech incompatibility (it breaks numsim-materials' own
 // linear_elasticity under clang too), not a defect in the generated code — which
-// gcc compiles and runs correctly. Tracked upstream; the emit shape itself is
-// verified compiler-independently by NumSimMaterialTargetTest.EmitsTensorStressOutput.
+// gcc compiles and runs correctly. Tracked: numsim-core#16. The emit shape itself
+// is verified compiler-independently by NumSimMaterialTargetTest.EmitsTensorStressOutput.
 #if defined(__GNUC__) && !defined(__clang__)
 #define NCG_TENSOR_E2E 1
 #include <tmech/tmech.h>

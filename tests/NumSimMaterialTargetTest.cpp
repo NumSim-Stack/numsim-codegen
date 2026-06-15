@@ -190,6 +190,33 @@ TEST(NumSimMaterialTarget, EmitsTensorStressOutput) {
   EXPECT_NE(h.find("void update_stress() {"), std::string::npos) << h;
 }
 
+// A tensor input named like a synthesized member must be rejected (it would
+// emit a duplicate `m_rate` member). The recipe permits the name (it isn't a
+// recipe-reserved word); the emitter's uniqueness guard catches it.
+TEST(NumSimMaterialTarget, RejectsTensorInputCollidingWithSynthesizedMember) {
+  ConstitutiveModel m("InputNameClash");
+  auto K = m.add_parameter("K", -1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  auto rate = m.add_tensor_input("rate", 3, 2, roles::Strain); // → m_rate clash
+  m.add_output("stress", a.current * rate, roles::Stress);
+  EXPECT_NE(emit_throw_message(m).find("would be duplicated"), std::string::npos);
+}
+
+// An input "strain" alongside a parameter "strain_source" both want
+// m_strain_source — the recipe allows the two distinct symbols, the emitter
+// uniqueness guard rejects the collision.
+TEST(NumSimMaterialTarget, RejectsInputSourceParamCollision) {
+  ConstitutiveModel m("SourceNameClash");
+  auto K = m.add_parameter("K", -1.0);
+  auto ss = m.add_parameter("strain_source", 1.0); // collides with strain's _source
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, (K + ss) * a.current);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  m.add_output("stress", a.current * eps, roles::Stress);
+  EXPECT_NE(emit_throw_message(m).find("would be duplicated"), std::string::npos);
+}
+
 // Scalar inputs are not yet wired (tensor inputs ARE) — rejected loudly.
 TEST(NumSimMaterialTarget, RejectsScalarInput) {
   ConstitutiveModel m("WithScalarInput");

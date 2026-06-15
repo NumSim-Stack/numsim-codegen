@@ -307,6 +307,38 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
   for (auto const &o : outputs)
     if (o.is_tensor) has_tensor = true;
 
+  // Comprehensive emitted-member uniqueness guard. Every generated `m_<base>`
+  // member basename must be distinct, else the class gets duplicate members /
+  // initializers (uncompilable). The recipe enforces symbol-name uniqueness, but
+  // the emitter SYNTHESIZES extra names — `rate`, `rate_derivative`,
+  // `integrator_source`, `out_<output>`, `<input>_source` — that a recipe symbol
+  // can still collide with (a tensor input literally named "rate"; an input
+  // "strain" alongside a parameter "strain_source"; an input named "integrator"
+  // whose "_source" param clashes with the fixed integrator_source). Reject
+  // loudly rather than emit broken C++. (The is_reserved_name checks above still
+  // fire first for state/parameter cases, giving a more specific message.)
+  {
+    std::set<std::string> member_bases;
+    auto claim = [&member_bases](std::string const &base) {
+      if (!member_bases.insert(base).second) {
+        throw std::runtime_error(
+            "NumSimMaterialTarget: emitted member 'm_" + base +
+            "' would be duplicated — a recipe symbol collides with a synthesized "
+            "member name; rename the offending state/parameter/input/output.");
+      }
+    };
+    claim(contract::rate_property);
+    claim(contract::rate_derivative_property);
+    claim(contract::integrator_source_param);
+    claim(cur_name);
+    for (auto const &p : params) claim(p.name);
+    for (auto const &o : outputs) claim("out_" + o.name);
+    for (auto const &ti : tensor_inputs) {
+      claim(ti.name);
+      claim(ti.name + "_source");
+    }
+  }
+
   auto const &cls = model.name();
 
   // ── Material header ────────────────────────────────────────────────
