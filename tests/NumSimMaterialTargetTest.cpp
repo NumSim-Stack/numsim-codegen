@@ -253,18 +253,40 @@ TEST(NumSimMaterialTarget, RejectsReservedStateName) {
             std::string::npos);
 }
 
-// The stress TENSOR output is now emitted, so a tangent-bearing recipe is no
-// longer caught by an output guard — the consistent tangent dσ/dε itself is
-// Phase D, so the tangents() guard is now the load-bearing rejection.
-TEST(NumSimMaterialTarget, RejectsTangentBearingRecipe) {
+// Phase D: the consistent tangent dσ/dε is emitted as a rank-4 tensor property
+// via cas::diff(stress, strain). With a strain-INDEPENDENT rate (dα/dε=0) this is
+// the exact consistent tangent. For σ=2μ·ε the tangent is 2μ·P_sym, so the
+// emitted rank-4 RHS is minor-symmetric (otimesu + otimesl).
+TEST(NumSimMaterialTarget, EmitsConsistentTangent) {
   ConstitutiveModel m("WithTangent");
   auto mu = m.add_parameter("mu", 0.5);
   auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(a, mu * a.current);
-  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
   m.add_output("stress", 2 * mu * eps, roles::Stress);
-  m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
-  EXPECT_NE(emit_throw_message(m).find("algorithmic tangents"),
+  m.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+  // rank-4 tensor property + its own callback
+  EXPECT_NE(h.find("add_output<tmech::tensor<value_type, 3, 4>>(\n"
+                   "            \"dstress_dstrain\", "
+                   "&WithTangent::update_dstress_dstrain"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("void update_dstress_dstrain() {"), std::string::npos) << h;
+  // minor-symmetric: both otimesu AND otimesl present in the tangent RHS
+  EXPECT_NE(h.find("tmech::otimesu"), std::string::npos) << h;
+  EXPECT_NE(h.find("tmech::otimesl"), std::string::npos) << h;
+}
+
+// A tangent whose `of_output` is not a declared tensor output is rejected.
+TEST(NumSimMaterialTarget, RejectsTangentOfMissingStress) {
+  ConstitutiveModel m("BadTangent");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, mu * a.current);
+  m.add_tensor_input("strain", 3, 2, roles::Strain);
+  m.add_algorithmic_tangent("dstress_dstrain", "stress", "strain"); // no "stress"
+  EXPECT_NE(emit_throw_message(m).find("not a declared tensor output"),
             std::string::npos);
 }
 
