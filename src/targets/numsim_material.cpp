@@ -337,7 +337,13 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
     for (auto const &[name, h] : model.tensor_symbol_map()) {
       if (name == t.wrt_input) eps = h;
     }
-    // check_scope already verified both resolve; assert the handles are valid.
+    // check_scope already verified both resolve; guard belt-and-braces so a
+    // future check_scope/emit drift surfaces as a clear error, not cas::diff UB.
+    if (!sigma.is_valid() || !eps.is_valid()) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: tangent '" + t.name +
+          "' could not resolve its stress output / strain input handle.");
+    }
     auto const tangent_expr = cas::diff(sigma, eps); // rank-4 ∂σ/∂ε
 
     CodeGenContext tc;
