@@ -219,6 +219,23 @@ struct EvolutionEquation {
   std::string doc;
 };
 
+// Phase D strain-coupled (verified-reachable 2026-06-15): an IMPLICIT evolution.
+// Instead of a rate `dx/dt = f(x)`, the state x is defined by a residual
+// `R(x, inputs) = 0` solved by a Newton solver (numsim-materials' backward_euler
+// on the graph-coupled path). Unlike a rate — which the rk_integrator contract
+// forbids from referencing inputs (the integrator owns discretization) — a
+// residual is EXPECTED to depend on a tensor strain input (that is the coupling),
+// so its expression is `tensor_to_scalar`-typed: a scalar R built from the scalar
+// state/params AND tensor inputs (e.g. `x - c*trace(eps)`). This unlocks real
+// return-map / plasticity-class models and a strain-coupled consistent tangent
+// dσ/dε = ∂σ/∂ε + ∂σ/∂x·(−∂R/∂ε / ∂R/∂x). A state variable carries EITHER a rate
+// (EvolutionEquation) OR a residual (this) — never both.
+struct ResidualEquation {
+  std::size_t state_variable_idx;
+  cas::expression_holder<cas::tensor_to_scalar_expression> residual;
+  std::string doc;
+};
+
 // Phase 3a-2 (issue #75): tuning for the in-function Newton solve emitted
 // by LocalNewtonLoweringPass. `tol` is the absolute residual threshold for
 // convergence; `max_iter` caps the iteration count (no line search /
@@ -481,74 +498,11 @@ public:
       ScalarStateVariableHandle const &state_var,
       cas::expression_holder<cas::scalar_expression> rate,
       std::string doc = "") -> void {
-    // PR #69 round-1 #3: cross-recipe hijack defense. The handle's
-    // `model_token` MUST equal `this` — otherwise the user passed a
-    // handle that came from a different ConstitutiveModel (or
-    // manually-constructed). Pure name-based matching would silently
-    // bind to a coincidentally-named state variable on this model.
-    if (state_var.model_token == nullptr) {
-      throw std::runtime_error(std::format(
-          "ConstitutiveModel '{}': add_scalar_evolution_equation handle "
-          "has no model token. Handles must come from "
-          "add_scalar_state_variable on this model — manually-constructed "
-          "handles are not accepted.",
-          m_name));
-    }
-    if (state_var.model_token != this) {
-      throw std::runtime_error(std::format(
-          "ConstitutiveModel '{}': add_scalar_evolution_equation handle "
-          "came from a different ConstitutiveModel (handle.model_token = "
-          "{}, this = {}). Each handle is bound to the recipe that "
-          "created it; cross-recipe use would silently bind by name and "
-          "discretise the wrong state variable.",
-          m_name, static_cast<void const *>(state_var.model_token),
-          static_cast<void const *>(this)));
-    }
-
-    // PR #69 round-1 review (CRITICAL): the handle's `current` MUST be a
-    // bare scalar leaf (i.e. `cas::scalar`), not a compound expression.
-    // `expression_holder::get<cas::scalar>()` would use an
-    // `assert(dynamic_cast != nullptr)` path that's stripped under
-    // `NDEBUG`, then UB on the unchecked `static_cast`. Use an explicit
-    // runtime dynamic_cast that throws a clear diagnostic instead.
-    auto const *typed = dynamic_cast<cas::scalar const *>(
-        state_var.current.data().get());
-    if (!typed) {
-      throw std::runtime_error(std::format(
-          "ConstitutiveModel '{}': add_scalar_evolution_equation handle's "
-          "`current` is not a bare scalar leaf symbol. Handles must come "
-          "from add_scalar_state_variable — you cannot synthesise one "
-          "from a compound expression like `K * alpha`.",
-          m_name));
-    }
-    auto const &sv_name = typed->name();
-
-    std::size_t found_idx = m_state_variables.size();
-    for (std::size_t i = 0; i < m_state_variables.size(); ++i) {
-      if (m_state_variables[i].kind == SymbolDecl::Kind::Scalar &&
-          m_state_variables[i].name == sv_name) {
-        found_idx = i;
-        break;
-      }
-    }
-    if (found_idx == m_state_variables.size()) {
-      // List registered scalar state variables to help debug.
-      std::string registered;
-      for (auto const &sv : m_state_variables) {
-        if (sv.kind == SymbolDecl::Kind::Scalar) {
-          if (!registered.empty()) registered += ", ";
-          registered += sv.name;
-        }
-      }
-      throw std::runtime_error(std::format(
-          "ConstitutiveModel '{}': add_scalar_evolution_equation handle "
-          "names scalar state variable '{}' but no such state variable "
-          "is registered on this model. Did the handle come from a "
-          "different ConstitutiveModel, or was the state variable added "
-          "with add_tensor_state_variable instead? Registered scalar "
-          "state variables: [{}].",
-          m_name, sv_name, registered));
-    }
+    auto const found_idx = resolve_scalar_state_var_index_(
+        state_var, "add_scalar_evolution_equation");
+    auto const &sv_name = m_state_variables[found_idx].name;
+    assert_state_var_unbound_(found_idx, sv_name,
+                              "add_scalar_evolution_equation");
 
     // Validate that the rate expression's leaves are all declared
     // symbols on this model (PR #69 round-1 #4). Fail fast in the
@@ -560,6 +514,25 @@ public:
 
     EvolutionEquation eq{found_idx, std::move(rate), std::move(doc)};
     m_evolution_equations.push_back(std::move(eq));
+  }
+
+  // Phase D strain-coupled: declare an IMPLICIT residual `R(x, inputs) = 0` for
+  // an already-added scalar state variable, solved by a Newton solver. Unlike a
+  // rate, the residual MAY (and typically does) reference tensor inputs (strain)
+  // — that is the coupling — hence the `tensor_to_scalar`-typed residual. A state
+  // variable carries EITHER a rate OR a residual, never both (enforced).
+  auto add_scalar_residual_equation(
+      ScalarStateVariableHandle const &state_var,
+      cas::expression_holder<cas::tensor_to_scalar_expression> residual,
+      std::string doc = "") -> void {
+    auto const found_idx = resolve_scalar_state_var_index_(
+        state_var, "add_scalar_residual_equation");
+    auto const &sv_name = m_state_variables[found_idx].name;
+    assert_state_var_unbound_(found_idx, sv_name,
+                              "add_scalar_residual_equation");
+    validate_residual_expression_leaves_(residual, sv_name);
+    ResidualEquation eq{found_idx, std::move(residual), std::move(doc)};
+    m_residual_equations.push_back(std::move(eq));
   }
 
   // ─── Output declarations ────────────────────────────────────────
@@ -767,6 +740,11 @@ public:
   [[nodiscard]] auto evolution_equations() const noexcept
       -> std::span<EvolutionEquation const> {
     return m_evolution_equations;
+  }
+
+  [[nodiscard]] auto residual_equations() const noexcept
+      -> std::span<ResidualEquation const> {
+    return m_residual_equations;
   }
 
   // Phase 3a-2 (issue #75): opt into in-function local Newton solving.
@@ -994,6 +972,126 @@ private:
     m_parameters_cache.back().is_time_step = true;
   }
 
+  // Resolve a ScalarStateVariableHandle to its index in m_state_variables,
+  // with the cross-recipe-hijack + bare-leaf defenses (PR #69 round-1 #3).
+  // `caller` names the public method for the diagnostic. Shared by
+  // add_scalar_evolution_equation and add_scalar_residual_equation.
+  [[nodiscard]] auto resolve_scalar_state_var_index_(
+      ScalarStateVariableHandle const &state_var, std::string_view caller) const
+      -> std::size_t {
+    if (state_var.model_token == nullptr) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': {} handle has no model token. Handles must "
+          "come from add_scalar_state_variable on this model — "
+          "manually-constructed handles are not accepted.",
+          m_name, caller));
+    }
+    if (state_var.model_token != this) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': {} handle came from a different "
+          "ConstitutiveModel (handle.model_token = {}, this = {}). Each handle "
+          "is bound to the recipe that created it; cross-recipe use would "
+          "silently bind by name and discretise the wrong state variable.",
+          m_name, caller, static_cast<void const *>(state_var.model_token),
+          static_cast<void const *>(this)));
+    }
+    auto const *typed =
+        dynamic_cast<cas::scalar const *>(state_var.current.data().get());
+    if (!typed) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': {} handle's `current` is not a bare scalar "
+          "leaf symbol. Handles must come from add_scalar_state_variable — you "
+          "cannot synthesise one from a compound expression like `K * alpha`.",
+          m_name, caller));
+    }
+    auto const &sv_name = typed->name();
+    for (std::size_t i = 0; i < m_state_variables.size(); ++i) {
+      if (m_state_variables[i].kind == SymbolDecl::Kind::Scalar &&
+          m_state_variables[i].name == sv_name) {
+        return i;
+      }
+    }
+    std::string registered;
+    for (auto const &sv : m_state_variables) {
+      if (sv.kind == SymbolDecl::Kind::Scalar) {
+        if (!registered.empty()) registered += ", ";
+        registered += sv.name;
+      }
+    }
+    throw std::runtime_error(std::format(
+        "ConstitutiveModel '{}': {} handle names scalar state variable '{}' but "
+        "no such state variable is registered on this model. Did the handle "
+        "come from a different ConstitutiveModel, or was the state variable "
+        "added with add_tensor_state_variable instead? Registered scalar state "
+        "variables: [{}].",
+        m_name, caller, sv_name, registered));
+  }
+
+  // A scalar state variable carries EXACTLY ONE evolution mechanism — a rate
+  // (EvolutionEquation) or an implicit residual (ResidualEquation). Reject a
+  // second binding rather than emitting a contradictory material.
+  void assert_state_var_unbound_(std::size_t idx, std::string_view sv_name,
+                                 std::string_view caller) const {
+    for (auto const &e : m_evolution_equations) {
+      if (e.state_variable_idx == idx) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': {} — state variable '{}' already has a "
+            "rate evolution equation; a state carries either a rate or a "
+            "residual, not both.",
+            m_name, caller, sv_name));
+      }
+    }
+    for (auto const &r : m_residual_equations) {
+      if (r.state_variable_idx == idx) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': {} — state variable '{}' already has an "
+            "implicit residual equation; a state carries either a rate or a "
+            "residual, not both.",
+            m_name, caller, sv_name));
+      }
+    }
+  }
+
+  // Like validate_rate_expression_leaves_ but for a t2s residual: every leaf
+  // (scalar AND tensor) must be a declared symbol, and the state must itself
+  // appear (else ∂R/∂x ≡ 0 — a singular Newton Jacobian).
+  void validate_residual_expression_leaves_(
+      cas::expression_holder<cas::tensor_to_scalar_expression> const &residual,
+      std::string_view sv_name) const {
+    LeafCollector lc;
+    lc.collect_t2s(residual);
+    std::vector<std::string> missing;
+    for (auto const &leaf_name : lc.scalar_names()) {
+      bool found = false;
+      for (auto const &[name, _] : m_scalar_symbols)
+        if (name == leaf_name) { found = true; break; }
+      if (!found) missing.push_back("scalar '" + leaf_name + "'");
+    }
+    for (auto const &leaf_name : lc.tensor_names()) {
+      bool found = false;
+      for (auto const &[name, _] : m_tensor_symbols)
+        if (name == leaf_name) { found = true; break; }
+      if (!found) missing.push_back("tensor '" + leaf_name + "'");
+    }
+    if (!missing.empty()) {
+      std::string msg = std::format(
+          "ConstitutiveModel '{}': add_scalar_residual_equation residual for "
+          "state variable '{}' references undeclared symbol(s):",
+          m_name, sv_name);
+      for (auto const &m : missing) msg += std::format("\n  - {}", m);
+      msg += "\nCall add_scalar_input / add_tensor_input / add_parameter before "
+             "referencing a symbol in a residual.";
+      throw std::runtime_error(msg);
+    }
+    if (!lc.scalar_names().contains(std::string(sv_name))) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': add_scalar_residual_equation residual for "
+          "state variable '{}' does not reference its own state — the residual "
+          "must depend on '{}' (else ∂R/∂{} ≡ 0, a singular Newton Jacobian).",
+          m_name, sv_name, sv_name, sv_name));
+    }
+  }
+
   // PR #69 round-1 #4: validate that the leaves of a rate expression
   // are all registered symbols on this model. Called from
   // `add_scalar_evolution_equation` to fail fast in the user's stack
@@ -1043,6 +1141,7 @@ private:
   std::vector<OutputDecl> m_outputs;
   std::vector<StateVariable> m_state_variables; // Phase 2.1
   std::vector<EvolutionEquation> m_evolution_equations; // Phase 2.2
+  std::vector<ResidualEquation> m_residual_equations;   // Phase D strain-coupled
   bool m_local_newton = false;          // Phase 3a-2 (issue #75)
   NewtonOptions m_newton_options{};     // Phase 3a-2 (issue #75)
   std::vector<TangentSpec> m_tangents;  // Phase 3b-1 (issue #35)

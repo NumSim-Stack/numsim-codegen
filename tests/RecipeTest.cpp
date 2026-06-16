@@ -94,4 +94,107 @@ TEST(Recipe, MultipleOutputsShareCseAcrossBody) {
       << src;
 }
 
+// ─── Phase D: implicit residual equations (strain-coupled state) ─────────────
+
+// A scalar state defined by an implicit residual R(z, ε)=0. Unlike a rate, the
+// residual MAY reference a tensor strain input — that is the coupling.
+TEST(Recipe, AddScalarResidualEquationStoresStrainCoupledResidual) {
+  ConstitutiveModel m("ReturnMap");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable(
+      "z", cas::make_expression<cas::scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps)); // R = z - c·tr(ε)
+  ASSERT_EQ(m.residual_equations().size(), 1u);
+  EXPECT_TRUE(m.residual_equations()[0].residual.is_valid());
+  EXPECT_TRUE(m.evolution_equations().empty());
+}
+
+// The residual's leaves must all be declared symbols.
+TEST(Recipe, ResidualRejectsUndeclaredLeaf) {
+  ConstitutiveModel m("Bad");
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable(
+      "z", cas::make_expression<cas::scalar_constant>(0.0));
+  auto bogus = cas::make_expression<cas::scalar>("T_bogus");
+  try {
+    m.add_scalar_residual_equation(z, z.current - bogus * trace(eps));
+    FAIL() << "expected throw on undeclared leaf";
+  } catch (std::exception const &e) {
+    EXPECT_NE(std::string(e.what()).find("T_bogus"), std::string::npos)
+        << e.what();
+  }
+}
+
+// The residual must depend on its own state, else ∂R/∂z ≡ 0 (singular Jacobian).
+TEST(Recipe, ResidualMustReferenceOwnState) {
+  ConstitutiveModel m("NoState");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable(
+      "z", cas::make_expression<cas::scalar_constant>(0.0));
+  try {
+    m.add_scalar_residual_equation(z, c * trace(eps)); // no z
+    FAIL() << "expected throw on state-independent residual";
+  } catch (std::exception const &e) {
+    EXPECT_NE(std::string(e.what()).find("does not reference its own state"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+// A state carries either a rate OR a residual — never both (rate first).
+TEST(Recipe, StateCannotHaveRateThenResidual) {
+  ConstitutiveModel m("Both");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable(
+      "z", cas::make_expression<cas::scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(z, c * z.current);
+  try {
+    m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+    FAIL() << "expected throw: state already has a rate";
+  } catch (std::exception const &e) {
+    EXPECT_NE(std::string(e.what()).find("either a rate or a residual"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+// ...and residual first, then rate.
+TEST(Recipe, StateCannotHaveResidualThenRate) {
+  ConstitutiveModel m("Both2");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable(
+      "z", cas::make_expression<cas::scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  try {
+    m.add_scalar_evolution_equation(z, c * z.current);
+    FAIL() << "expected throw: state already has a residual";
+  } catch (std::exception const &e) {
+    EXPECT_NE(std::string(e.what()).find("either a rate or a residual"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
+// The shared handle-resolution defends against cross-recipe handle use.
+TEST(Recipe, ResidualRejectsForeignHandle) {
+  ConstitutiveModel m1("M1");
+  ConstitutiveModel m2("M2");
+  auto c = m2.add_parameter("c", 2.0);
+  auto eps = m2.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z1 = m1.add_scalar_state_variable(
+      "z", cas::make_expression<cas::scalar_constant>(0.0));
+  try {
+    m2.add_scalar_residual_equation(z1, z1.current - c * trace(eps)); // m1 handle
+    FAIL() << "expected throw on foreign handle";
+  } catch (std::exception const &e) {
+    EXPECT_NE(std::string(e.what()).find("different ConstitutiveModel"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
 } // namespace numsim::codegen
