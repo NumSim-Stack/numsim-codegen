@@ -179,6 +179,35 @@ TEST(Recipe, StateCannotHaveResidualThenRate) {
   }
 }
 
+// A residual may reference a declared SCALAR input (not only tensor inputs).
+TEST(Recipe, ResidualMayReferenceScalarInput) {
+  ConstitutiveModel m("ScalarInputResid");
+  auto temp = m.add_scalar_input("temperature");
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable(
+      "z", cas::make_expression<cas::scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - temp * trace(eps));
+  EXPECT_EQ(m.residual_equations().size(), 1u);
+}
+
+// A state variable is bound to at most ONE evolution mechanism — adding a second
+// rate to the same state is rejected (the XOR guard's evolution-side branch).
+TEST(Recipe, StateRejectsSecondRate) {
+  ConstitutiveModel m("TwoRates");
+  auto c = m.add_parameter("c", 2.0);
+  auto z = m.add_scalar_state_variable(
+      "z", cas::make_expression<cas::scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(z, c * z.current);
+  try {
+    m.add_scalar_evolution_equation(z, c * z.current);
+    FAIL() << "expected throw: state already has a rate";
+  } catch (std::exception const &e) {
+    EXPECT_NE(std::string(e.what()).find("already has a rate"),
+              std::string::npos)
+        << e.what();
+  }
+}
+
 // The shared handle-resolution defends against cross-recipe handle use.
 TEST(Recipe, ResidualRejectsForeignHandle) {
   ConstitutiveModel m1("M1");
