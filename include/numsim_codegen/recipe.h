@@ -521,6 +521,17 @@ public:
   // rate, the residual MAY (and typically does) reference tensor inputs (strain)
   // — that is the coupling — hence the `tensor_to_scalar`-typed residual. A state
   // variable carries EITHER a rate OR a residual, never both (enforced).
+  //
+  // Scope (current): the residual is `tensor_to_scalar`-typed, so a purely
+  // scalar implicit residual (no tensor dependence) is intentionally NOT
+  // expressible here — a strain-independent scalar evolution is the rate path's
+  // job (add_scalar_evolution_equation). The residual also cannot reference the
+  // framework time step `dt` (it is not auto-registered on this path): the
+  // first target is rate-INDEPENDENT (e.g. return-map plasticity); a
+  // rate-dependent (viscoplastic) residual needing `dt` is a follow-up. The
+  // residual's differentiability (∂R/∂x, ∂R/∂ε) is checked at EMIT time, where
+  // a non-differentiable t2s node (e.g. a piecewise if_then_else, cas#241)
+  // surfaces a clear cas error.
   auto add_scalar_residual_equation(
       ScalarStateVariableHandle const &state_var,
       cas::expression_holder<cas::tensor_to_scalar_expression> residual,
@@ -1036,8 +1047,8 @@ private:
       if (e.state_variable_idx == idx) {
         throw std::runtime_error(std::format(
             "ConstitutiveModel '{}': {} — state variable '{}' already has a "
-            "rate evolution equation; a state carries either a rate or a "
-            "residual, not both.",
+            "rate evolution equation; a state variable carries at most one "
+            "rate or residual.",
             m_name, caller, sv_name));
       }
     }
@@ -1045,8 +1056,8 @@ private:
       if (r.state_variable_idx == idx) {
         throw std::runtime_error(std::format(
             "ConstitutiveModel '{}': {} — state variable '{}' already has an "
-            "implicit residual equation; a state carries either a rate or a "
-            "residual, not both.",
+            "implicit residual equation; a state variable carries at most one "
+            "rate or residual.",
             m_name, caller, sv_name));
       }
     }

@@ -155,7 +155,7 @@ TEST(Recipe, StateCannotHaveRateThenResidual) {
     m.add_scalar_residual_equation(z, z.current - c * trace(eps));
     FAIL() << "expected throw: state already has a rate";
   } catch (std::exception const &e) {
-    EXPECT_NE(std::string(e.what()).find("either a rate or a residual"),
+    EXPECT_NE(std::string(e.what()).find("at most one rate or residual"),
               std::string::npos)
         << e.what();
   }
@@ -173,10 +173,23 @@ TEST(Recipe, StateCannotHaveResidualThenRate) {
     m.add_scalar_evolution_equation(z, c * z.current);
     FAIL() << "expected throw: state already has a residual";
   } catch (std::exception const &e) {
-    EXPECT_NE(std::string(e.what()).find("either a rate or a residual"),
+    EXPECT_NE(std::string(e.what()).find("at most one rate or residual"),
               std::string::npos)
         << e.what();
   }
+}
+
+// The state may appear only as a tensor COEFFICIENT inside the t2s (e.g.
+// trace(z·ε)) — the state-appears guard must still find it, i.e. collect_t2s
+// recurses scalar coefficients. A false rejection here would block valid models.
+TEST(Recipe, ResidualStateMayAppearAsTensorCoefficient) {
+  ConstitutiveModel m("CoeffState");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable(
+      "z", cas::make_expression<cas::scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, trace(z.current * eps) - c);
+  EXPECT_EQ(m.residual_equations().size(), 1u);
 }
 
 // A residual may reference a declared SCALAR input (not only tensor inputs).
