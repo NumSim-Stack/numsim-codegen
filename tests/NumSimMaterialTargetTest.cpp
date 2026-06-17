@@ -12,6 +12,8 @@
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/scalar/scalar_std.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_functions.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_operators.h>
 
 #include <gtest/gtest.h>
 
@@ -327,6 +329,26 @@ TEST(NumSimMaterialTarget, FloatDefaultRoundTrips) {
   EXPECT_NE(src.find("value_type{" + std::format("{}", 1.0 / 3.0) + "}"),
             std::string::npos)
       << src;
+}
+
+// Finding A (holistic review 2026-06-17): a recipe defined by an implicit
+// residual (add_scalar_residual_equation) has no Mode-B emission path yet. It
+// must be rejected with a message that names the RESIDUAL contract — not the
+// rate/rk_integrator/vector-solver message, which would misdiagnose it (a
+// residual recipe has one state variable but zero evolution equations).
+TEST(NumSimMaterialTarget, RejectsResidualRecipeWithAccurateMessage) {
+  ConstitutiveModel m("ReturnMap");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z =
+      m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  auto const msg = emit_throw_message(m);
+  // Names the residual contract...
+  EXPECT_NE(msg.find("residual"), std::string::npos) << msg;
+  // ...and does NOT misdiagnose as the rate/evolution-equation contract.
+  EXPECT_EQ(msg.find("exactly one scalar state variable"), std::string::npos)
+      << msg;
 }
 
 } // namespace

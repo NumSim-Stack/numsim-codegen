@@ -68,6 +68,23 @@ std::string tensor_cxx_type(std::size_t dim, std::size_t rank) {
 // whole contract — a code generator that quietly drops a declared output is a
 // correctness hazard.
 void check_scope(ConstitutiveModel const &model) {
+  // Strain-coupled implicit-residual recipes (add_scalar_residual_equation) are
+  // a distinct contract from the rate form below: the state is defined by an
+  // implicit R(x, ε)=0 solved by backward_euler, not a rate integrated by
+  // rk_integrator. The Mode-B emission path for those lands separately; until
+  // then reject with a message that names the real reason — NOT the rate /
+  // rk_integrator / vector-solver message below, which would misdiagnose a
+  // residual recipe (it has one state variable but zero evolution equations, so
+  // it would otherwise trip the "exactly one evolution equation" check and blame
+  // the wrong contract).
+  if (!model.residual_equations().empty()) {
+    throw std::runtime_error(
+        "NumSimMaterialTarget: implicit residual equations "
+        "(add_scalar_residual_equation, strain-coupled state) are not yet "
+        "emitted — the graph-coupled Mode-B residual path (material_ref<"
+        "backward_euler> + solve) is a follow-up. This recipe declares a "
+        "residual, not a rate/rk_integrator evolution equation.");
+  }
   auto const svs = model.state_variables();
   auto const eqs = model.evolution_equations();
   if (svs.size() != 1 || eqs.size() != 1) {
