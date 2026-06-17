@@ -331,24 +331,81 @@ TEST(NumSimMaterialTarget, FloatDefaultRoundTrips) {
       << src;
 }
 
-// Finding A (holistic review 2026-06-17): a recipe defined by an implicit
-// residual (add_scalar_residual_equation) has no Mode-B emission path yet. It
-// must be rejected with a message that names the RESIDUAL contract — not the
-// rate/rk_integrator/vector-solver message, which would misdiagnose it (a
-// residual recipe has one state variable but zero evolution equations).
-TEST(NumSimMaterialTarget, RejectsResidualRecipeWithAccurateMessage) {
+// ─── Phase 2a: Mode-B strain-coupled residual emission ───────────────────────
+
+// A return-map recipe R(z, ε) = z − c·tr(ε), σ = z·ε. The state z is solved
+// implicitly by backward_euler; the material drives the Newton loop itself.
+auto build_return_map() -> ConstitutiveModel {
   ConstitutiveModel m("ReturnMap");
   auto c = m.add_parameter("c", 2.0);
   auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
   auto z =
       m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
   m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_output("stress", z.current * eps);
+  return m;
+}
+
+// The emitted residual material conforms to the Mode-B (backward_euler caller-
+// driven) contract: a material_ref<backward_euler>, a solve(eval) call, the
+// residual and its jacobian inside the eval lambda, an owned history state, and
+// the stress output bound to compute().
+TEST(NumSimMaterialTarget, EmitsModeBResidualMaterial) {
+  auto const h = header_of(NumSimMaterialTarget{}.emit(build_return_map()));
+  // Mode-B structural surface.
+  EXPECT_NE(h.find("using solver_type = numsim::materials::backward_euler<Traits>"),
+            std::string::npos) << h;
+  EXPECT_NE(h.find("add_material_ref<solver_type>"), std::string::npos) << h;
+  EXPECT_NE(h.find("m_solver.get().solve(eval)"), std::string::npos) << h;
+  EXPECT_NE(h.find("add_history_output<value_type>(\"z\")"), std::string::npos)
+      << h;
+  // The stress output drives the solve (carries &compute).
+  EXPECT_NE(h.find("\"stress\", &ReturnMap::compute"), std::string::npos) << h;
+  // The eval lambda returns {residual, jacobian}; jacobian ∂R/∂z = 1.
+  EXPECT_NE(h.find("return {residual, jacobian};"), std::string::npos) << h;
+  EXPECT_NE(h.find("const value_type jacobian = 1"), std::string::npos) << h;
+  // State applied as old + increment.
+  EXPECT_NE(h.find("m_z.new_value() = m_z.old_value() + dz"), std::string::npos)
+      << h;
+  // The solver_source param is required.
+  EXPECT_NE(h.find("insert<std::string>(\"solver_source\")"), std::string::npos)
+      << h;
+}
+
+// The strain-coupled consistent tangent is a follow-up (PR 2b): an algorithmic
+// tangent on a residual material must be rejected with a message naming PR 2b,
+// not silently dropped.
+TEST(NumSimMaterialTarget, RejectsTangentOnResidualMaterial) {
+  auto m = build_return_map();
+  m.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
   auto const msg = emit_throw_message(m);
-  // Names the residual contract...
-  EXPECT_NE(msg.find("residual"), std::string::npos) << msg;
-  // ...and does NOT misdiagnose as the rate/evolution-equation contract.
-  EXPECT_EQ(msg.find("exactly one scalar state variable"), std::string::npos)
-      << msg;
+  EXPECT_NE(msg.find("consistent tangent"), std::string::npos) << msg;
+}
+
+// A residual material needs at least one output to anchor compute() (the output
+// pull drives the solve) — reject loudly rather than emit an un-driven solve.
+TEST(NumSimMaterialTarget, RejectsResidualWithoutOutput) {
+  ConstitutiveModel m("NoOutput");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z =
+      m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  EXPECT_NE(emit_throw_message(m).find("at least one output"),
+            std::string::npos);
+}
+
+// Scalar inputs into a residual material are a follow-up — rejected for now.
+TEST(NumSimMaterialTarget, RejectsScalarInputOnResidualMaterial) {
+  ConstitutiveModel m("ScalarIn");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto temp = m.add_scalar_input("temperature");
+  auto z =
+      m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps) - temp);
+  m.add_output("stress", z.current * eps);
+  EXPECT_NE(emit_throw_message(m).find("scalar input"), std::string::npos);
 }
 
 } // namespace

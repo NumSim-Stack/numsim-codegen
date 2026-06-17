@@ -33,8 +33,10 @@
 #if defined(__GNUC__) && !defined(__clang__)
 #define NCG_TENSOR_E2E 1
 #include <tmech/tmech.h>
+#include "numsim-materials/solvers/backward_euler.h"
 #include "numsim-materials/materials/tensor_component_stepper.h"
 #include "Viscoelastic.h" // generated: σ = α·ε (tensor stress from scalar state)
+#include "ReturnMap.h"     // generated: implicit residual R(z,ε)=z−c·tr(ε), σ=z·ε
 #endif
 
 #include <gtest/gtest.h>
@@ -51,6 +53,7 @@ using Linear = numsim::materials::generated::LinearHardening<policy>;
 using Nonlinear = numsim::materials::generated::NonlinearDecay<policy>;
 #ifdef NCG_TENSOR_E2E
 using Visco = numsim::materials::generated::Viscoelastic<policy>;
+using ReturnMap = numsim::materials::generated::ReturnMap<policy>;
 using tensor2 = tmech::tensor<T, 3, 2>;
 #endif
 
@@ -271,6 +274,50 @@ TEST(NumSimMaterialEndToEnd, TensorStressFromScalarStateAndStrain) {
   EXPECT_NEAR(C(0, 0, 0, 0), alpha, 1e-12);       // P_sym(0,0,0,0)=1
   EXPECT_NEAR(C(0, 1, 0, 1), alpha * 0.5, 1e-12); // minor-symmetric ½
   EXPECT_NEAR(C(0, 0, 1, 1), T{0}, 1e-12);        // off-block zero
+}
+
+// ── Strain-coupled implicit residual (Mode B) ────────────────────────────────
+// Proof the residual emit (material_ref<backward_euler> + solve(eval)) compiles
+// and runs against the REAL backward_euler in caller-driven mode: drive a strain
+// producer + the generated ReturnMap; the material solves R(z,ε)=z−c·tr(ε)=0
+// internally, so z = c·tr(ε) and σ = z·ε.
+TEST(NumSimMaterialEndToEnd, ResidualReturnMapSolvesAgainstBackwardEuler) {
+  ctx_type ctx;
+  param_type p;
+
+  // strain producer: accumulates `increment` into component (0,0) per update.
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.02});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  // caller-driven backward_euler (no "function" → the material drives solve()).
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-12});
+  p.insert<int>("max_iter", 50);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  p.clear();
+  const T c = T{2.0};
+  p.insert<std::string>("name", "ReturnMap");
+  p.insert<T>("c", c);
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<ReturnMap>(p);
+
+  ctx.finalize();
+  ctx.update();
+  ctx.commit();
+
+  const auto eps = read_tensor(ctx, "stepper", "strain");
+  const T tr = eps(0, 0) + eps(1, 1) + eps(2, 2);
+  const T z = ctx.get<T>("ReturnMap", "z");        // solved scalar state
+  const auto sig = read_tensor(ctx, "ReturnMap", "stress");
+
+  EXPECT_NEAR(z, c * tr, 1e-10);                   // R=0 ⇒ z = c·tr(ε)
+  EXPECT_NEAR(sig(0, 0), z * eps(0, 0), 1e-10);    // σ = z·ε
+  EXPECT_NEAR(sig(0, 1), T{0}, 1e-12);             // off-diagonal strain is 0
 }
 
 #endif // NCG_TENSOR_E2E

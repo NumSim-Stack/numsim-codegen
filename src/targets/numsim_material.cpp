@@ -7,6 +7,7 @@
 
 #include <numsim_cas/core/diff.h>
 #include <numsim_cas/tensor/tensor_diff.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_diff.h>
 
 #include <cmath>
 #include <format>
@@ -34,6 +35,15 @@ constexpr char const *state_property = "state";
 constexpr char const *integrator_source_param = "integrator_source";
 constexpr char const *material_base_include =
     "numsim-materials/core/material_base.h";
+// Mode-B (strain-coupled implicit residual) contract surface. The material
+// holds a material_ref<backward_euler> and drives the Newton loop itself via
+// solve(eval). Validated against numsim-materials `materials/
+// small_strain_plasticity.h` + `solvers/backward_euler.h`.
+constexpr char const *solver_source_param = "solver_source";
+constexpr char const *backward_euler_include =
+    "numsim-materials/solvers/backward_euler.h";
+constexpr char const *material_ref_include =
+    "numsim-materials/core/material_ref.h";
 } // namespace contract
 
 // A recipe symbol whose name equals one of the emitted fixed members would
@@ -68,23 +78,6 @@ std::string tensor_cxx_type(std::size_t dim, std::size_t rank) {
 // whole contract — a code generator that quietly drops a declared output is a
 // correctness hazard.
 void check_scope(ConstitutiveModel const &model) {
-  // Strain-coupled implicit-residual recipes (add_scalar_residual_equation) are
-  // a distinct contract from the rate form below: the state is defined by an
-  // implicit R(x, ε)=0 solved by backward_euler, not a rate integrated by
-  // rk_integrator. The Mode-B emission path for those lands separately; until
-  // then reject with a message that names the real reason — NOT the rate /
-  // rk_integrator / vector-solver message below, which would misdiagnose a
-  // residual recipe (it has one state variable but zero evolution equations, so
-  // it would otherwise trip the "exactly one evolution equation" check and blame
-  // the wrong contract).
-  if (!model.residual_equations().empty()) {
-    throw std::runtime_error(
-        "NumSimMaterialTarget: implicit residual equations "
-        "(add_scalar_residual_equation, strain-coupled state) are not yet "
-        "emitted — the graph-coupled Mode-B residual path (material_ref<"
-        "backward_euler> + solve) is a follow-up. This recipe declares a "
-        "residual, not a rate/rk_integrator evolution equation.");
-  }
   auto const svs = model.state_variables();
   auto const eqs = model.evolution_equations();
   if (svs.size() != 1 || eqs.size() != 1) {
@@ -142,10 +135,445 @@ void check_scope(ConstitutiveModel const &model) {
   }
 }
 
+// ── Mode-B strain-coupled residual emission ────────────────────────────────
+// A recipe defined by an implicit residual R(x, ε)=0 (add_scalar_residual_
+// equation) is lowered to a numsim-materials material that holds a
+// material_ref<backward_euler> and drives the Newton loop itself in ONE
+// compute() (bound to the stress output — the always-pulled driver):
+//
+//   compute() {
+//     auto eval = [&](value_type dz) {                  // trial x = x_old + dz
+//       value_type x = m_x.old_value() + dz;
+//       return std::pair{ R(x, ε), dR/dx(x, ε) };       // both t2s → scalar
+//     };
+//     value_type dz = m_solver.get().solve(eval);
+//     m_x.new_value() = m_x.old_value() + dz;
+//     m_out_stress = σ(x, ε); ...                        // every output, post-solve
+//   }
+//
+// This is the robust Mode B (small_strain_plasticity's pattern): one compute()
+// owns solve + state-apply + every output, so there is NO Local-edge ordering
+// fragility (contrast a Mode-A material exposing residual/jacobian PROPERTIES,
+// where the solve-vs-apply order rides on hash order). The consistent tangent
+// dσ/dε is a follow-up (PR 2b) — tangents are rejected here.
+//
+// ⚠ backward_euler::solve() CLAMPS its result with std::max(x, 0) — a
+// plasticity convention (a plastic-multiplier increment is physically ≥0). A
+// generated residual material therefore correctly models only states whose
+// solved INCREMENT is non-negative. This is surfaced in the emitted header;
+// lifting it needs an unclamped solver mode upstream (numsim-materials).
+std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) {
+  // ── Scope validation (residual contract) ──
+  auto const reqs = model.residual_equations();
+  auto const svs = model.state_variables();
+  if (reqs.size() != 1 || svs.size() != 1) {
+    throw std::runtime_error(
+        "NumSimMaterialTarget: a strain-coupled residual material supports "
+        "exactly one scalar state variable defined by one residual equation. "
+        "Coupled multi-state return maps need the numsim-materials vector "
+        "solver (numsim-materials#12).");
+  }
+  if (!model.evolution_equations().empty()) {
+    // Unreachable through the public API (a state carries a rate XOR a residual,
+    // enforced by the recipe), but a residual recipe must never also carry a
+    // rate — guard against a future API that could mix them.
+    throw std::runtime_error(
+        "NumSimMaterialTarget: a residual recipe must not also declare rate "
+        "(evolution) equations — the state is defined by the residual alone.");
+  }
+  if (!model.tangents().empty()) {
+    throw std::runtime_error(
+        "NumSimMaterialTarget: the strain-coupled consistent tangent dσ/dε is "
+        "not yet emitted for a residual material — it is a follow-up (PR 2b: "
+        "dσ/dε = ∂σ/∂ε + ∂σ/∂x·(−∂R/∂ε / ∂R/∂x)). Drop the algorithmic-tangent "
+        "request for now.");
+  }
+  for (auto const &in : model.inputs()) {
+    if (in.kind != SymbolDecl::Kind::Tensor) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: scalar input '" + in.name +
+          "' is not yet wired into a residual material — a follow-up (tensor "
+          "inputs like strain ARE supported).");
+    }
+  }
+  if (model.outputs().empty()) {
+    throw std::runtime_error(
+        "NumSimMaterialTarget: a residual material needs at least one output "
+        "(e.g. stress) to anchor compute() — the output's pull drives the "
+        "Newton solve. A state-only solve has no consumer.");
+  }
+
+  auto const &req = reqs[0];
+  auto const &sv = svs[req.state_variable_idx];
+  auto const &cur_name = model.symbols()[sv.current_symbol_idx].name;
+
+  // Scalar parameters the residual / outputs may reference (skip the framework
+  // time step — a residual material is rate-independent in this increment).
+  std::vector<SymbolDecl> params;
+  std::set<std::string> param_names;
+  for (auto const &p : model.parameters()) {
+    if (p.is_time_step || p.kind != SymbolDecl::Kind::Scalar) continue;
+    params.push_back(p);
+    param_names.insert(p.name);
+  }
+
+  std::vector<SymbolDecl> tensor_inputs;
+  std::set<std::string> tensor_input_names;
+  for (auto const &in : model.inputs()) {
+    tensor_inputs.push_back(in);
+    tensor_input_names.insert(in.name);
+  }
+
+  // Reserved-name guard (residual path reserves `solver_source`).
+  auto is_reserved_residual = [](std::string const &n) {
+    return n == contract::solver_source_param;
+  };
+  if (is_reserved_residual(cur_name)) {
+    throw std::runtime_error(
+        "NumSimMaterialTarget: state variable name '" + cur_name +
+        "' collides with an emitted member (solver_source); rename it.");
+  }
+  for (auto const &p : params) {
+    if (is_reserved_residual(p.name)) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: parameter name '" + p.name +
+          "' collides with an emitted member (solver_source); rename it.");
+    }
+    if (p.default_value.has_value() && !std::isfinite(*p.default_value)) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: parameter '" + p.name +
+          "' has a non-finite default (" + fmt(*p.default_value) +
+          "); cannot emit as a C++ literal or JSON number.");
+    }
+  }
+
+  // Resolve the current-state scalar holder — the diff variable for ∂R/∂x.
+  cas::expression_holder<cas::scalar_expression> cur_expr;
+  for (auto const &[name, h] : model.scalar_symbol_map()) {
+    if (name == cur_name) cur_expr = h;
+  }
+  if (!cur_expr.is_valid()) {
+    throw std::runtime_error(
+        "NumSimMaterialTarget: cannot resolve the current-state scalar handle "
+        "for '" + sv.name + "' — state/symbol vectors out of sync.");
+  }
+
+  // Register scalar symbols (state→local bare name, params→m_<name>) and tensor
+  // symbols (input→local bare name) into an emit context. Shared by the residual
+  // /jacobian render and reused (fresh contexts) per output.
+  auto register_all = [&](CodeGenContext &c) {
+    for (auto const &[name, expr] : model.scalar_symbol_map()) {
+      if (param_names.contains(name)) {
+        c.register_symbol_scalar(expr, "m_" + name);
+      } else {
+        c.register_symbol_scalar(expr, name);
+      }
+    }
+    for (auto const &[name, expr] : model.tensor_symbol_map()) {
+      c.register_symbol_tensor(expr, name);
+    }
+  };
+
+  // Residual R and jacobian ∂R/∂x rendered with one shared CSE block (both live
+  // inside the eval lambda, so the state local and any tensor-input local they
+  // reference are in scope there).
+  CodeGenContext rc;
+  CodeEmitPipeline rp(rc);
+  register_all(rc);
+  rc.reset();
+  auto const res_rhs = rp.t2s().apply(req.residual);
+  auto const jac_rhs = rp.t2s().apply(cas::diff(req.residual, cur_expr));
+  auto const eval_decls = rc.render_statements("      "); // inside the lambda
+
+  // Outputs (stress + any others), each in a fresh context so the CSE temp
+  // counter restarts. All are computed AFTER the solve, inside compute().
+  struct EmittedOutput {
+    std::string name, decls, rhs;
+    bool is_tensor = false;
+    std::size_t dim = 0, rank = 0;
+  };
+  std::vector<EmittedOutput> outputs;
+  for (auto const &o : model.outputs()) {
+    if (is_reserved_residual(o.name) || o.name == cur_name ||
+        param_names.contains(o.name) || tensor_input_names.contains(o.name)) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: output name '" + o.name +
+          "' collides with an emitted member, the state, a parameter, or a "
+          "tensor input; rename it.");
+    }
+    CodeGenContext oc;
+    CodeEmitPipeline op(oc);
+    register_all(oc);
+    if (o.kind == OutputDecl::Kind::Scalar) {
+      auto const &oexpr =
+          std::get<cas::expression_holder<cas::scalar_expression>>(o.expr);
+      LeafCollector olc;
+      olc.collect_scalar(oexpr);
+      for (auto const &n : olc.scalar_names()) {
+        if (n != cur_name && !param_names.contains(n)) {
+          throw std::runtime_error(
+              "NumSimMaterialTarget: scalar output '" + o.name +
+              "' references '" + n + "', which is neither the state '" +
+              cur_name + "' nor a parameter.");
+        }
+      }
+      oc.reset();
+      auto const orhs = op.scalar().apply(oexpr);
+      outputs.push_back({o.name, oc.render_statements("    "), orhs, false, 0, 0});
+    } else {
+      auto const &oexpr =
+          std::get<cas::expression_holder<cas::tensor_expression>>(o.expr);
+      LeafCollector olc;
+      olc.collect_tensor(oexpr);
+      for (auto const &n : olc.scalar_names()) {
+        if (n != cur_name && !param_names.contains(n)) {
+          throw std::runtime_error(
+              "NumSimMaterialTarget: tensor output '" + o.name +
+              "' references scalar '" + n + "', which is neither the state '" +
+              cur_name + "' nor a parameter.");
+        }
+      }
+      for (auto const &n : olc.tensor_names()) {
+        if (!tensor_input_names.contains(n)) {
+          throw std::runtime_error(
+              "NumSimMaterialTarget: tensor output '" + o.name +
+              "' references tensor '" + n +
+              "', which is not a declared tensor input.");
+        }
+      }
+      oc.reset();
+      auto const orhs = op.tensor().apply(oexpr);
+      outputs.push_back(
+          {o.name, oc.render_statements("    "), orhs, true, o.dim, o.rank});
+    }
+  }
+
+  // Emitted-member uniqueness guard (same hazard as the rate path: synthesized
+  // member names can collide with recipe symbols).
+  {
+    std::set<std::string> member_bases;
+    auto claim = [&member_bases](std::string const &base) {
+      if (!member_bases.insert(base).second) {
+        throw std::runtime_error(
+            "NumSimMaterialTarget: emitted member 'm_" + base +
+            "' would be duplicated — a recipe symbol collides with a synthesized "
+            "member name; rename the offending state/parameter/input/output.");
+      }
+    };
+    claim(contract::solver_source_param);
+    claim(cur_name);
+    for (auto const &p : params) claim(p.name);
+    for (auto const &o : outputs) claim("out_" + o.name);
+    for (auto const &ti : tensor_inputs) {
+      claim(ti.name);
+      claim(ti.name + "_source");
+    }
+  }
+
+  auto const &cls = model.name();
+  auto const &driver = outputs.front().name; // compute() is bound to this output
+
+  // ── Material header ──
+  std::ostringstream h;
+  h << "// Auto-generated by numsim-codegen (NumSimMaterialTarget). Do not "
+       "edit.\n";
+  h << "// Strain-coupled residual material for recipe \"" << cls
+    << "\": state " << cur_name << " solves R(" << cur_name
+    << ", inputs) = 0\n";
+  h << "// (implicit, Mode B). Holds a material_ref<backward_euler> and drives "
+       "the\n";
+  h << "// Newton loop in compute() (bound to the '" << driver
+    << "' output); the\n";
+  h << "// converged state then feeds every output.\n";
+  h << "//\n";
+  h << "// CONTRACT: pull the '" << driver
+    << "' output to drive the solve. NOTE backward_euler::solve()\n";
+  h << "// clamps its increment to >= 0 (a plasticity convention), so this "
+       "material\n";
+  h << "// models only states whose solved increment is non-negative.\n";
+  h << "#pragma once\n";
+  h << "#include \"" << contract::material_base_include << "\"\n";
+  h << "#include \"" << contract::backward_euler_include << "\"\n";
+  h << "#include \"" << contract::material_ref_include << "\"\n";
+  h << "#include <tmech/tmech.h>\n";
+  h << "#include <utility>\n\n";
+  h << "namespace numsim::materials::generated {\n\n";
+  h << "template <typename Traits>\n";
+  h << "class " << cls << " final\n";
+  h << "    : public numsim::materials::material_base<" << cls
+    << "<Traits>, Traits> {\n";
+  h << "public:\n";
+  h << "  using base = numsim::materials::material_base<" << cls
+    << "<Traits>, Traits>;\n";
+  h << "  using value_type = typename base::value_type;\n";
+  h << "  using input_parameter_controller =\n"
+       "      typename base::input_parameter_controller;\n";
+  h << "  using solver_type = numsim::materials::backward_euler<Traits>;\n\n";
+
+  // Constructor.
+  h << "  template <typename... Args>\n";
+  h << "  explicit " << cls << "(Args&&... args)\n";
+  h << "      : base(std::forward<Args>(args)...),\n";
+  for (std::size_t i = 0; i < outputs.size(); ++i) {
+    auto const &o = outputs[i];
+    std::string const ty =
+        o.is_tensor ? tensor_cxx_type(o.dim, o.rank) : "value_type";
+    h << "        m_out_" << o.name << "(base::template add_output<" << ty
+      << ">(\n";
+    // The first output carries &compute (the solve driver); others are set as a
+    // side effect of compute() and have no callback of their own.
+    if (i == 0) {
+      h << "            \"" << o.name << "\", &" << cls << "::compute)),\n";
+    } else {
+      h << "            \"" << o.name << "\")),\n";
+    }
+  }
+  h << "        m_" << cur_name
+    << "(base::template add_history_output<value_type>(\"" << cur_name
+    << "\")),\n";
+  for (auto const &p : params) {
+    h << "        m_" << p.name
+      << "(base::template get_parameter<value_type>(\"" << p.name << "\")),\n";
+  }
+  h << "        m_solver(base::template add_material_ref<solver_type>(\n";
+  h << "            base::template get_parameter<std::string>(\""
+    << contract::solver_source_param << "\")))";
+  if (tensor_inputs.empty()) {
+    h << " {}\n\n";
+  } else {
+    h << ",\n";
+    for (std::size_t i = 0; i < tensor_inputs.size(); ++i) {
+      auto const &ti = tensor_inputs[i];
+      h << "        m_" << ti.name << "(base::template add_input<"
+        << tensor_cxx_type(ti.dim, ti.rank) << ">(\n";
+      h << "            base::template get_parameter<std::string>(\"" << ti.name
+        << "_source\"),\n";
+      h << "            \"" << ti.name
+        << "\", numsim::materials::EdgeKind::Global))"
+        << (i + 1 < tensor_inputs.size() ? ",\n" : " {}\n\n");
+    }
+  }
+
+  // parameters() schema
+  h << "  static input_parameter_controller parameters() {\n";
+  h << "    input_parameter_controller para{base::parameters()};\n";
+  for (auto const &p : params) {
+    if (p.default_value.has_value()) {
+      h << "    para.template insert<value_type>(\"" << p.name
+        << "\").template add<numsim_core::set_default>(value_type{"
+        << fmt(*p.default_value) << "});\n";
+    } else {
+      h << "    para.template insert<value_type>(\"" << p.name
+        << "\").template add<numsim_core::is_required>();\n";
+    }
+  }
+  h << "    para.template insert<std::string>(\""
+    << contract::solver_source_param << "\")\n";
+  h << "        .template add<numsim_core::is_required>();\n";
+  for (auto const &ti : tensor_inputs) {
+    h << "    para.template insert<std::string>(\"" << ti.name << "_source\")\n";
+    h << "        .template add<numsim_core::is_required>();\n";
+  }
+  h << "    return para;\n";
+  h << "  }\n\n";
+
+  // compute()
+  h << "  // Solves R(" << cur_name << ", inputs)=0 for the increment via\n";
+  h << "  // backward_euler::solve(), applies the state, then computes every "
+       "output.\n";
+  h << "  void compute() {\n";
+  for (auto const &ti : tensor_inputs) {
+    h << "    [[maybe_unused]] const auto& " << ti.name << " = m_" << ti.name
+      << ".get();\n";
+  }
+  h << "    auto eval = [&](value_type d" << cur_name
+    << ") -> std::pair<value_type, value_type> {\n";
+  h << "      const value_type " << cur_name << " = m_" << cur_name
+    << ".old_value() + d" << cur_name << ";\n";
+  if (!eval_decls.empty()) h << eval_decls;
+  h << "      const value_type residual = " << res_rhs << ";\n";
+  h << "      const value_type jacobian = " << jac_rhs << ";\n";
+  h << "      return {residual, jacobian};\n";
+  h << "    };\n";
+  h << "    const value_type d" << cur_name
+    << " = m_solver.get().solve(eval);\n";
+  h << "    m_" << cur_name << ".new_value() = m_" << cur_name
+    << ".old_value() + d" << cur_name << ";\n";
+  h << "    [[maybe_unused]] const value_type " << cur_name << " = m_"
+    << cur_name << ".new_value();\n";
+  for (auto const &o : outputs) {
+    if (!o.decls.empty()) {
+      // The output decls were rendered at 4-space indent; they sit directly in
+      // compute()'s body, which is also 4-space — emit as-is.
+      h << o.decls;
+    }
+    h << "    m_out_" << o.name << " = " << o.rhs << ";\n";
+  }
+  h << "  }\n\n";
+
+  // members
+  h << "private:\n";
+  for (auto const &o : outputs) {
+    std::string const ty =
+        o.is_tensor ? tensor_cxx_type(o.dim, o.rank) : "value_type";
+    h << "  " << ty << "& m_out_" << o.name << ";\n";
+  }
+  h << "  numsim_core::history_property<value_type>& m_" << cur_name << ";\n";
+  for (auto const &p : params) {
+    h << "  [[maybe_unused]] const value_type& m_" << p.name << ";\n";
+  }
+  h << "  numsim::materials::material_ref<solver_type, Traits>& m_solver;\n";
+  for (auto const &ti : tensor_inputs) {
+    h << "  const numsim::materials::input_property<"
+      << tensor_cxx_type(ti.dim, ti.rank) << ",\n";
+    h << "      numsim::materials::property_traits>& m_" << ti.name << ";\n";
+  }
+  h << "};\n\n";
+  h << "} // namespace numsim::materials::generated\n";
+
+  // ── JSON config scaffold ──
+  std::ostringstream j;
+  j << "{\n";
+  j << "  \"_comment\": \"SCAFFOLD generated by numsim-codegen. The "
+       "backward_euler solver is created WITHOUT a 'function' (caller-driven "
+       "mode — the material drives the Newton loop). The '*_source' values are "
+       "PLACEHOLDER producer names; a material publishing a property of the "
+       "matching name/type must exist in the graph. The 'type' names must be "
+       "registered in the material factory.\",\n";
+  j << "  \"materials\": [\n";
+  j << "    { \"name\": \"solver\", \"type\": \"backward_euler\",\n";
+  j << "      \"tolerance\": 1e-12, \"max_iter\": 50 },\n";
+  j << "    { \"name\": \"" << cls << "\", \"type\": \"" << cls << "\",\n";
+  j << "      \"" << contract::solver_source_param << "\": \"solver\"";
+  for (auto const &ti : tensor_inputs) {
+    j << ",\n      \"" << ti.name << "_source\": \"" << ti.name << "_producer\"";
+  }
+  for (auto const &p : params) {
+    if (p.default_value.has_value()) {
+      j << ",\n      \"" << p.name << "\": " << fmt(*p.default_value);
+    }
+  }
+  j << " }\n";
+  j << "  ]\n";
+  j << "}\n";
+
+  return {
+      EmittedFile{cls + ".h", h.str(), "include/materials",
+                  EmittedFile::Kind::Header},
+      EmittedFile{cls + ".config.json", j.str(), "", EmittedFile::Kind::Other},
+  };
+}
+
 } // namespace
 
 auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
     -> std::vector<EmittedFile> {
+  // Strain-coupled implicit-residual recipes take the Mode-B path; the rate
+  // (rk_integrator) path below handles the rest. Routing here (before
+  // check_scope) keeps each path's scope validation self-contained.
+  if (!model.residual_equations().empty()) {
+    return emit_residual_material(model);
+  }
   check_scope(model);
 
   auto const &sv = model.state_variables()[0];
