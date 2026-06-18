@@ -634,6 +634,23 @@ public:
     // change" while the pass's mutation lives only inside this call.
     // ConstitutiveModel is value-typed (vectors + shared_ptr handles)
     // so the copy is cheap relative to the codegen itself.
+    // Strain-coupled implicit residuals (add_scalar_residual_equation) have NO
+    // emit path on the self-contained (standalone / MOOSE-local) targets: the
+    // self-contained pipeline below has no pass that lowers a residual into a
+    // Newton solve, so a residual-only recipe would otherwise emit a compute
+    // function that silently drops the declared state — a correctness hazard
+    // (reject loudly, never drop). Implicit-residual emission lands only on the
+    // graph-coupled NumSimMaterialTarget (Mode B: material_ref<backward_euler> +
+    // solve()); see the roadmap Phase D. Reject here rather than emit a partial
+    // function.
+    if (!m_residual_equations.empty()) {
+      throw std::runtime_error(
+          "ConstitutiveModel::emit_compute_function: implicit residual "
+          "equations (add_scalar_residual_equation) are not supported by the "
+          "self-contained (standalone / MOOSE) code path — they would be "
+          "silently dropped. Strain-coupled residual materials are emitted only "
+          "by NumSimMaterialTarget (graph-coupled, Mode B).");
+    }
     ConstitutiveModel working_copy = *this;
     PassContext pctx{RecipeView{working_copy}, CodeGenContext{},
                      std::nullopt, {}};

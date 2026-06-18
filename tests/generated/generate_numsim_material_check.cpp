@@ -20,6 +20,8 @@
 #include <numsim_cas/scalar/scalar_std.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_operators.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_functions.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_operators.h>
 
 #include <fstream>
 #include <iostream>
@@ -51,9 +53,10 @@ bool write_header(ConstitutiveModel const& model, char const* path) {
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 4) {
+  if (argc < 6) {
     std::cerr << "usage: generate_numsim_material_check <linear.h> "
-                 "<nonlinear.h> <viscoelastic.h>\n";
+                 "<nonlinear.h> <viscoelastic.h> <returnmap.h> "
+                 "<returnmapcubic.h>\n";
     return 2;
   }
 
@@ -95,8 +98,43 @@ int main(int argc, char** argv) {
     viscoelastic.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
   }
 
+  // Phase 2a: strain-coupled IMPLICIT residual material (Mode B). The state z is
+  // defined by R(z, ε) = z − c·tr(ε) = 0, solved by backward_euler (caller-
+  // driven); the stress is σ = z·ε. Unlike the rate materials above, z is solved
+  // implicitly inside the material's compute() — no rk_integrator. Exercises the
+  // material_ref<backward_euler> + solve(eval) emission end-to-end.
+  ConstitutiveModel returnmap("ReturnMap");
+  {
+    auto c = returnmap.add_parameter("c", 2.0);
+    auto eps = returnmap.add_tensor_input("strain", 3, 2, roles::Strain);
+    auto z = returnmap.add_scalar_state_variable(
+        "z", make_expression<scalar_constant>(0.0));
+    returnmap.add_scalar_residual_equation(z, z.current - c * trace(eps));
+    returnmap.add_output("stress", z.current * eps);
+  }
+
+  // NONLINEAR residual to exercise the t2s-wrt-scalar jacobian (∂R/∂z, cas#285).
+  // R(z, ε) = z + z³ − c·tr(ε), so ∂R/∂z = 1 + 3z² is NON-constant. The linear
+  // ReturnMap above has ∂R/∂z ≡ 1, so a wrong jacobian would still converge to
+  // the right root — it cannot validate the emitted derivative. Here, with a
+  // tight Newton budget and c·tr(ε)=1 (root z≈0.682, where ∂R/∂z≈2.4 ≫ 1), an
+  // incorrect jacobian (e.g. a constant) oscillates and FAILS to converge — so
+  // the e2e value check actually pins the emitted derivative.
+  ConstitutiveModel returnmap_cubic("ReturnMapCubic");
+  {
+    auto c = returnmap_cubic.add_parameter("c", 2.0);
+    auto eps = returnmap_cubic.add_tensor_input("strain", 3, 2, roles::Strain);
+    auto z = returnmap_cubic.add_scalar_state_variable(
+        "z", make_expression<scalar_constant>(0.0));
+    returnmap_cubic.add_scalar_residual_equation(
+        z, z.current + z.current * z.current * z.current - c * trace(eps));
+    returnmap_cubic.add_output("stress", z.current * eps);
+  }
+
   if (!write_header(linear, argv[1])) return 1;
   if (!write_header(nonlinear, argv[2])) return 1;
   if (!write_header(viscoelastic, argv[3])) return 1;
+  if (!write_header(returnmap, argv[4])) return 1;
+  if (!write_header(returnmap_cubic, argv[5])) return 1;
   return 0;
 }
