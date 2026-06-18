@@ -37,6 +37,7 @@
 #include "numsim-materials/materials/tensor_component_stepper.h"
 #include "Viscoelastic.h" // generated: σ = α·ε (tensor stress from scalar state)
 #include "ReturnMap.h"     // generated: implicit residual R(z,ε)=z−c·tr(ε), σ=z·ε
+#include "ReturnMapCubic.h" // generated: NONLINEAR residual R=z+z³−c·tr(ε)
 #endif
 
 #include <gtest/gtest.h>
@@ -54,6 +55,7 @@ using Nonlinear = numsim::materials::generated::NonlinearDecay<policy>;
 #ifdef NCG_TENSOR_E2E
 using Visco = numsim::materials::generated::Viscoelastic<policy>;
 using ReturnMap = numsim::materials::generated::ReturnMap<policy>;
+using ReturnMapCubic = numsim::materials::generated::ReturnMapCubic<policy>;
 using tensor2 = tmech::tensor<T, 3, 2>;
 #endif
 
@@ -318,6 +320,54 @@ TEST(NumSimMaterialEndToEnd, ResidualReturnMapSolvesAgainstBackwardEuler) {
   EXPECT_NEAR(z, c * tr, 1e-10);                   // R=0 ⇒ z = c·tr(ε)
   EXPECT_NEAR(sig(0, 0), z * eps(0, 0), 1e-10);    // σ = z·ε
   EXPECT_NEAR(sig(0, 1), T{0}, 1e-12);             // off-diagonal strain is 0
+}
+
+// NONLINEAR residual R(z,ε) = z + z³ − c·tr(ε), so ∂R/∂z = 1 + 3z². This is the
+// test that VALIDATES THE EMITTED JACOBIAN: with a tight Newton budget and a
+// root z≈0.682 (where ∂R/∂z≈2.4 ≫ 1), a wrong derivative oscillates and the
+// converged residual is NOT ~0 — unlike the linear case where any jacobian
+// reaches the root. We drive c·tr(ε)=1 (strain increment 0.5 on one component).
+TEST(NumSimMaterialEndToEnd, NonlinearResidualValidatesEmittedJacobian) {
+  ctx_type ctx;
+  param_type p;
+
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.5}); // tr(ε) = 0.5 after one update
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  // Tight iteration budget: the correct jacobian (1+3z²) converges in ~6 Newton
+  // steps; a wrong constant jacobian would not reach tol here.
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 12);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  p.clear();
+  const T c = T{2.0};
+  p.insert<std::string>("name", "ReturnMapCubic");
+  p.insert<T>("c", c);
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<ReturnMapCubic>(p);
+
+  ctx.finalize();
+  ctx.update();
+  ctx.commit();
+
+  const auto eps = read_tensor(ctx, "stepper", "strain");
+  const T tr = eps(0, 0) + eps(1, 1) + eps(2, 2);
+  const T z = ctx.get<T>("ReturnMapCubic", "z");
+  const auto sig = read_tensor(ctx, "ReturnMapCubic", "stress");
+
+  // The converged state must satisfy R(z,ε)=0: z + z³ = c·tr(ε). A wrong
+  // emitted ∂R/∂z fails to converge within the budget, so this residual ≠ 0.
+  const T residual = z + z * z * z - c * tr;
+  EXPECT_NEAR(residual, T{0}, 1e-9) << "z=" << z << " (∂R/∂z must be 1+3z²)";
+  // Sanity: the root of z+z³=1 is ≈ 0.6823278.
+  EXPECT_NEAR(z, T{0.6823278038280193}, 1e-6);
+  EXPECT_NEAR(sig(0, 0), z * eps(0, 0), 1e-10); // σ = z·ε
 }
 
 #endif // NCG_TENSOR_E2E

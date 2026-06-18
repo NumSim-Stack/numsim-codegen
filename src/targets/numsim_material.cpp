@@ -224,26 +224,46 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     tensor_input_names.insert(in.name);
   }
 
-  // Reserved-name guard (residual path reserves `solver_source`).
+  // Reserved-name guard. A residual material emits the fixed member `m_solver`
+  // (the material_ref), the schema key `solver_source`, and the compute()-local
+  // identifiers `eval`, `residual`, `jacobian`. A recipe symbol that renders to
+  // one of these bare names would produce a duplicate member / redeclared local
+  // (uncompilable). Applied to the state, parameters AND tensor inputs — all
+  // three render to bare identifiers in compute() (params are m_-prefixed in
+  // expressions, but `solver_source`/`solver` would still collide with the
+  // member/schema, so params are checked too).
   auto is_reserved_residual = [](std::string const &n) {
-    return n == contract::solver_source_param;
+    return n == contract::solver_source_param || n == "solver" || n == "eval" ||
+           n == "residual" || n == "jacobian";
   };
-  if (is_reserved_residual(cur_name)) {
-    throw std::runtime_error(
-        "NumSimMaterialTarget: state variable name '" + cur_name +
-        "' collides with an emitted member (solver_source); rename it.");
-  }
-  for (auto const &p : params) {
-    if (is_reserved_residual(p.name)) {
+  auto reject_reserved = [&](std::string const &n, char const *what) {
+    if (is_reserved_residual(n)) {
       throw std::runtime_error(
-          "NumSimMaterialTarget: parameter name '" + p.name +
-          "' collides with an emitted member (solver_source); rename it.");
+          std::string("NumSimMaterialTarget: ") + what + " '" + n +
+          "' collides with an emitted member / local "
+          "(solver/solver_source/eval/residual/jacobian); rename it.");
     }
+  };
+  reject_reserved(cur_name, "state variable name");
+  for (auto const &p : params) {
+    reject_reserved(p.name, "parameter name");
     if (p.default_value.has_value() && !std::isfinite(*p.default_value)) {
       throw std::runtime_error(
           "NumSimMaterialTarget: parameter '" + p.name +
           "' has a non-finite default (" + fmt(*p.default_value) +
           "); cannot emit as a C++ literal or JSON number.");
+    }
+  }
+  // The Newton increment is a compute()-local named `d<state>`; a tensor input
+  // (also a bare compute() local) named the same would redeclare it.
+  std::string const increment_local = "d" + cur_name;
+  for (auto const &in : tensor_inputs) {
+    reject_reserved(in.name, "tensor input name");
+    if (in.name == increment_local) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: tensor input '" + in.name +
+          "' collides with the synthesized Newton-increment local '" +
+          increment_local + "'; rename the input or the state.");
     }
   }
 
@@ -273,6 +293,35 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
       c.register_symbol_tensor(expr, name);
     }
   };
+
+  // Residual-leaf guard: every scalar leaf of R must be the current state or a
+  // parameter, and every tensor leaf must be a declared tensor input. The recipe
+  // checks all leaves are *declared* symbols, but NOT that they map to a bound
+  // emit name — e.g. the previous-step state `<state>_old` is a declared symbol
+  // yet has no local in compute() (the increment form x = x_old + dz is the
+  // emitter's own concern). Without this guard such a residual would emit an
+  // unbound identifier inside the eval lambda. Mirrors the rate-leaf guard.
+  {
+    LeafCollector rlc;
+    rlc.collect_t2s(req.residual);
+    for (auto const &n : rlc.scalar_names()) {
+      if (n != cur_name && !param_names.contains(n)) {
+        throw std::runtime_error(
+            "NumSimMaterialTarget: the residual references scalar '" + n +
+            "', which is neither the state '" + cur_name +
+            "' nor a parameter. A residual R(" + cur_name +
+            ", inputs) cannot depend on the previous-step state or a scalar "
+            "input on this path.");
+      }
+    }
+    for (auto const &n : rlc.tensor_names()) {
+      if (!tensor_input_names.contains(n)) {
+        throw std::runtime_error(
+            "NumSimMaterialTarget: the residual references tensor '" + n +
+            "', which is not a declared tensor input.");
+      }
+    }
+  }
 
   // Residual R and jacobian ∂R/∂x rendered with one shared CSE block (both live
   // inside the eval lambda, so the state local and any tensor-input local they
@@ -360,7 +409,7 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
             "member name; rename the offending state/parameter/input/output.");
       }
     };
-    claim(contract::solver_source_param);
+    claim("solver"); // the fixed material_ref member m_solver
     claim(cur_name);
     for (auto const &p : params) claim(p.name);
     for (auto const &o : outputs) claim("out_" + o.name);
@@ -420,13 +469,13 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
         o.is_tensor ? tensor_cxx_type(o.dim, o.rank) : "value_type";
     h << "        m_out_" << o.name << "(base::template add_output<" << ty
       << ">(\n";
-    // The first output carries &compute (the solve driver); others are set as a
-    // side effect of compute() and have no callback of their own.
-    if (i == 0) {
-      h << "            \"" << o.name << "\", &" << cls << "::compute)),\n";
-    } else {
-      h << "            \"" << o.name << "\")),\n";
-    }
+    // EVERY output carries &compute: pulling ANY output drives the one compute()
+    // that solves the state and sets all outputs. (compute() is idempotent
+    // within a graph evaluation — it re-solves to the same root — so a consumer
+    // pulling several outputs is correct, if mildly redundant.) Binding only the
+    // first output would leave the others stale when pulled in isolation.
+    h << "            \"" << o.name << "\", &" << cls << "::compute)),\n";
+    (void)i;
   }
   h << "        m_" << cur_name
     << "(base::template add_history_output<value_type>(\"" << cur_name
@@ -502,12 +551,16 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
   h << "    [[maybe_unused]] const value_type " << cur_name << " = m_"
     << cur_name << ".new_value();\n";
   for (auto const &o : outputs) {
-    if (!o.decls.empty()) {
-      // The output decls were rendered at 4-space indent; they sit directly in
-      // compute()'s body, which is also 4-space — emit as-is.
-      h << o.decls;
-    }
-    h << "    m_out_" << o.name << " = " << o.rhs << ";\n";
+    // Each output is rendered in its OWN CodeGenContext, so its CSE temporaries
+    // restart at t0 — and ALL outputs share this single compute() body. Without
+    // a nested scope, a second output with CSE temps would redeclare `t0` (a
+    // compile error the single-output test recipe never hit). Brace-scope every
+    // output so each block's temps are private. (A decl-free output gets a
+    // harmless empty-ish block.)
+    h << "    {\n";
+    if (!o.decls.empty()) h << o.decls; // rendered at 4-space; nested is fine
+    h << "      m_out_" << o.name << " = " << o.rhs << ";\n";
+    h << "    }\n";
   }
   h << "  }\n\n";
 
