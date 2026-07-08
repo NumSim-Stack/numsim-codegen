@@ -538,12 +538,21 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     << "' output to drive the solve. NOTE backward_euler::solve()\n";
   h << "// clamps its increment to >= 0 (a plasticity convention), so this "
        "material\n";
-  h << "// models only states whose solved increment is non-negative.\n";
+  h << "// models only states whose solved increment is non-negative. This "
+       "caveat\n";
+  h << "// applies to the CONSISTENT TANGENT dσ/dε too (if emitted): it is\n";
+  h << "// evaluated at the solved state via the implicit-function theorem, so "
+       "on a\n";
+  h << "// clamped (elastic) increment where the raw root is negative the "
+       "tangent is\n";
+  h << "// outside its domain of validity — the correct value there is ∂σ/∂ε "
+       "alone.\n";
   h << "#pragma once\n";
   h << "#include \"" << contract::material_base_include << "\"\n";
   h << "#include \"" << contract::backward_euler_include << "\"\n";
   h << "#include \"" << contract::material_ref_include << "\"\n";
   h << "#include <tmech/tmech.h>\n";
+  h << "#include <stdexcept>\n";
   h << "#include <utility>\n\n";
   h << "namespace numsim::materials::generated {\n\n";
   h << "template <typename Traits>\n";
@@ -645,6 +654,16 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
   h << "    };\n";
   h << "    const value_type d" << cur_name
     << " = m_solver.get().solve(eval);\n";
+  // Reject loudly if the Newton solve did not converge: every output (stress AND
+  // the consistent tangent) is evaluated at this state, so a non-converged root
+  // would silently feed a wrong stress / wrong stiffness into the graph. (Note:
+  // this does NOT catch backward_euler's std::max(x,0) clamp returning a
+  // non-root on the elastic branch — see the header caveat; that needs an
+  // upstream was_clamped() accessor, numsim-materials follow-up.)
+  h << "    if (!m_solver.get().converged())\n";
+  h << "      throw std::runtime_error(\"" << cls
+    << "::compute: backward_euler did not converge solving R(" << cur_name
+    << ", inputs)=0; stress/tangent would be evaluated at a non-root state.\");\n";
   h << "    m_" << cur_name << ".new_value() = m_" << cur_name
     << ".old_value() + d" << cur_name << ";\n";
   h << "    [[maybe_unused]] const value_type " << cur_name << " = m_"

@@ -423,6 +423,24 @@ TEST(NumSimMaterialEndToEnd, NonlinearResidualValidatesEmittedJacobian) {
   // Sanity: the root of z+z³=1 is ≈ 0.6823278.
   EXPECT_NEAR(z, T{0.6823278038280193}, 1e-6);
   EXPECT_NEAR(sig(0, 0), z * eps(0, 0), 1e-10); // σ = z·ε
+
+  // Phase 2b: the tangent on the NONLINEAR residual VALIDATES THE DIVISION by
+  // ∂R/∂z. Here ∂R/∂z = 1+3z² ≠ 1, so dz/dε = c·I/(1+3z²) and the coupling term
+  // C_{0011} = ε₀₀·c/(1+3z²). If the emitter dropped the /∂R/∂z factor (which the
+  // LINEAR ReturnMap's ∂R/∂z≡1 cannot detect), C_{0011} would be ε₀₀·c instead —
+  // off by the ~2.4× jacobian here. This is the load-bearing division check.
+  using tensor4 = tmech::tensor<T, 3, 4>;
+  auto* cp = dynamic_cast<
+      numsim_core::property<tensor4, numsim::materials::property_traits>*>(
+      ctx.find_property("ReturnMapCubic", "dstress_dstrain"));
+  ASSERT_NE(cp, nullptr);
+  const auto C = cp->get();
+  const T dRdz = T{1} + T{3} * z * z; // = ∂R/∂z at the converged z
+  EXPECT_GT(dRdz, T{2}) << "must be ≫1 so the division is observable";
+  EXPECT_NEAR(C(0, 0, 1, 1), c * eps(0, 0) / dRdz, 1e-9);
+  // Contrast: without the division it would be c·ε₀₀ — assert we are NOT that.
+  EXPECT_GT(std::abs(C(0, 0, 1, 1) - c * eps(0, 0)), 1e-3)
+      << "tangent must divide by ∂R/∂z, not omit it";
 }
 
 #endif // NCG_TENSOR_E2E

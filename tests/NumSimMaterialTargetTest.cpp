@@ -483,10 +483,19 @@ TEST(NumSimMaterialTarget, EmitsConsistentTangentForResidualMaterial) {
                    "tmech::sequence<3, 4>>(strain,"),
             std::string::npos)
       << h;
-  // The explicit base term ∂σ/∂ε = z·I⁴ˢ (minor-symmetric identity).
+  // dz/dε = −∂R/∂ε/∂R/∂z carries a negation — pin the sign (a dropped/flipped
+  // sign flips the coupling term, which the compiler-independent layer must
+  // catch, not only the gcc-gated numeric e2e).
+  EXPECT_NE(h.find("-1.0 *"), std::string::npos) << h;
+  // The explicit base term ∂σ/∂ε = z·I⁴ˢ: minor-symmetric identity (BOTH otimesu
+  // AND otimesl — mirroring the rate-path tangent test) scaled by the state z.
   EXPECT_NE(h.find("tmech::otimesu(tmech::eye<double, 3, 2>()"),
             std::string::npos)
       << h;
+  EXPECT_NE(h.find("tmech::otimesl(tmech::eye<double, 3, 2>()"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("z * "), std::string::npos) << h; // the z·I⁴ˢ coefficient
   EXPECT_NE(h.find("m_out_dstress_dstrain ="), std::string::npos) << h;
 
   // The tangent is evaluated AFTER the solve (uses the converged z).

@@ -132,6 +132,10 @@ int main(int argc, char** argv) {
     returnmap_cubic.add_scalar_residual_equation(
         z, z.current + z.current * z.current * z.current - c * trace(eps));
     returnmap_cubic.add_output("stress", z.current * eps);
+    // Phase 2b: a tangent on the NONLINEAR residual — here ∂R/∂z = 1+3z² ≠ 1, so
+    // dz/dε = −∂R/∂ε/∂R/∂z genuinely exercises the division by the jacobian
+    // (the linear ReturnMap has ∂R/∂z≡1, where dropping the divisor is invisible).
+    returnmap_cubic.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
   }
 
   if (!write_header(linear, argv[1])) return 1;
