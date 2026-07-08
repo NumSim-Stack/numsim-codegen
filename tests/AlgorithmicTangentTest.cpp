@@ -393,19 +393,26 @@ TEST(AlgorithmicTangent, PlainInputTangentStaysNonSymmetrized) {
   EXPECT_EQ(src.find("tmech::otimesl"), std::string::npos) << src;
 }
 
-// Pins the scaffold's flip-on point: the ∂σ/∂x seam throws a precise
-// numsim-cas#275 diagnostic until the upstream diff(tensor, scalar) lands.
-TEST(AlgorithmicTangent, DiffTensorWrtScalarSeamThrowsUntilCas275) {
+// Flip-on point (PR 2b): cas#275 — diff(tensor_expression, scalar_expression) —
+// is in the pin, and the seam is enabled via
+// NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR. The seam now RETURNS the real
+// ∂(tensor)/∂(scalar), including the scalar-coefficient product-rule term the
+// stub could not compute: ∂(x·ε)/∂x = ε.
+TEST(AlgorithmicTangent, DiffTensorWrtScalarSeamComputesProductRuleTerm) {
   using namespace numsim::cas;
   auto eps = make_expression<tensor>("eps", 3, std::size_t{2});
   auto x = make_expression<scalar>("x");
-  try {
-    (void)detail::diff_tensor_wrt_scalar(eps, x);
-    FAIL() << "expected the diff(tensor,scalar) seam to throw";
-  } catch (std::runtime_error const &e) {
-    EXPECT_NE(std::string(e.what()).find("numsim-cas#275"), std::string::npos)
-        << e.what();
-  }
+
+  auto d = detail::diff_tensor_wrt_scalar(x * eps, x); // ∂(x·ε)/∂x = ε
+  ASSERT_TRUE(d.is_valid());
+
+  CodeGenContext ctx;
+  CodeEmitPipeline p(ctx);
+  ctx.register_symbol_tensor(eps, "eps");
+  ctx.register_symbol_scalar(x, "x");
+  ctx.reset();
+  // Product rule: 1·ε + x·0 = ε. The stub threw here; the flip must render ε.
+  EXPECT_EQ(p.tensor().apply(d), "eps");
 }
 
 // Round-2 review (test-quality MAJOR-5): the pass running ALONGSIDE local Newton

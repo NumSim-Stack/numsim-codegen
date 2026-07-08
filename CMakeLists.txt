@@ -170,6 +170,15 @@ target_include_directories(numsim_codegen_headers
 target_link_libraries(numsim_codegen_headers INTERFACE NumSim_CAS)
 target_compile_features(numsim_codegen_headers INTERFACE cxx_std_23)
 
+# The ∂(tensor)/∂(scalar) seam (detail::diff_tensor_wrt_scalar) — cas#275. The
+# pinned NumSim_CAS provides diff(tensor_expression, scalar_expression); verified
+# to compile+link+produce a valid expression against this pin (PR 2b de-risk).
+# Flipping this on turns the seam from a throwing stub into a one-line cas::diff,
+# enabling the strain-coupled consistent-tangent correction term ∂σ/∂z. INTERFACE
+# so the STATIC lib, the tests, and any consumer using the seam all see it.
+target_compile_definitions(numsim_codegen_headers
+    INTERFACE NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR)
+
 add_library(numsim_codegen STATIC
     src/targets/standalone_cxx.cpp
     src/targets/moose_material.cpp
