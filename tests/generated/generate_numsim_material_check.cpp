@@ -111,6 +111,9 @@ int main(int argc, char** argv) {
         "z", make_expression<scalar_constant>(0.0));
     returnmap.add_scalar_residual_equation(z, z.current - c * trace(eps));
     returnmap.add_output("stress", z.current * eps);
+    // Phase 2b: the strain-coupled consistent tangent dσ/dε. The driver checks
+    // the off-block coupling term the naive ∂σ/∂ε alone misses (C_{0011}=c·ε₀₀).
+    returnmap.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
   }
 
   // NONLINEAR residual to exercise the t2s-wrt-scalar jacobian (∂R/∂z, cas#285).
