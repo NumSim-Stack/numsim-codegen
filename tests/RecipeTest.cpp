@@ -221,6 +221,27 @@ TEST(Recipe, StateRejectsSecondRate) {
   }
 }
 
+// Finding A (holistic review 2026-06-17): the self-contained code path
+// (standalone / MOOSE) has no pass that lowers an implicit residual into a
+// Newton solve, so emit_compute_function would otherwise emit a function that
+// SILENTLY DROPS the declared state. Reject loudly instead — residual emission
+// lives only on the graph-coupled NumSimMaterialTarget (Mode B).
+TEST(Recipe, EmitComputeFunctionRejectsResidualRecipe) {
+  ConstitutiveModel m("ReturnMapStandalone");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable(
+      "z", cas::make_expression<cas::scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  try {
+    (void)m.emit_compute_function();
+    FAIL() << "expected throw: residuals unsupported on the self-contained path";
+  } catch (std::exception const &e) {
+    EXPECT_NE(std::string(e.what()).find("residual"), std::string::npos)
+        << e.what();
+  }
+}
+
 // The shared handle-resolution defends against cross-recipe handle use.
 TEST(Recipe, ResidualRejectsForeignHandle) {
   ConstitutiveModel m1("M1");
