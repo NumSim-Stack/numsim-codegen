@@ -456,11 +456,71 @@ TEST(NumSimMaterialTarget, RejectsResidualLocalNameCollision) {
 // The strain-coupled consistent tangent is a follow-up (PR 2b): an algorithmic
 // tangent on a residual material must be rejected with a message naming PR 2b,
 // not silently dropped.
-TEST(NumSimMaterialTarget, RejectsTangentOnResidualMaterial) {
+// Phase 2b: the strain-coupled consistent tangent dσ/dε for a Mode-B residual
+// material. σ = z·ε, R = z − c·tr(ε) ⇒
+//   dσ/dε = ∂σ/∂ε + ∂σ/∂z ⊗ dz/dε = z·I⁴ˢ + ε ⊗ (c·I),   dz/dε = −∂R/∂ε/∂R/∂z = c·I.
+// The correction term ε⊗(c·I) is what a naive ∂σ/∂ε alone would drop.
+TEST(NumSimMaterialTarget, EmitsConsistentTangentForResidualMaterial) {
   auto m = build_return_map();
   m.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
-  auto const msg = emit_throw_message(m);
-  EXPECT_NE(msg.find("consistent tangent"), std::string::npos) << msg;
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+
+  // Emitted as a rank-4 output, bound to compute() like every output.
+  EXPECT_NE(h.find("add_output<tmech::tensor<value_type, 3, 4>>"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("\"dstress_dstrain\", &ReturnMap::compute"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("tmech::tensor<value_type, 3, 4>& m_out_dstress_dstrain;"),
+            std::string::npos)
+      << h;
+
+  // The implicit correction ∂σ/∂z ⊗ dz/dε: ∂σ/∂z = ε (the strain), assembled as
+  // an outer product. Pinning this is the whole point — a dropped coupling term
+  // would still leave a plausible-but-wrong ∂σ/∂ε.
+  EXPECT_NE(h.find("tmech::outer_product<tmech::sequence<1, 2>, "
+                   "tmech::sequence<3, 4>>(strain,"),
+            std::string::npos)
+      << h;
+  // The explicit base term ∂σ/∂ε = z·I⁴ˢ (minor-symmetric identity).
+  EXPECT_NE(h.find("tmech::otimesu(tmech::eye<double, 3, 2>()"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("m_out_dstress_dstrain ="), std::string::npos) << h;
+
+  // The tangent is evaluated AFTER the solve (uses the converged z).
+  auto const solve_at = h.find("m_solver.get().solve(eval)");
+  auto const tangent_at = h.find("m_out_dstress_dstrain =");
+  ASSERT_NE(solve_at, std::string::npos);
+  ASSERT_NE(tangent_at, std::string::npos);
+  EXPECT_LT(solve_at, tangent_at) << "tangent must use the converged state";
+}
+
+// A tangent can only differentiate a TENSOR (stress) output.
+TEST(NumSimMaterialTarget, RejectsTangentOfScalarOutputOnResidualMaterial) {
+  auto m = build_return_map();
+  m.add_output("scalar_out", 2.0 * make_expression<scalar>("c"));
+  m.add_algorithmic_tangent("dsc_dstrain", "scalar_out", "strain");
+  EXPECT_NE(emit_throw_message(m).find("is scalar"), std::string::npos);
+}
+
+// wrt_input must be a declared tensor input.
+TEST(NumSimMaterialTarget, RejectsTangentWrtUnknownInputOnResidualMaterial) {
+  auto m = build_return_map();
+  m.add_algorithmic_tangent("dstress_dghost", "stress", "ghost");
+  EXPECT_NE(emit_throw_message(m).find("not a declared tensor input"),
+            std::string::npos);
+}
+
+// The tangent output name shares the emitted-identifier collision surface. A
+// name like "solver" is not a recipe symbol (so the request-time
+// availability check passes) but collides with the emitted m_solver member —
+// caught by the emit-time guard.
+TEST(NumSimMaterialTarget, RejectsTangentNameCollidingWithEmittedMember) {
+  auto m = build_return_map();
+  m.add_algorithmic_tangent("solver", "stress", "strain");
+  EXPECT_NE(emit_throw_message(m).find("collides"), std::string::npos);
 }
 
 // A residual material needs at least one output to anchor compute() (the output
