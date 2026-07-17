@@ -35,6 +35,7 @@
 #include <tmech/tmech.h>
 #include "numsim-materials/solvers/backward_euler.h"
 #include "numsim-materials/materials/tensor_component_stepper.h"
+#include "numsim-materials/postprocessing/numerical_diff_checker.h"
 #include "Viscoelastic.h" // generated: σ = α·ε (tensor stress from scalar state)
 #include "ReturnMap.h"     // generated: implicit residual R(z,ε)=z−c·tr(ε), σ=z·ε
 #include "ReturnMapCubic.h" // generated: NONLINEAR residual R=z+z³−c·tr(ε)
@@ -375,6 +376,64 @@ TEST(NumSimMaterialEndToEnd, ResidualReturnMapConsistentTangentHasCouplingTerm) 
   EXPECT_NEAR(C(0, 1, 0, 1), z * T{0.5}, 1e-10);
   // Diagonal: C_{0000} = z·I⁴ˢ_{0000} + c·e00 = z + c·e00.
   EXPECT_NEAR(C(0, 0, 0, 0), z + c * e00, 1e-10);
+}
+
+// Phase C (#90, roadmap D18): INDEPENDENT verification of the generated
+// consistent tangent. The prior tests pin specific components against a
+// hand-derived closed form; this instead points numsim-materials'
+// `numerical_diff_checker` at the generated ReturnMap material and finite-
+// differences the WHOLE dσ/dε through the real property graph — perturbing the
+// strain, re-solving the Newton (reverting the z history each sample so every
+// perturbation restarts from the same z_old), and comparing every rank-4
+// component against our emitted `dstress_dstrain`. This catches any component
+// the closed-form assertions did not enumerate, and validates the coupling term
+// via the re-solve rather than by construction.
+TEST(NumSimMaterialEndToEnd, ResidualReturnMapTangentMatchesNumericalDiff) {
+  ctx_type ctx;
+  param_type p;
+
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.02});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 50);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "ReturnMap");
+  p.insert<T>("c", T{2.0});
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<ReturnMap>(p);
+
+  // The FD checker: FD-differentiate ReturnMap::stress w.r.t. stepper::strain and
+  // compare to the analytical ReturnMap::dstress_dstrain. Revert the z history
+  // between perturbations so each re-solve starts from the same previous state.
+  p.clear();
+  p.insert<std::string>("name", "checker");
+  p.insert<ctx_type*>("context", &ctx);
+  p.insert<std::string>("output_source", "ReturnMap::stress");
+  p.insert<std::string>("input_source", "stepper::strain");
+  p.insert<std::string>("analytical_source", "ReturnMap::dstress_dstrain");
+  p.insert<std::vector<std::string>>("history_sources", {"ReturnMap::z"});
+  p.insert<T>("epsilon", T{1e-7});
+  ctx.create<numsim::materials::tangent_checker<policy>>(p);
+
+  ctx.finalize();
+
+  // Step through several increments; the tangent must FD-match at every state.
+  T max_rel = 0;
+  for (int i = 0; i < 8; ++i) {
+    ctx.update();
+    max_rel = std::max(max_rel, ctx.get<T>("checker", "rel_error"));
+    ctx.commit();
+  }
+  // Smooth response (z = c·tr(ε), no transitions), so central FD is tight.
+  EXPECT_LT(max_rel, 1e-6) << "generated dσ/dε disagrees with numerical diff";
 }
 
 // NONLINEAR residual R(z,ε) = z + z³ − c·tr(ε), so ∂R/∂z = 1 + 3z². This is the
