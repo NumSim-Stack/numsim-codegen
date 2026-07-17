@@ -3,11 +3,18 @@
 #include <numsim_codegen/code_emit/code_emit_pipeline.h>
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/code_emit/leaf_collector.h>
+#include <numsim_codegen/passes/internal/algorithmic_tangent.h>
 #include <numsim_codegen/recipe.h>
 
 #include <numsim_cas/core/diff.h>
+#include <numsim_cas/scalar/scalar_constant.h>
+#include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/tensor/tensor_diff.h>
+#include <numsim_cas/tensor/tensor_functions.h>
+#include <numsim_cas/tensor/tensor_operators.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_diff.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_functions.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_operators.h>
 
 #include <cmath>
 #include <format>
@@ -180,13 +187,6 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     throw std::runtime_error(
         "NumSimMaterialTarget: a residual recipe must not also declare rate "
         "(evolution) equations — the state is defined by the residual alone.");
-  }
-  if (!model.tangents().empty()) {
-    throw std::runtime_error(
-        "NumSimMaterialTarget: the strain-coupled consistent tangent dσ/dε is "
-        "not yet emitted for a residual material — it is a follow-up (PR 2b: "
-        "dσ/dε = ∂σ/∂ε + ∂σ/∂x·(−∂R/∂ε / ∂R/∂x)). Drop the algorithmic-tangent "
-        "request for now.");
   }
   for (auto const &in : model.inputs()) {
     if (in.kind != SymbolDecl::Kind::Tensor) {
@@ -397,6 +397,105 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     }
   }
 
+  // ── Consistent tangent(s) dσ/dε (strain-coupled, Mode B) ──
+  // For a requested tangent of a stress output σ w.r.t. a strain input ε:
+  //   dσ/dε = ∂σ/∂ε + ∂σ/∂z ⊗ dz/dε ,   dz/dε = −∂R/∂ε / ∂R/∂z
+  // where z is the scalar Newton state. ∂R/∂z is the scalar jacobian (a scalar —
+  // NO matrix inverse, since the state is scalar), so the whole tangent is a
+  // rank-4 tensor EXPRESSION in (z, ε, params). It is emitted as an extra
+  // post-solve output, evaluated at the converged z exactly like the stress
+  // (and, like every output, bound to &compute). ∂σ/∂z is taken through the
+  // detail::diff_tensor_wrt_scalar seam (cas#275).
+  for (auto const &t : model.tangents()) {
+    // of_output must be an emitted TENSOR output (the stress).
+    OutputDecl const *src = nullptr;
+    for (auto const &o : model.outputs()) {
+      if (o.name == t.of_output) {
+        src = &o;
+        break;
+      }
+    }
+    if (src == nullptr) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: consistent tangent '" + t.name +
+          "' references output '" + t.of_output +
+          "', which is not a declared output.");
+    }
+    if (src->kind != OutputDecl::Kind::Tensor) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: consistent tangent '" + t.name +
+          "' differentiates output '" + t.of_output +
+          "', which is scalar — dσ/dε requires a tensor (stress) output.");
+    }
+    // wrt_input must be a declared tensor input (the strain), and share σ's dim.
+    SymbolDecl const *arg = nullptr;
+    for (auto const &ti : tensor_inputs) {
+      if (ti.name == t.wrt_input) {
+        arg = &ti;
+        break;
+      }
+    }
+    if (arg == nullptr) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: consistent tangent '" + t.name +
+          "' differentiates w.r.t. '" + t.wrt_input +
+          "', which is not a declared tensor input.");
+    }
+    if (arg->dim != src->dim) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: consistent tangent '" + t.name + "': output '" +
+          t.of_output + "' (dim " + std::to_string(src->dim) + ") and input '" +
+          t.wrt_input + "' (dim " + std::to_string(arg->dim) +
+          ") have different tensor dimensions.");
+    }
+    // The tangent output name shares the same collision surface as any output.
+    if (is_reserved_residual(t.name) || t.name == cur_name ||
+        param_names.contains(t.name) || tensor_input_names.contains(t.name)) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: consistent-tangent name '" + t.name +
+          "' collides with an emitted member, the state, a parameter, or a "
+          "tensor input; rename it.");
+    }
+    for (auto const &o : outputs) {
+      if (o.name == t.name) {
+        throw std::runtime_error(
+            "NumSimMaterialTarget: consistent-tangent name '" + t.name +
+            "' collides with output '" + o.name + "'; rename it.");
+      }
+    }
+
+    // Resolve σ and ε expression handles.
+    auto const &sigma =
+        std::get<cas::expression_holder<cas::tensor_expression>>(src->expr);
+    cas::expression_holder<cas::tensor_expression> eps;
+    for (auto const &[name, h] : model.tensor_symbol_map()) {
+      if (name == t.wrt_input) eps = h;
+    }
+    if (!eps.is_valid()) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: cannot resolve the tensor-input handle for '" +
+          t.wrt_input + "' — input/symbol maps out of sync.");
+    }
+
+    // dσ/dε = ∂σ/∂ε + otimes(∂σ/∂z, (−1/∂R/∂z)·∂R/∂ε).
+    auto const dsig_deps = cas::diff(sigma, eps);                     // rank-4
+    auto const dsig_dz = detail::diff_tensor_wrt_scalar(sigma, cur_expr); // rank-2
+    auto const dR_deps = cas::diff(req.residual, eps);               // rank-2
+    auto const dR_dz = cas::diff(req.residual, cur_expr);            // scalar
+    auto const neg1 = cas::make_expression<cas::scalar_constant>(-1.0);
+    auto const dz_deps = (neg1 / dR_dz) * dR_deps;                   // rank-2
+    auto const tangent = dsig_deps + cas::otimes(dsig_dz, dz_deps);  // rank-4
+
+    CodeGenContext tc;
+    CodeEmitPipeline tp(tc);
+    register_all(tc);
+    tc.reset();
+    auto const trhs = tp.tensor().apply(tangent);
+    // dim from the operands (checked equal); rank = rank(σ) + rank(ε).
+    outputs.push_back({t.name, tc.render_statements("    "), trhs, true,
+                       src->dim, src->rank + arg->rank});
+  }
+
   // Emitted-member uniqueness guard (same hazard as the rate path: synthesized
   // member names can collide with recipe symbols).
   {
@@ -439,12 +538,21 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     << "' output to drive the solve. NOTE backward_euler::solve()\n";
   h << "// clamps its increment to >= 0 (a plasticity convention), so this "
        "material\n";
-  h << "// models only states whose solved increment is non-negative.\n";
+  h << "// models only states whose solved increment is non-negative. This "
+       "caveat\n";
+  h << "// applies to the CONSISTENT TANGENT dσ/dε too (if emitted): it is\n";
+  h << "// evaluated at the solved state via the implicit-function theorem, so "
+       "on a\n";
+  h << "// clamped (elastic) increment where the raw root is negative the "
+       "tangent is\n";
+  h << "// outside its domain of validity — the correct value there is ∂σ/∂ε "
+       "alone.\n";
   h << "#pragma once\n";
   h << "#include \"" << contract::material_base_include << "\"\n";
   h << "#include \"" << contract::backward_euler_include << "\"\n";
   h << "#include \"" << contract::material_ref_include << "\"\n";
   h << "#include <tmech/tmech.h>\n";
+  h << "#include <stdexcept>\n";
   h << "#include <utility>\n\n";
   h << "namespace numsim::materials::generated {\n\n";
   h << "template <typename Traits>\n";
@@ -546,6 +654,16 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
   h << "    };\n";
   h << "    const value_type d" << cur_name
     << " = m_solver.get().solve(eval);\n";
+  // Reject loudly if the Newton solve did not converge: every output (stress AND
+  // the consistent tangent) is evaluated at this state, so a non-converged root
+  // would silently feed a wrong stress / wrong stiffness into the graph. (Note:
+  // this does NOT catch backward_euler's std::max(x,0) clamp returning a
+  // non-root on the elastic branch — see the header caveat; that needs an
+  // upstream was_clamped() accessor, numsim-materials follow-up.)
+  h << "    if (!m_solver.get().converged())\n";
+  h << "      throw std::runtime_error(\"" << cls
+    << "::compute: backward_euler did not converge solving R(" << cur_name
+    << ", inputs)=0; stress/tangent would be evaluated at a non-root state.\");\n";
   h << "    m_" << cur_name << ".new_value() = m_" << cur_name
     << ".old_value() + d" << cur_name << ";\n";
   h << "    [[maybe_unused]] const value_type " << cur_name << " = m_"

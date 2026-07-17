@@ -322,6 +322,61 @@ TEST(NumSimMaterialEndToEnd, ResidualReturnMapSolvesAgainstBackwardEuler) {
   EXPECT_NEAR(sig(0, 1), T{0}, 1e-12);             // off-diagonal strain is 0
 }
 
+// Phase 2b: the strain-coupled CONSISTENT TANGENT of the generated ReturnMap,
+// verified numerically through the real backward_euler solve. For σ = z·ε with
+// z solving R = z − c·tr(ε) = 0:
+//   dσ/dε = ∂σ/∂ε + ∂σ/∂z ⊗ dz/dε = z·I⁴ˢ + ε ⊗ (c·I).
+// The second term is the implicit coupling a naive explicit ∂σ/∂ε drops. The
+// load-bearing assertion is the off-block C_{0011} = c·ε₀₀ ≠ 0 — exactly the
+// component the rate-path (strain-only) Viscoelastic tangent above has as ZERO.
+TEST(NumSimMaterialEndToEnd, ResidualReturnMapConsistentTangentHasCouplingTerm) {
+  ctx_type ctx;
+  param_type p;
+
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.02});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-12});
+  p.insert<int>("max_iter", 50);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  p.clear();
+  const T c = T{2.0};
+  p.insert<std::string>("name", "ReturnMap");
+  p.insert<T>("c", c);
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<ReturnMap>(p);
+
+  ctx.finalize();
+  ctx.update();
+  ctx.commit();
+
+  const auto eps = read_tensor(ctx, "stepper", "strain");
+  const T e00 = eps(0, 0);
+  const T z = ctx.get<T>("ReturnMap", "z"); // = c·tr(ε) = c·e00
+
+  using tensor4 = tmech::tensor<T, 3, 4>;
+  auto* cp = dynamic_cast<
+      numsim_core::property<tensor4, numsim::materials::property_traits>*>(
+      ctx.find_property("ReturnMap", "dstress_dstrain"));
+  ASSERT_NE(cp, nullptr);
+  const auto C = cp->get();
+
+  // Coupling term (the whole point): C_{0011} = z·I⁴ˢ_{0011} + ε₀₀·(c·I)_{11}
+  //                                           = 0 + c·e00.  Naive ∂σ/∂ε ⇒ 0.
+  EXPECT_NEAR(C(0, 0, 1, 1), c * e00, 1e-10);
+  EXPECT_GT(std::abs(C(0, 0, 1, 1)), 1e-6) << "coupling term must be nonzero";
+  // Explicit base term (correction vanishes here): C_{0101} = z·I⁴ˢ_{0101} = z·½.
+  EXPECT_NEAR(C(0, 1, 0, 1), z * T{0.5}, 1e-10);
+  // Diagonal: C_{0000} = z·I⁴ˢ_{0000} + c·e00 = z + c·e00.
+  EXPECT_NEAR(C(0, 0, 0, 0), z + c * e00, 1e-10);
+}
+
 // NONLINEAR residual R(z,ε) = z + z³ − c·tr(ε), so ∂R/∂z = 1 + 3z². This is the
 // test that VALIDATES THE EMITTED JACOBIAN: with a tight Newton budget and a
 // root z≈0.682 (where ∂R/∂z≈2.4 ≫ 1), a wrong derivative oscillates and the
@@ -368,6 +423,24 @@ TEST(NumSimMaterialEndToEnd, NonlinearResidualValidatesEmittedJacobian) {
   // Sanity: the root of z+z³=1 is ≈ 0.6823278.
   EXPECT_NEAR(z, T{0.6823278038280193}, 1e-6);
   EXPECT_NEAR(sig(0, 0), z * eps(0, 0), 1e-10); // σ = z·ε
+
+  // Phase 2b: the tangent on the NONLINEAR residual VALIDATES THE DIVISION by
+  // ∂R/∂z. Here ∂R/∂z = 1+3z² ≠ 1, so dz/dε = c·I/(1+3z²) and the coupling term
+  // C_{0011} = ε₀₀·c/(1+3z²). If the emitter dropped the /∂R/∂z factor (which the
+  // LINEAR ReturnMap's ∂R/∂z≡1 cannot detect), C_{0011} would be ε₀₀·c instead —
+  // off by the ~2.4× jacobian here. This is the load-bearing division check.
+  using tensor4 = tmech::tensor<T, 3, 4>;
+  auto* cp = dynamic_cast<
+      numsim_core::property<tensor4, numsim::materials::property_traits>*>(
+      ctx.find_property("ReturnMapCubic", "dstress_dstrain"));
+  ASSERT_NE(cp, nullptr);
+  const auto C = cp->get();
+  const T dRdz = T{1} + T{3} * z * z; // = ∂R/∂z at the converged z
+  EXPECT_GT(dRdz, T{2}) << "must be ≫1 so the division is observable";
+  EXPECT_NEAR(C(0, 0, 1, 1), c * eps(0, 0) / dRdz, 1e-9);
+  // Contrast: without the division it would be c·ε₀₀ — assert we are NOT that.
+  EXPECT_GT(std::abs(C(0, 0, 1, 1) - c * eps(0, 0)), 1e-3)
+      << "tangent must divide by ∂R/∂z, not omit it";
 }
 
 #endif // NCG_TENSOR_E2E

@@ -22,9 +22,9 @@
 // coefficient product-rule term). Tracked upstream as numsim-cas#275.
 //
 // `diff_tensor_wrt_scalar` is the single seam through which that derivative is
-// taken. Until #275 lands it throws with a precise diagnostic; when the
-// overload ships, define NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR (or wire it
-// to a CAS feature macro) and the body collapses to a one-line `cas::diff`.
+// taken. It self-detects the cas#275 overload from the pin (see the
+// __has_include below) and collapses to a one-line `cas::diff`; absent the
+// overload it throws with a precise diagnostic.
 //
 // NOTE: this term only fires for a strain-coupled (t2s) residual. With the
 // current scalar-residual Newton machinery dx/dε ≡ 0, so AlgorithmicTangentPass
@@ -44,7 +44,15 @@ namespace numsim::codegen::detail {
     cas::expression_holder<cas::tensor_expression> const &expr,
     cas::expression_holder<cas::scalar_expression> const &arg)
     -> cas::expression_holder<cas::tensor_expression> {
-#ifdef NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR
+// Capability detection. The cas#275 overload — diff(tensor, scalar) — ships as
+// the `tensor_differentiation_wrt_scalar` visitor header; detect its PRESENCE
+// directly rather than relying on an externally-defined compile macro. This
+// keeps `diff_tensor_wrt_scalar` a SINGLE inline definition across every TU
+// (the body no longer depends on whether a TU links `numsim_codegen_headers`),
+// which would otherwise be an ODR hazard. `NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR`
+// is kept only as an explicit override/escape hatch.
+#if defined(NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR) ||                       \
+    __has_include(<numsim_cas/tensor/visitors/tensor_differentiation_wrt_scalar.h>)
   return cas::diff(expr, arg);
 #else
   (void)expr;
