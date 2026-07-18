@@ -19,6 +19,7 @@
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/scalar/scalar_std.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
+#include <numsim_cas/tensor/tensor_functions.h>
 #include <numsim_cas/tensor/tensor_operators.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_functions.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_operators.h>
@@ -53,10 +54,10 @@ bool write_header(ConstitutiveModel const& model, char const* path) {
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 6) {
+  if (argc < 7) {
     std::cerr << "usage: generate_numsim_material_check <linear.h> "
                  "<nonlinear.h> <viscoelastic.h> <returnmap.h> "
-                 "<returnmapcubic.h>\n";
+                 "<returnmapcubic.h> <j2return.h>\n";
     return 2;
   }
 
@@ -138,10 +139,37 @@ int main(int argc, char** argv) {
     returnmap_cubic.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
   }
 
+  // Phase C golden (#90): a REAL J2 return-map material — the deviatoric radial
+  // return with linear isotropic hardening. State = Δγ (plastic multiplier),
+  // solved on the plastic branch from R(Δγ,ε) = ‖s_trial‖ − 2G·Δγ − σ_y − H·Δγ,
+  // stress σ = s_trial − 2G·Δγ·n with s_trial = 2G·dev(ε) and n = s_trial/‖s_trial‖.
+  // Its consistent tangent dσ/dε carries the full flow-direction structure
+  // (deviatoric projector + n⊗n + geometric softening ∝ 1/‖s_trial‖) — far richer
+  // than ReturnMap. Verified against numerical differences by the driver. Scope
+  // caveat: single-increment plastic branch (no εᵖ tensor history, no elastic/
+  // plastic switch — those are epic #102 / Phase E).
+  ConstitutiveModel j2("J2Return");
+  {
+    auto G = j2.add_parameter("G", 80.0);   // shear modulus
+    auto sy = j2.add_parameter("sy", 1.0);  // yield stress
+    auto H = j2.add_parameter("H", 10.0);   // linear isotropic hardening modulus
+    auto eps = j2.add_tensor_input("strain", 3, 2, roles::Strain);
+    auto dg = j2.add_scalar_state_variable(
+        "dgamma", make_expression<scalar_constant>(0.0));
+    auto s_trial = (2.0 * G) * dev(eps); // deviatoric trial stress (εᵖ_old = 0)
+    auto q = norm(s_trial);              // ‖s_trial‖  (t2s)
+    auto n = s_trial / q;                // flow direction
+    j2.add_scalar_residual_equation(
+        dg, q - (2.0 * G) * dg.current - sy - H * dg.current);
+    j2.add_output("stress", s_trial - (2.0 * G) * dg.current * n);
+    j2.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
+  }
+
   if (!write_header(linear, argv[1])) return 1;
   if (!write_header(nonlinear, argv[2])) return 1;
   if (!write_header(viscoelastic, argv[3])) return 1;
   if (!write_header(returnmap, argv[4])) return 1;
   if (!write_header(returnmap_cubic, argv[5])) return 1;
+  if (!write_header(j2, argv[6])) return 1;
   return 0;
 }
