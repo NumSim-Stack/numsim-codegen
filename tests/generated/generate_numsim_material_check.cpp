@@ -54,10 +54,10 @@ bool write_header(ConstitutiveModel const& model, char const* path) {
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 7) {
+  if (argc < 9) {
     std::cerr << "usage: generate_numsim_material_check <linear.h> "
                  "<nonlinear.h> <viscoelastic.h> <returnmap.h> "
-                 "<returnmapcubic.h> <j2return.h>\n";
+                 "<returnmapcubic.h> <j2return.h> <j2voce.h> <j2swift.h>\n";
     return 2;
   }
 
@@ -165,11 +165,55 @@ int main(int argc, char** argv) {
     j2.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
   }
 
+  // Same J2 return map with NONLINEAR isotropic hardening — σ_y(Δγ) is now a
+  // nonlinear function of the state, so ∂R/∂Δγ is Δγ-dependent and cas::diff must
+  // differentiate it correctly for the consistent tangent (exercised end-to-end).
+  // Voce (saturating):  σ_y = σy0 + Q·(1 − e^{−b·Δγ}).
+  ConstitutiveModel j2voce("J2Voce");
+  {
+    auto Gp = j2voce.add_parameter("G", 80.0);
+    auto sy0 = j2voce.add_parameter("sy0", 1.0);
+    auto Q = j2voce.add_parameter("Q", 0.8);
+    auto b = j2voce.add_parameter("b", 25.0);
+    auto eps = j2voce.add_tensor_input("strain", 3, 2, roles::Strain);
+    auto dg = j2voce.add_scalar_state_variable(
+        "dgamma", make_expression<scalar_constant>(0.0));
+    auto s_trial = (2.0 * Gp) * dev(eps);
+    auto q = norm(s_trial);
+    auto n = s_trial / q;
+    auto sy = sy0 + Q * (make_expression<scalar_constant>(1.0) -
+                         exp((make_expression<scalar_constant>(0.0) - b) * dg.current));
+    j2voce.add_scalar_residual_equation(dg, q - (2.0 * Gp) * dg.current - sy);
+    j2voce.add_output("stress", s_trial - (2.0 * Gp) * dg.current * n);
+    j2voce.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
+  }
+
+  // Swift power law:  σ_y = C·(ε0 + Δγ)^k  (finite slope at Δγ=0).
+  ConstitutiveModel j2swift("J2Swift");
+  {
+    auto Gp = j2swift.add_parameter("G", 80.0);
+    auto C = j2swift.add_parameter("C", 2.0);
+    auto e0 = j2swift.add_parameter("e0", 0.05);
+    auto k = j2swift.add_parameter("k", 0.3);
+    auto eps = j2swift.add_tensor_input("strain", 3, 2, roles::Strain);
+    auto dg = j2swift.add_scalar_state_variable(
+        "dgamma", make_expression<scalar_constant>(0.0));
+    auto s_trial = (2.0 * Gp) * dev(eps);
+    auto q = norm(s_trial);
+    auto n = s_trial / q;
+    auto sy = C * pow(e0 + dg.current, k);
+    j2swift.add_scalar_residual_equation(dg, q - (2.0 * Gp) * dg.current - sy);
+    j2swift.add_output("stress", s_trial - (2.0 * Gp) * dg.current * n);
+    j2swift.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
+  }
+
   if (!write_header(linear, argv[1])) return 1;
   if (!write_header(nonlinear, argv[2])) return 1;
   if (!write_header(viscoelastic, argv[3])) return 1;
   if (!write_header(returnmap, argv[4])) return 1;
   if (!write_header(returnmap_cubic, argv[5])) return 1;
   if (!write_header(j2, argv[6])) return 1;
+  if (!write_header(j2voce, argv[7])) return 1;
+  if (!write_header(j2swift, argv[8])) return 1;
   return 0;
 }
