@@ -137,10 +137,54 @@ runtime evaluator bit-for-bit. Silent-cap rule: if a model hits an unsupported
    consistent tangent at ~100 states incl. `b=I`. The acceptance gate. Wire the
    CMAME case-study comparison harness (numsim-cas+codegen vs AceGen) here.
 
+## Parser surface (numsim-cas — separate follow-up, not this branch)
+Grounded in a source audit of `src/numsim_cas/parser/` (PEGTL grammar → actions
+→ a name→dispatch `function_registry`; `parsed_expression` is
+`variant<scalar, tensor, tensor_to_scalar>`).
+
+**The spectral tangent tower imposes ZERO new parser surface.** Users only ever
+type the *primal* functions; every derivative node is a `diff()` output built
+programmatically from the parsed tree, never from source:
+- `dd_f[i…](A)` (divided difference) arises only from differentiation; its
+  printed form is intentionally non-round-trippable (the `macauley_plus →
+  max(x,0)` category). Never parsed.
+- `E_i(A)` / `n_i(A)` (eigenprojection / eigenvector) and the assembled
+  `I:Σ …` tangent are differentiation outputs. Never parsed.
+
+So the parser needs only the two **primal** entry points:
+
+**1. Overload `log`/`exp`/`sqrt` by argument kind → isotropic tensor function.**
+These names are already bound to the scalar forms, and the registry keys on
+**name only** (one `function_entry` per name), so `log(A::tensor)` currently
+fails the arg-kind check. Dispatching `log(A)` to the isotropic tensor `log`
+while `log(x)` stays scalar needs **arg-kind overload resolution** — resolve on
+`(name, arg_kinds)` not name alone. This is **shared infrastructure**: the
+`function_registry.h` header already flags the identical need for the
+`if_then_else` overloads (scalar/tensor/t2s condition forms). Build the resolver
+once; both land. The registry's own aliasing policy rules out the `tensor_log`
+rename dodge (`log` is a universal std name).
+- Cost: 1 shared resolver feature + 3 one-line dispatch entries
+  (`isotropic log/exp/sqrt`, arg_kinds `{tensor}`).
+
+**2. Eigenvalue accessor `eigenvalue(A, i)` (alias `eig`).** Feasible with
+existing machinery: arg_kinds `{tensor, scalar}`, dispatch reads the index via
+the **already-present** "extract a positive `size_t` from a scalar literal"
+helper (used by the tensor-constant factories), then calls the
+`eigen_decomposition(A).value(i)` facade → t2s.
+- Cost: 1 registry entry, no new grammar.
+
+**Gating:** task 1's arg-kind resolver is worth doing independently for
+`if_then_else`; sequence the parser follow-up after it. Eigenprojection /
+eigenvector accessors (`E`, `eigvec`) are *optional* future entries on the same
+`{tensor, scalar}` pattern — add only if a hand-written model needs them, since
+codegen and differentiation reach them without the parser.
+
 ## Out of scope
 - Non-symmetric argument spectral (all constitutive use is `sym`).
 - dim-2 plane-strain spectral (dim-3 first; dim-2 is a trivial follow-up).
 - The MOOSE demo material *project wiring* (separate repo task once #5 lands).
+- **Parser work itself** — lives in numsim-cas, tracked above as a follow-up;
+  not gated by and does not gate the codegen handlers on this branch.
 
 ## Risks / watch-items
 - **Sort stability at coalescence:** the perm of equal eigenvalues is arbitrary,
