@@ -413,16 +413,64 @@ TEST(NumSimMaterialTarget, MultiOutputResidualScopesCseAndDrivesAll) {
 // `<state>_old` — it is a declared symbol (so the recipe accepts it) but has no
 // local in the emitted compute(), which would emit an unbound identifier. Guard
 // at emit time.
-TEST(NumSimMaterialTarget, RejectsResidualReferencingOldState) {
+// #92: a residual referencing the PREVIOUS-step state is now legitimate (the
+// increment form Δ = z.current − z.previous, e.g. J2's plastic multiplier). The
+// `_old` value is bound as a compute()-local, no longer rejected as unbound.
+TEST(NumSimMaterialTarget, EmitsResidualReferencingOldState) {
   ConstitutiveModel m("UsesOld");
   auto c = m.add_parameter("c", 2.0);
   auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
   auto z =
       m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
-  // R = z − z_old − c·tr(ε): references the previous-step state.
+  // R = (z − z_old) − c·tr(ε): references the previous-step state.
   m.add_scalar_residual_equation(z, z.current - z.previous - c * trace(eps));
   m.add_output("stress", z.current * eps);
-  EXPECT_NE(emit_throw_message(m).find("previous-step state"),
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+  // The previous value is bound as a local from the history's old_value().
+  EXPECT_NE(h.find("const value_type z_old = m_z.old_value();"),
+            std::string::npos)
+      << h;
+}
+
+// #92: a TENSOR internal variable (updated by a post-solve equation, not solved)
+// is emitted as tensor history — the capability numsim-core#16 unlocked. This is
+// what makes a return map path-dependent (e.g. J2 plastic strain εᵖ).
+TEST(NumSimMaterialTarget, EmitsTensorInternalVariableHistory) {
+  ConstitutiveModel m("WithInternal");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  auto acc = m.add_tensor_state_variable(
+      "acc", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_tensor_update_equation(acc, acc.previous + z.current * eps); // acc += z·ε
+  m.add_output("stress", z.current * eps);
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+  // tensor history: ctor add_history_output<tensor> + member.
+  EXPECT_NE(h.find("add_history_output<tmech::tensor<value_type, 3, 2>>(\"acc\")"),
+            std::string::npos) << h;
+  EXPECT_NE(h.find("numsim_core::history_property<tmech::tensor<value_type, 3, 2>>& "
+                   "m_acc;"),
+            std::string::npos) << h;
+  // previous value bound + post-solve update emitted.
+  EXPECT_NE(h.find("const auto& acc_old = m_acc.old_value();"),
+            std::string::npos) << h;
+  EXPECT_NE(h.find("m_acc.new_value() = "), std::string::npos) << h;
+}
+
+// A state variable that is neither solved (residual) nor updated (update
+// equation) is a dangling declaration — rejected loudly.
+TEST(NumSimMaterialTarget, RejectsDanglingStateVariable) {
+  ConstitutiveModel m("Dangling");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  (void)m.add_tensor_state_variable(
+      "acc", 3, 2, make_expression<tensor_zero>(3, std::size_t{2})); // no eq
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_output("stress", z.current * eps);
+  EXPECT_NE(emit_throw_message(m).find(
+                "neither the Newton unknown (a residual) nor an internal"),
             std::string::npos);
 }
 
