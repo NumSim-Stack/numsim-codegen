@@ -39,6 +39,7 @@
 #include "Viscoelastic.h" // generated: σ = α·ε (tensor stress from scalar state)
 #include "ReturnMap.h"     // generated: implicit residual R(z,ε)=z−c·tr(ε), σ=z·ε
 #include "ReturnMapCubic.h" // generated: NONLINEAR residual R=z+z³−c·tr(ε)
+#include "J2PathDep.h"   // generated: PATH-DEPENDENT J2 (tensor εᵖ history, #92)
 #endif
 
 #include <gtest/gtest.h>
@@ -57,6 +58,7 @@ using Nonlinear = numsim::materials::generated::NonlinearDecay<policy>;
 using Visco = numsim::materials::generated::Viscoelastic<policy>;
 using ReturnMap = numsim::materials::generated::ReturnMap<policy>;
 using ReturnMapCubic = numsim::materials::generated::ReturnMapCubic<policy>;
+using J2PathDep = numsim::materials::generated::J2PathDep<policy>;
 using tensor2 = tmech::tensor<T, 3, 2>;
 #endif
 
@@ -500,6 +502,116 @@ TEST(NumSimMaterialEndToEnd, NonlinearResidualValidatesEmittedJacobian) {
   // Contrast: without the division it would be c·ε₀₀ — assert we are NOT that.
   EXPECT_GT(std::abs(C(0, 0, 1, 1) - c * eps(0, 0)), 1e-3)
       << "tangent must divide by ∂R/∂z, not omit it";
+}
+
+// ── #92 golden: PATH-DEPENDENT J2 (tensor εᵖ history) ────────────────────────
+// The property that single-increment plasticity CANNOT show: plastic strain
+// accumulates under load and is RETAINED on unload (residual plastic strain),
+// and unloading is elastic. εᵖ is carried across steps as tensor history.
+namespace {
+void set_strain00(ctx_type& ctx, tensor2& eps,
+                  const std::unordered_set<const numsim::materials::property_base*>& excl,
+                  T e) {
+  tensor2 E{}; E(0, 0) = e; eps = E;
+  ctx.update_property("J2", "stress", excl);
+}
+} // namespace
+
+TEST(NumSimMaterialEndToEnd, J2PathDependentRetainsPlasticStrainOnUnload) {
+  ctx_type ctx;
+  param_type p;
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 50);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+  p.clear();
+  p.insert<std::string>("name", "J2");
+  p.insert<T>("G", T{80}); p.insert<T>("sy", T{1.0}); p.insert<T>("H", T{10.0});
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<J2PathDep>(p);
+  ctx.finalize();
+
+  auto& eps = ctx.get_mutable<tensor2>("stepper", "strain");
+  auto* ep = ctx.find_property("stepper", "strain");
+  const std::unordered_set<const numsim::materials::property_base*> excl{ep};
+
+  // Load well into the plastic regime, committing each step so εᵖ accumulates.
+  T peak_epsp = 0;
+  for (T e : {T{0.006}, T{0.010}, T{0.015}, T{0.020}}) {
+    set_strain00(ctx, eps, excl, e);
+    ctx.commit();
+    peak_epsp = ctx.get<tensor2>("J2", "eps_p")(0, 0);
+  }
+  ASSERT_GT(peak_epsp, T{1e-3}) << "should have accumulated plastic strain";
+  const T peak_sig = read_tensor(ctx, "J2", "stress")(0, 0);
+
+  // Unload elastically to a lower strain (still above the reverse-yield point).
+  set_strain00(ctx, eps, excl, T{0.010});
+  ctx.commit();
+  const T unl_epsp = ctx.get<tensor2>("J2", "eps_p")(0, 0);
+  const T unl_sig = read_tensor(ctx, "J2", "stress")(0, 0);
+
+  // εᵖ is RETAINED (elastic unloading — no plastic flow), stress drops.
+  EXPECT_NEAR(unl_epsp, peak_epsp, 1e-12)
+      << "plastic strain must be retained on elastic unloading";
+  EXPECT_LT(unl_sig, peak_sig) << "stress must decrease on unload";
+  // Elastic unload slope: Δσ = 2G·Δε on the driven component's deviatoric part.
+  // (σ00 vs ε00 slope ~ 2G·2/3.) Just assert it moved a lot (elastic, steep).
+  EXPECT_GT(peak_sig - unl_sig, T{0.5}) << "unload must be elastic (steep)";
+}
+
+// FD-verify the consistent tangent of the path-dependent material — the FD
+// checker must revert BOTH histories (α AND εᵖ) so each perturbation is taken at
+// fixed history, matching the analytical tangent (which holds εᵖ_old fixed).
+// NOTE: the emitted tangent is the PLASTIC-branch (algorithmic) tangent; on the
+// elastic branch (backward_euler's max(x,0) clamp gives Δγ=0) it does NOT match
+// the elastic FD tangent — that switch is the Kuhn-Tucker work (#35). So we load
+// solidly into yield (increment ≫ ε_yield) and only check plastic states.
+TEST(NumSimMaterialEndToEnd, J2PathDependentTangentMatchesNumericalDiff) {
+  ctx_type ctx;
+  param_type p;
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.01}); // ε_yield ≈ 0.0077 → every step is plastic
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 60);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+  p.clear();
+  p.insert<std::string>("name", "J2");
+  p.insert<T>("G", T{80}); p.insert<T>("sy", T{1.0}); p.insert<T>("H", T{10.0});
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<J2PathDep>(p);
+  p.clear();
+  p.insert<std::string>("name", "checker");
+  p.insert<ctx_type*>("context", &ctx);
+  p.insert<std::string>("output_source", "J2::stress");
+  p.insert<std::string>("input_source", "stepper::strain");
+  p.insert<std::string>("analytical_source", "J2::dstress_dstrain");
+  // BOTH histories reverted per FD sample — the load-bearing part for a
+  // path-dependent material.
+  p.insert<std::vector<std::string>>("history_sources", {"J2::alpha", "J2::eps_p"});
+  p.insert<T>("epsilon", T{1e-7});
+  ctx.create<numsim::materials::tangent_checker<policy>>(p);
+  ctx.finalize();
+
+  T max_rel = 0;
+  for (int i = 0; i < 6; ++i) {
+    ctx.update();
+    ASSERT_GT(ctx.get<T>("J2", "alpha"), T{0}) << "step " << i << ": expected plastic";
+    max_rel = std::max(max_rel, ctx.get<T>("checker", "rel_error"));
+    ctx.commit();
+  }
+  EXPECT_LT(max_rel, 1e-6) << "path-dependent J2 tangent disagrees with FD";
 }
 
 #endif // NCG_TENSOR_E2E
