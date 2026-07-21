@@ -22,6 +22,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -125,12 +126,33 @@ TEST(SpectralCodeEmit, DistinctArgumentsGetDistinctDecompositions) {
   EXPECT_EQ(count(r, "spectral_decompose("), 2u) << r;
 }
 
-// ─── Stub boundary: divided difference still throws (slice 4) ───────────
-TEST(SpectralCodeEmit, DeferredNodesThrowClearly) {
+// ─── Divided difference (slice 4): emits a runtime-helper call ─────────
+TEST(SpectralCodeEmit, DividedDifferenceEmitsHelperCall) {
   Fixture f;
   auto dd = cas::make_expression<cas::tensor_to_scalar_divided_difference>(
       f.A, cas::isotropic_kind::log, std::vector<std::size_t>{0, 1});
-  EXPECT_THROW(f.t2s.apply(dd), std::runtime_error);
+  f.t2s.apply(dd);
+  auto r = f.ctx.render_statements();
+  EXPECT_EQ(count(r, "spectral_decompose("), 1u) << r;
+  EXPECT_NE(r.find("numsim::codegen::rt::divided_difference("
+                   "numsim::codegen::rt::scalar_fn::log, "
+                   "std::array<double, 2>{"),
+            std::string::npos)
+      << r;
+  EXPECT_NE(r.find(".eigenvalues[0]"), std::string::npos) << r;
+  EXPECT_NE(r.find(".eigenvalues[1]"), std::string::npos) << r;
+}
+
+// A repeated index (confluent point) still emits both slots — the helper
+// collapses them to the derivative form at runtime.
+TEST(SpectralCodeEmit, DividedDifferenceConfluentIndices) {
+  Fixture f;
+  auto dd = cas::make_expression<cas::tensor_to_scalar_divided_difference>(
+      f.A, cas::isotropic_kind::sqrt, std::vector<std::size_t>{1, 1, 2});
+  f.t2s.apply(dd);
+  auto r = f.ctx.render_statements();
+  EXPECT_NE(r.find("scalar_fn::sqrt"), std::string::npos) << r;
+  EXPECT_NE(r.find("std::array<double, 3>{"), std::string::npos) << r;
 }
 
 // ─── Isotropic value f(A) = Σ f(λ_i) E_i (slice 3) ─────────────────────
@@ -176,6 +198,27 @@ TEST(SpectralRuntime, IsotropicLogExpRoundTrips) {
   auto L = isofn(A, [](double x) { return std::log(x); });
   auto back = isofn(L, [](double x) { return std::exp(x); });
   EXPECT_TRUE(tmech::almost_equal(back, A, 1e-12));
+}
+
+// ─── Divided-difference helper math (mirrors numsim-cas confluent_dd) ──
+TEST(SpectralRuntime, DividedDifferenceValues) {
+  using rt::divided_difference;
+  using rt::scalar_fn;
+  // Distinct pair: (log b − log a)/(b − a).
+  EXPECT_NEAR(divided_difference(scalar_fn::log, std::array{2.0, 5.0}),
+              (std::log(5.0) - std::log(2.0)) / (5.0 - 2.0), 1e-12);
+  // Coincident pair → f'(λ): log'(2) = 1/2.
+  EXPECT_NEAR(divided_difference(scalar_fn::log, std::array{2.0, 2.0}), 0.5,
+              1e-12);
+  // Triple coincident → f''(λ)/2!: log''(2)/2 = (−1/4)/2 = −1/8.
+  EXPECT_NEAR(divided_difference(scalar_fn::log, std::array{2.0, 2.0, 2.0}),
+              -0.125, 1e-12);
+  // exp is its own derivative at all orders → [exp;x,x] = exp(x).
+  EXPECT_NEAR(divided_difference(scalar_fn::exp, std::array{1.5, 1.5}),
+              std::exp(1.5), 1e-12);
+  // Order-independence (helper sorts): [f;a,b] == [f;b,a].
+  EXPECT_NEAR(divided_difference(scalar_fn::sqrt, std::array{4.0, 9.0}),
+              divided_difference(scalar_fn::sqrt, std::array{9.0, 4.0}), 1e-15);
 }
 
 // ─── Runtime helper: ascending eigenvalues, correct projectors ─────────

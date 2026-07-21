@@ -115,14 +115,28 @@ public:
                                      std::to_string(v.index()) + "]");
   }
 
-  // [f; λ_{i…}](A), the confluent divided difference. Emitted as a nested
-  // coincidence-guarded ternary. Deferred to slice 4 of the spectral-lowering
-  // roadmap (#105).
-  void operator()(cas::tensor_to_scalar_divided_difference const &) override {
-    throw std::runtime_error(
-        "TensorToScalarCodeEmit: codegen for tensor_to_scalar_divided_"
-        "difference is not yet implemented. Tracked as slice 4 of the "
-        "spectral-lowering roadmap (numsim-codegen #105).");
+  // [f; λ_{i…}](A), the confluent divided difference. Emitted as a call into
+  // the shipped runtime helper, which carries the coincidence guard and the
+  // sole sqrt(eps) tolerance shared with the evaluator — so generated code and
+  // runtime take the same analytic-limit branch at coalesced eigenvalues, and
+  // the constant can never drift between them.
+  void operator()(cas::tensor_to_scalar_divided_difference const &v) override {
+    auto const a = m_tensor.apply(v.expr());
+    auto const decomp =
+        emit_shared_decomposition(m_ctx, a, v.expr().get().dim());
+    auto const &idx = v.indices();
+    std::string pts = "std::array<double, " + std::to_string(idx.size()) + ">{";
+    for (std::size_t j = 0; j < idx.size(); ++j) {
+      if (j != 0) {
+        pts += ", ";
+      }
+      pts += decomp + ".eigenvalues[" + std::to_string(idx[j]) + "]";
+    }
+    pts += "}";
+    std::string const kind =
+        "numsim::codegen::rt::scalar_fn::" + std::string(cas::name(v.kind()));
+    m_result = register_temp(&v, "numsim::codegen::rt::divided_difference(" +
+                                     kind + ", " + pts + ")");
   }
 
   // ─── Algebraic combinators ───────────────────────────────────────
