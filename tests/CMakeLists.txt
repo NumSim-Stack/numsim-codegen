@@ -129,6 +129,38 @@ target_link_libraries(compile_check_driver
 
 gtest_discover_tests(compile_check_driver)
 
+# ─── Spectral lowering end-to-end gate (#105, slice 5) ───────────────────────
+# Generate log(A) and its tangent d log(A)/dA as tmech-only C++, then compile
+# and run it, checking both against the CAS evaluator — including at eigenvalue
+# coalescence (b=I), where the divided-difference guard must stay finite. This
+# is the compile-and-run gate behind the symbolic spectral tangent.
+add_executable(generate_spectral_check
+    generated/generate_spectral_check.cpp)
+target_link_libraries(generate_spectral_check
+    PRIVATE numsim::codegen numsim_codegen_warnings)
+
+set(GENERATED_SPECTRAL_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/SpectralCheck.h)
+add_custom_command(
+    OUTPUT ${GENERATED_SPECTRAL_HEADER}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND $<TARGET_FILE:generate_spectral_check> ${GENERATED_SPECTRAL_HEADER}
+    DEPENDS generate_spectral_check
+    COMMENT "Generating spectral e2e header via numsim-codegen"
+    VERBATIM)
+
+add_executable(spectral_check_driver
+    generated/spectral_check_driver.cpp
+    ${GENERATED_SPECTRAL_HEADER})
+target_include_directories(spectral_check_driver
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(spectral_check_driver
+    PRIVATE numsim::codegen numsim_codegen_warnings_light
+            GTest::gtest GTest::gtest_main)
+
+gtest_discover_tests(spectral_check_driver)
+
 # ─── numsim-materials end-to-end gate (Phase B) ──────────────────────────────
 #
 # The string-asserting NumSimMaterialTargetTest proves the emitted TEXT matches

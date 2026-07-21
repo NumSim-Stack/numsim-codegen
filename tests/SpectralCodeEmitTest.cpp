@@ -1,8 +1,7 @@
-// Slice-1 tests for the spectral emit handlers (#105): eigenvalue,
-// eigenprojection, eigenvector — plus the shared-decomposition interning and
-// the shipped runtime helper. The primal isotropic value (slice 3) and the
-// divided-difference ternary (slice 4) are still stubbed and are asserted to
-// throw here so the stub boundary is explicit.
+// Tests for the spectral emit handlers (#105): eigenvalue, eigenprojection,
+// eigenvector, the isotropic primal value f(A)=Σf(λ_i)E_i, and the confluent
+// divided difference — plus the shared-decomposition interning and the shipped
+// runtime helper (ascending decomposition + divided-difference math).
 
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
