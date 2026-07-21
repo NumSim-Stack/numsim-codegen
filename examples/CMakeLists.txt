@@ -12,3 +12,6 @@ target_link_libraries(resin_curing PRIVATE numsim::codegen)
 
 add_executable(elastic_tangent elastic_tangent.cpp)
 target_link_libraries(elastic_tangent PRIVATE numsim::codegen)
+
+add_executable(hencky_hyperelastic hencky_hyperelastic.cpp)
+target_link_libraries(hencky_hyperelastic PRIVATE numsim::codegen)
