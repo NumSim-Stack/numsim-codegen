@@ -22,8 +22,10 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace numsim::codegen {
 namespace {
@@ -123,16 +125,57 @@ TEST(SpectralCodeEmit, DistinctArgumentsGetDistinctDecompositions) {
   EXPECT_EQ(count(r, "spectral_decompose("), 2u) << r;
 }
 
-// ─── Stub boundary: primal value + divided difference throw (slices 3/4) ─
+// ─── Stub boundary: divided difference still throws (slice 4) ───────────
 TEST(SpectralCodeEmit, DeferredNodesThrowClearly) {
   Fixture f;
-  auto iso = cas::make_expression<cas::tensor_isotropic_function>(
-      f.A, cas::isotropic_kind::log);
-  EXPECT_THROW(f.tensor.apply(iso), std::runtime_error);
-
   auto dd = cas::make_expression<cas::tensor_to_scalar_divided_difference>(
       f.A, cas::isotropic_kind::log, std::vector<std::size_t>{0, 1});
   EXPECT_THROW(f.t2s.apply(dd), std::runtime_error);
+}
+
+// ─── Isotropic value f(A) = Σ f(λ_i) E_i (slice 3) ─────────────────────
+TEST(SpectralCodeEmit, IsotropicValueEmitsSpectralSum) {
+  Fixture f;
+  auto L = cas::make_expression<cas::tensor_isotropic_function>(
+      f.A, cas::isotropic_kind::log);
+  f.tensor.apply(L);
+  auto r = f.ctx.render_statements();
+
+  // dim 3 ⇒ three spectral terms, one shared decomposition, std::log per λ_i.
+  EXPECT_EQ(count(r, "spectral_decompose("), 1u) << r;
+  EXPECT_EQ(count(r, "std::log("), 3u) << r;
+  EXPECT_EQ(count(r, "tmech::otimes("), 3u) << r;
+  EXPECT_EQ(count(r, ".eigenvalues["), 3u) << r;
+  // E_i = n_i ⊗ n_i ⇒ eigenvectors referenced twice per term (6 total).
+  EXPECT_EQ(count(r, ".eigenvectors["), 6u) << r;
+}
+
+TEST(SpectralCodeEmit, IsotropicValueUsesRequestedKind) {
+  Fixture f;
+  auto S = cas::make_expression<cas::tensor_isotropic_function>(
+      f.A, cas::isotropic_kind::sqrt);
+  f.tensor.apply(S);
+  auto r = f.ctx.render_statements();
+  EXPECT_NE(r.find("std::sqrt("), std::string::npos) << r;
+  EXPECT_EQ(r.find("std::log("), std::string::npos) << r;
+}
+
+// The emitted formula's MATH, exercised directly through the runtime helper:
+// L = Σ log(λ_i) E_i then exp of that reconstructs A (exp(log A) = A).
+TEST(SpectralRuntime, IsotropicLogExpRoundTrips) {
+  tmech::tensor<double, 3, 2> A;
+  A = {4.0, 1.0, 0.0, 1.0, 3.0, 0.0, 0.0, 0.0, 2.0}; // SPD, distinct eigs
+  auto isofn = [](auto const &X, auto f) {
+    auto d = rt::spectral_decompose(X);
+    tmech::tensor<double, 3, 2> out;
+    for (std::size_t i = 0; i < 3; ++i)
+      out += f(d.eigenvalues[i]) *
+             tmech::otimes(d.eigenvectors[i], d.eigenvectors[i]);
+    return out;
+  };
+  auto L = isofn(A, [](double x) { return std::log(x); });
+  auto back = isofn(L, [](double x) { return std::exp(x); });
+  EXPECT_TRUE(tmech::almost_equal(back, A, 1e-12));
 }
 
 // ─── Runtime helper: ascending eigenvalues, correct projectors ─────────

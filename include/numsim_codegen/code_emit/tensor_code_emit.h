@@ -490,24 +490,41 @@ public:
     m_result = register_temp(&v, eigenvector_ref(v.expr(), v.index()));
   }
 
-  // f(A) = Σ_i f(λ_i) E_i — the primal isotropic tensor function value.
-  // Deferred to slice 3 of the spectral-lowering roadmap (#105).
-  void operator()(cas::tensor_isotropic_function const &) override {
-    throw std::runtime_error(
-        "TensorCodeEmit: codegen for tensor_isotropic_function (the primal "
-        "f(A) value) is not yet implemented. Tracked as slice 3 of the "
-        "spectral-lowering roadmap (numsim-codegen #105).");
+  // f(A) = Σ_i f(λ_i) E_i, the primal isotropic tensor function value, with
+  // E_i = n_i ⊗ n_i. f ∈ {log, exp, sqrt} maps directly to the std function of
+  // the same name applied to each eigenvalue.
+  void operator()(cas::tensor_isotropic_function const &v) override {
+    auto const decomp = decomposition_of(v.expr());
+    std::string const fn = "std::" + std::string(cas::name(v.kind()));
+    std::string acc;
+    for (std::size_t i = 0; i < v.dim(); ++i) {
+      auto const idx = std::to_string(i);
+      auto const vi = decomp + ".eigenvectors[" + idx + "]";
+      if (i != 0) {
+        acc += " + ";
+      }
+      acc += fn + "(" + decomp + ".eigenvalues[" + idx + "]) * tmech::otimes(" +
+             vi + ", " + vi + ")";
+    }
+    m_result = register_temp(&v, acc);
   }
 
 private:
   // Emit (once per argument) the shared decomposition of `arg` and return the
-  // C++ expression for its i-th ascending eigenvector.
+  // temporary's name. All spectral quantities over `arg` reuse it.
+  auto
+  decomposition_of(cas::expression_holder<cas::tensor_expression> const &arg)
+      -> std::string {
+    auto const a = apply(arg);
+    return emit_shared_decomposition(m_ctx, a, arg.get().dim());
+  }
+
+  // C++ expression for the i-th ascending eigenvector of `arg`.
   auto
   eigenvector_ref(cas::expression_holder<cas::tensor_expression> const &arg,
                   std::size_t index) -> std::string {
-    auto const a = apply(arg);
-    auto const decomp = emit_shared_decomposition(m_ctx, a, arg.get().dim());
-    return decomp + ".eigenvectors[" + std::to_string(index) + "]";
+    return decomposition_of(arg) + ".eigenvectors[" + std::to_string(index) +
+           "]";
   }
 
   // Ternary lowering shared by the scalar- and t2s-condition if_then_else.
