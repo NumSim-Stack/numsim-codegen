@@ -314,17 +314,30 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     }
   }
   // The Newton increment is a compute()-local named `d<state>`; a tensor input
-  // (also a bare compute() local) named the same would redeclare it.
+  // OR an internal variable's `_old` local (also bare compute()-locals) named
+  // the same would redeclare it.
   std::string const increment_local = "d" + cur_name;
+  auto reject_increment_collision = [&](std::string const &n,
+                                        char const *what) {
+    if (n == increment_local) {
+      throw std::runtime_error(
+          std::string("NumSimMaterialTarget: ") + what + " '" + n +
+          "' collides with the synthesized Newton-increment local '" +
+          increment_local + "'; rename it or the state.");
+    }
+  };
   for (auto const &in : tensor_inputs) {
     reject_reserved(in.name, "tensor input name");
-    if (in.name == increment_local) {
-      throw std::runtime_error(
-          "NumSimMaterialTarget: tensor input '" + in.name +
-          "' collides with the synthesized Newton-increment local '" +
-          increment_local + "'; rename the input or the state.");
-    }
+    reject_increment_collision(in.name, "tensor input");
   }
+  // #92: internal-variable names reach compute() as `m_<name>` (member) and
+  // `<name>_old` (bare local). Guard both against reserved emit-locals and the
+  // increment local — same hazards as the state/inputs above.
+  for (auto const &iv : internals) {
+    reject_reserved(iv.name, "internal-variable name");
+    reject_increment_collision(iv.old_name, "internal-variable previous local");
+  }
+  reject_increment_collision(cur_old_name, "state previous local");
 
   // Resolve the current-state scalar holder — the diff variable for ∂R/∂x.
   cas::expression_holder<cas::scalar_expression> cur_expr;
@@ -428,8 +441,9 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
         if (!bound_scalar(n)) {
           throw std::runtime_error(
               "NumSimMaterialTarget: scalar output '" + o.name +
-              "' references '" + n + "', which is neither the state '" +
-              cur_name + "' nor a parameter.");
+              "' references '" + n +
+              "', which is not the state, its previous value, a parameter, or "
+              "an internal variable's previous value.");
         }
       }
       oc.reset();
@@ -444,8 +458,9 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
         if (!bound_scalar(n)) {
           throw std::runtime_error(
               "NumSimMaterialTarget: tensor output '" + o.name +
-              "' references scalar '" + n + "', which is neither the state '" +
-              cur_name + "' nor a parameter.");
+              "' references scalar '" + n +
+              "', which is not the state, its previous value, a parameter, or "
+              "an internal variable's previous value.");
         }
       }
       for (auto const &n : olc.tensor_names()) {
@@ -453,7 +468,8 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
           throw std::runtime_error(
               "NumSimMaterialTarget: tensor output '" + o.name +
               "' references tensor '" + n +
-              "', which is not a declared tensor input.");
+              "', which is not a declared tensor input or an internal "
+              "variable's previous value.");
         }
       }
       oc.reset();
@@ -565,7 +581,8 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     }
     // The tangent output name shares the same collision surface as any output.
     if (is_reserved_residual(t.name) || t.name == cur_name ||
-        param_names.contains(t.name) || tensor_input_names.contains(t.name)) {
+        param_names.contains(t.name) || tensor_input_names.contains(t.name) ||
+        internal_names.contains(t.name)) {
       throw std::runtime_error(
           "NumSimMaterialTarget: consistent-tangent name '" + t.name +
           "' collides with an emitted member, the state, a parameter, or a "
@@ -803,8 +820,15 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     << ".old_value() + d" << cur_name << ";\n";
   h << "    [[maybe_unused]] const value_type " << cur_name << " = m_"
     << cur_name << ".new_value();\n";
-  // #92: internal-variable updates (post-solve, before outputs — outputs may
-  // read the updated state). Brace-scoped for CSE-temp isolation like outputs.
+  // #92: internal-variable updates (post-solve). Brace-scoped for CSE-temp
+  // isolation like outputs. NOTE: outputs/residual/tangent can reference ONLY an
+  // internal variable's `_old` value (bound above), never its post-update value
+  // — there is no binding for `<iv>` current. This is LOAD-BEARING for the
+  // consistent tangent: cas::diff(σ, ε) and cas::diff(R, ε) hold `<iv>_old` fixed
+  // (it is a distinct symbol, history from the previous step), which is exactly
+  // the algorithmic tangent. Exposing the post-update value to outputs would make
+  // it strain-dependent and silently drop the ∂σ/∂εᵖ·dεᵖ/dε term — do NOT relax
+  // the bound_scalar/bound_tensor sets to include internal-variable currents.
   for (auto const &u : internal_updates) {
     h << "    {\n";
     if (!u.decls.empty()) h << u.decls;

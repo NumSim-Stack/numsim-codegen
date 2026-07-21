@@ -244,6 +244,11 @@ struct ResidualEquation {
 // materials (tensor history) on the scalar-solve Mode-B path.
 struct UpdateEquation {
   std::size_t state_variable_idx;
+  // INVARIANT: the active alternative matches the state variable's kind — a
+  // scalar `update` for a scalar state var, tensor for tensor. Enforced by
+  // construction: `add_scalar_update_equation` takes a ScalarStateVariableHandle
+  // (→ scalar state) and a scalar expr; the tensor adder is the tensor mirror.
+  // The emitter `std::get`s the alternative matching `state_variable_idx`'s kind.
   std::variant<cas::expression_holder<cas::scalar_expression>,
                cas::expression_holder<cas::tensor_expression>>
       update;
@@ -569,6 +574,7 @@ public:
       std::string doc = "") -> void {
     auto const idx = resolve_scalar_state_var_index_(
         state_var, "add_scalar_update_equation");
+    assert_update_target_free_(idx, "add_scalar_update_equation");
     m_update_equations.push_back(
         UpdateEquation{idx, std::move(update), std::move(doc)});
   }
@@ -579,6 +585,7 @@ public:
       std::string doc = "") -> void {
     auto const idx = resolve_tensor_state_var_index_(
         state_var, "add_tensor_update_equation");
+    assert_update_target_free_(idx, "add_tensor_update_equation");
     m_update_equations.push_back(
         UpdateEquation{idx, std::move(update), std::move(doc)});
   }
@@ -1126,6 +1133,31 @@ private:
         "ConstitutiveModel '{}': {} handle names tensor state variable '{}' but "
         "no such tensor state variable is registered on this model.",
         m_name, caller, sv_name));
+  }
+
+  // #92: a state variable is EITHER solved (residual) OR updated post-solve
+  // (update equation), and carries at most one update equation. Reject at the
+  // API (fail-early) rather than only at emit. (The reverse — a residual added
+  // AFTER an update on the same state — is caught at emit by the target's
+  // scope guard.)
+  void assert_update_target_free_(std::size_t idx,
+                                  std::string_view caller) const {
+    for (auto const &u : m_update_equations) {
+      if (u.state_variable_idx == idx) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': {} — internal variable '{}' already has an "
+            "update equation.",
+            m_name, caller, m_state_variables[idx].name));
+      }
+    }
+    for (auto const &r : m_residual_equations) {
+      if (r.state_variable_idx == idx) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': {} — state variable '{}' is solved by a "
+            "residual; it cannot also be an internal variable (update equation).",
+            m_name, caller, m_state_variables[idx].name));
+      }
+    }
   }
 
   // A scalar state variable carries EXACTLY ONE evolution mechanism — a rate

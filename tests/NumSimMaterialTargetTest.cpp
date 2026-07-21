@@ -456,6 +456,11 @@ TEST(NumSimMaterialTarget, EmitsTensorInternalVariableHistory) {
   EXPECT_NE(h.find("const auto& acc_old = m_acc.old_value();"),
             std::string::npos) << h;
   EXPECT_NE(h.find("m_acc.new_value() = "), std::string::npos) << h;
+  // Pin the update RHS, not just that an assignment exists: acc.new = acc_old +
+  // z·ε. A dropped acc_old, wrong operand, or a collapse to 0 must fail here (the
+  // tensor e2e is gcc-gated — this always-run layer is the only guard).
+  EXPECT_NE(h.find("z * strain"), std::string::npos) << h;   // z·ε term
+  EXPECT_NE(h.find("+ acc_old"), std::string::npos) << h;    // accumulation
 }
 
 // A state variable that is neither solved (residual) nor updated (update
@@ -471,6 +476,98 @@ TEST(NumSimMaterialTarget, RejectsDanglingStateVariable) {
   m.add_output("stress", z.current * eps);
   EXPECT_NE(emit_throw_message(m).find(
                 "neither the Newton unknown (a residual) nor an internal"),
+            std::string::npos);
+}
+
+// #92: a SCALAR internal variable (e.g. accumulated plastic strain p += Δ) — the
+// scalar-update path, distinct from the tensor one above.
+TEST(NumSimMaterialTarget, EmitsScalarInternalVariableHistory) {
+  ConstitutiveModel m("ScalarInternal");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  auto p = m.add_scalar_state_variable("p", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_scalar_update_equation(p, p.previous + z.current); // p += z
+  m.add_output("stress", z.current * eps);
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+  EXPECT_NE(h.find("add_history_output<value_type>(\"p\")"), std::string::npos)
+      << h;
+  EXPECT_NE(h.find("const value_type p_old = m_p.old_value();"),
+            std::string::npos) << h;
+  EXPECT_NE(h.find("m_p.new_value() = "), std::string::npos) << h;
+  EXPECT_NE(h.find("p_old"), std::string::npos) << h; // update reads p_old
+}
+
+// API fail-early (cr#2): a state solved by a residual cannot also be an internal
+// variable, and an internal var carries at most one update equation.
+TEST(NumSimMaterialTarget, RejectsResidualStateGivenUpdateEquation) {
+  ConstitutiveModel m("Both");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  EXPECT_THROW(m.add_scalar_update_equation(z, z.current), std::runtime_error);
+}
+
+TEST(NumSimMaterialTarget, RejectsSecondUpdateEquation) {
+  ConstitutiveModel m("TwoUpdates");
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  auto acc = m.add_tensor_state_variable(
+      "acc", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+  m.add_tensor_update_equation(acc, acc.previous + z.current * eps);
+  EXPECT_THROW(m.add_tensor_update_equation(acc, acc.previous),
+               std::runtime_error);
+}
+
+// #92 (cr#6): an internal variable's POST-UPDATE (current) value is NOT bound —
+// only its `_old`. An output referencing the current value is rejected. This is
+// load-bearing for the tangent (see the emitter comment).
+TEST(NumSimMaterialTarget, RejectsOutputReferencingInternalCurrent) {
+  ConstitutiveModel m("UsesInternalCurrent");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  auto acc = m.add_tensor_state_variable(
+      "acc", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_tensor_update_equation(acc, acc.previous + z.current * eps);
+  m.add_output("bad", acc.current); // references the internal var's CURRENT value
+  EXPECT_NE(emit_throw_message(m).find(
+                "not a declared tensor input or an internal variable's previous"),
+            std::string::npos);
+}
+
+// cpp-pro MED#1: state whose name ends in _old + an internal var whose `_old`
+// local collides with the synthesized `d<state>` increment local.
+TEST(NumSimMaterialTarget, RejectsInternalVarCollidingWithIncrementLocal) {
+  ConstitutiveModel m("IncCol");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto a = m.add_scalar_state_variable("alpha_old",
+                                       make_expression<scalar_constant>(0.0));
+  auto d = m.add_tensor_state_variable(
+      "dalpha", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+  m.add_scalar_residual_equation(a, a.current - c * trace(eps));
+  m.add_tensor_update_equation(d, d.previous + a.current * eps);
+  m.add_output("stress", a.current * eps);
+  EXPECT_NE(emit_throw_message(m).find("Newton-increment local"),
+            std::string::npos);
+}
+
+// cpp-pro MED#2: an internal-variable name colliding with a reserved emit-local.
+TEST(NumSimMaterialTarget, RejectsReservedInternalVarName) {
+  ConstitutiveModel m("ResvInternal");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  auto ev = m.add_tensor_state_variable(
+      "eval", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_tensor_update_equation(ev, ev.previous + z.current * eps);
+  m.add_output("stress", z.current * eps);
+  EXPECT_NE(emit_throw_message(m).find("internal-variable name"),
             std::string::npos);
 }
 
