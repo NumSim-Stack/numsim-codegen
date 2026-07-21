@@ -20,6 +20,7 @@ add_executable(numsim_codegen_tests
     ScalarCodeEmitTest.cpp
     TensorCodeEmitTest.cpp
     SpectralCodeEmitTest.cpp
+    SpectralMirrorTest.cpp
     RecipeTest.cpp
     MooseTargetTest.cpp
     RoleFlexibilityTest.cpp

@@ -13,6 +13,7 @@
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_if_then_else.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_visitor_typedef.h>
 
+#include <algorithm>
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
@@ -125,6 +126,25 @@ public:
     auto const decomp =
         emit_shared_decomposition(m_ctx, a, v.expr().get().dim());
     auto const &idx = v.indices();
+    std::string const kind =
+        "numsim::codegen::rt::scalar_fn::" + std::string(cas::name(v.kind()));
+
+    // All indices equal (the diagonal terms of a spectral tangent, and every
+    // fully-coincident higher-order term) → f^{(order)}(λ)/order! directly,
+    // skipping the sort/recursion/tolerance that divided_difference would run
+    // on identical values. Same math, same last bit.
+    const bool all_equal =
+        std::all_of(idx.begin(), idx.end(),
+                    [&](std::size_t i) { return i == idx.front(); });
+    if (all_equal) {
+      const std::string lam =
+          decomp + ".eigenvalues[" + std::to_string(idx.front()) + "]";
+      m_result = register_temp(
+          &v, "numsim::codegen::rt::confluent_derivative(" + kind + ", " + lam +
+                  ", " + std::to_string(idx.size() - 1) + ")");
+      return;
+    }
+
     std::string pts = "std::array<double, " + std::to_string(idx.size()) + ">{";
     for (std::size_t j = 0; j < idx.size(); ++j) {
       if (j != 0) {
@@ -133,8 +153,6 @@ public:
       pts += decomp + ".eigenvalues[" + std::to_string(idx[j]) + "]";
     }
     pts += "}";
-    std::string const kind =
-        "numsim::codegen::rt::scalar_fn::" + std::string(cas::name(v.kind()));
     m_result = register_temp(&v, "numsim::codegen::rt::divided_difference(" +
                                      kind + ", " + pts + ")");
   }

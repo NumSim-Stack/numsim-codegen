@@ -480,12 +480,22 @@ public:
 
   // E_i(A) = n_i ⊗ n_i, the i-th eigenprojection (i in ascending eigenvalue
   // order).
+  //
+  // WELL-POSED ONLY AWAY FROM DEGENERACY. At a repeated eigenvalue the
+  // per-index n_i (hence E_i) is an arbitrary choice within the degenerate
+  // subspace, so a bare E_i/n_i output there is basis-dependent and can
+  // disagree with the evaluator across tmech versions (see runtime/spectral.h's
+  // tmech-version invariant). The FE-safe outputs are the basis-INVARIANT
+  // combinations — the isotropic value Σf(λ)E and the tangent
+  // Σ[f;λ_i,λ_j]E_i⊙E_j — which is what differentiation actually emits; the
+  // sums are well defined at coalescence.
   void operator()(cas::tensor_eigenprojection const &v) override {
     auto const vec = eigenvector_ref(v.expr(), v.index());
     m_result = register_temp(&v, "tmech::otimes(" + vec + ", " + vec + ")");
   }
 
-  // n_i(A), the i-th eigenvector (rank-1).
+  // n_i(A), the i-th eigenvector (rank-1). Same degeneracy caveat as
+  // eigenprojection above.
   void operator()(cas::tensor_eigenvector const &v) override {
     m_result = register_temp(&v, eigenvector_ref(v.expr(), v.index()));
   }

@@ -16,6 +16,23 @@
 // eigenvalue (numsim_cas/.../spectral_decomposition_cache.h). Generated and
 // runtime code must agree on that ordering or `eig_i`/`E_i` mean different
 // things at codegen and run time.
+//
+// ── tmech-version invariant ─────────────────────────────────────────────────
+// The generated material MUST be built against the SAME tmech as numsim-codegen
+// targeted, because the spectral quantities are only well defined up to the
+// eigensolver's behaviour:
+//   * At a repeated eigenvalue the per-index basis(i)/normal(i) split is
+//     arbitrary — any orthonormal basis of the degenerate subspace is valid. A
+//     different tmech may pick a different (still valid) basis, so a BARE
+//     `eigenprojection`/`eigenvector` output can disagree between two tmech
+//     versions. Basis-INVARIANT combinations (the isotropic value Σf(λ)E and
+//     the tangent Σ[f;λ_i,λ_j]E_i⊙E_j) are unaffected — they are the FE-safe
+//     outputs.
+//   * Near a repeat, a divided difference sits at the sqrt(eps) tolerance
+//     boundary below; two eigensolvers that round λ_i differently could take
+//     different branches there.
+// In practice: pin the material's tmech to the one this header was shipped
+// with. This is not enforced at compile time — it is a build-time contract.
 
 #include <tmech/tmech.h>
 
@@ -86,6 +103,19 @@ double divided_difference(scalar_fn k, std::array<double, N> points) {
   std::sort(points.begin(), points.end());
   const double rel = std::sqrt(std::numeric_limits<double>::epsilon());
   return dd_range(k, points.data(), std::size_t{0}, N - 1, rel);
+}
+
+// The divided difference over an ALL-COINCIDENT point set — [f; x, ..., x] with
+// `order + 1` copies of x — which equals f^{(order)}(x) / order! exactly. The
+// codegen emits this directly for the diagonal (i==j==...) terms of a spectral
+// tangent, skipping the sort + recursion + tolerance branch that
+// divided_difference would run on identical values. Same math as dd_range's
+// coincident branch, so it agrees with divided_difference to the last bit.
+inline double confluent_derivative(scalar_fn k, double x, std::size_t order) {
+  double fact = 1.0;
+  for (std::size_t j = 2; j <= order; ++j)
+    fact *= static_cast<double>(j);
+  return apply_fderiv(k, x, order) / fact;
 }
 
 // Ascending-sorted eigenvalues and matching eigenvectors of a symmetric
