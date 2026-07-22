@@ -8,9 +8,12 @@
 #include <numsim_cas/tensor_to_scalar/operators/tensor_to_scalar_add.h>
 #include <numsim_cas/tensor_to_scalar/operators/tensor_to_scalar_mul.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_definitions.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_divided_difference.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_eigenvalue.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_if_then_else.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_visitor_typedef.h>
 
+#include <algorithm>
 #include <ranges>
 #include <sstream>
 #include <stdexcept>
@@ -30,8 +33,8 @@ public:
                          TensorCodeEmit &tensor)
       : m_ctx(ctx), m_scalar(scalar), m_tensor(tensor) {}
 
-  auto apply(
-      cas::expression_holder<cas::tensor_to_scalar_expression> const &expr)
+  auto
+  apply(cas::expression_holder<cas::tensor_to_scalar_expression> const &expr)
       -> std::string {
     if (!expr.is_valid()) {
       return "0.0";
@@ -72,10 +75,9 @@ public:
     auto cond = apply(v.expr_cond());
     auto then_branch = apply(v.expr_then());
     auto else_branch = apply(v.expr_else());
-    m_result = register_temp(
-        &v, "(" + wrap_if_compound(cond) + " != 0.0 ? " +
-                wrap_if_compound(then_branch) + " : " +
-                wrap_if_compound(else_branch) + ")");
+    m_result = register_temp(&v, "(" + wrap_if_compound(cond) + " != 0.0 ? " +
+                                     wrap_if_compound(then_branch) + " : " +
+                                     wrap_if_compound(else_branch) + ")");
   }
 
   // ─── Tensor reductions ───────────────────────────────────────────
@@ -92,15 +94,67 @@ public:
 
   void operator()(cas::tensor_dot const &v) override {
     auto inner = m_tensor.apply(v.expr());
-    m_result = register_temp(
-        &v, "tmech::dcontract(" + inner + ", " + inner + ")");
+    m_result =
+        register_temp(&v, "tmech::dcontract(" + inner + ", " + inner + ")");
   }
 
   void operator()(cas::tensor_norm const &v) override {
     auto inner = m_tensor.apply(v.expr());
-    m_result = register_temp(
-        &v,
-        "std::sqrt(tmech::dcontract(" + inner + ", " + inner + "))");
+    m_result = register_temp(&v, "std::sqrt(tmech::dcontract(" + inner + ", " +
+                                     inner + "))");
+  }
+
+  // ─── Spectral scalars (#325/#326) ────────────────────────────────
+
+  // λ_i(A), the i-th eigenvalue in ascending order — reads the shared
+  // decomposition of A (one `spectral_decompose(A)` per distinct A).
+  void operator()(cas::tensor_to_scalar_eigenvalue const &v) override {
+    auto const a = m_tensor.apply(v.expr());
+    auto const decomp =
+        emit_shared_decomposition(m_ctx, a, v.expr().get().dim());
+    m_result = register_temp(&v, decomp + ".eigenvalues[" +
+                                     std::to_string(v.index()) + "]");
+  }
+
+  // [f; λ_{i…}](A), the confluent divided difference. Emitted as a call into
+  // the shipped runtime helper, which carries the coincidence guard and the
+  // sole sqrt(eps) tolerance shared with the evaluator — so generated code and
+  // runtime take the same analytic-limit branch at coalesced eigenvalues, and
+  // the constant can never drift between them.
+  void operator()(cas::tensor_to_scalar_divided_difference const &v) override {
+    auto const a = m_tensor.apply(v.expr());
+    auto const decomp =
+        emit_shared_decomposition(m_ctx, a, v.expr().get().dim());
+    auto const &idx = v.indices();
+    std::string const kind =
+        "numsim::codegen::rt::scalar_fn::" + std::string(cas::name(v.kind()));
+
+    // All indices equal (the diagonal terms of a spectral tangent, and every
+    // fully-coincident higher-order term) → f^{(order)}(λ)/order! directly,
+    // skipping the sort/recursion/tolerance that divided_difference would run
+    // on identical values. Same math, same last bit.
+    const bool all_equal =
+        std::all_of(idx.begin(), idx.end(),
+                    [&](std::size_t i) { return i == idx.front(); });
+    if (all_equal) {
+      const std::string lam =
+          decomp + ".eigenvalues[" + std::to_string(idx.front()) + "]";
+      m_result = register_temp(
+          &v, "numsim::codegen::rt::confluent_derivative(" + kind + ", " + lam +
+                  ", " + std::to_string(idx.size() - 1) + ")");
+      return;
+    }
+
+    std::string pts = "std::array<double, " + std::to_string(idx.size()) + ">{";
+    for (std::size_t j = 0; j < idx.size(); ++j) {
+      if (j != 0) {
+        pts += ", ";
+      }
+      pts += decomp + ".eigenvalues[" + std::to_string(idx[j]) + "]";
+    }
+    pts += "}";
+    m_result = register_temp(&v, "numsim::codegen::rt::divided_difference(" +
+                                     kind + ", " + pts + ")");
   }
 
   // ─── Algebraic combinators ───────────────────────────────────────
@@ -193,8 +247,7 @@ private:
   }
 
   static auto is_single_token(std::string const &s) -> bool {
-    return s.find(' ') == std::string::npos &&
-           s.find('(') == std::string::npos;
+    return s.find(' ') == std::string::npos && s.find('(') == std::string::npos;
   }
 
   static auto wrap_if_compound(std::string const &s) -> std::string {
