@@ -196,6 +196,40 @@ target_link_libraries(hencky_check_driver
 
 gtest_discover_tests(hencky_check_driver)
 
+# ─── First-PK SVK (P, F) end-to-end gate ─────────────────────────────────────
+# Emit the first-Piola SVK example (P = F·S + consistent tangent dP/dF) via the
+# StandaloneCxx target, compile it, and FD-verify dP/dF in general (non-symmetric)
+# directions. The strain enters through C = FᵀF, so this is the end-to-end
+# regression for the tmech-v1.1.1 lazy-operand fix.
+add_executable(generate_fpsvk_check
+    generated/generate_fpsvk_check.cpp)
+target_include_directories(generate_fpsvk_check
+    PRIVATE ${CMAKE_SOURCE_DIR}/examples)
+target_link_libraries(generate_fpsvk_check
+    PRIVATE numsim::codegen numsim_codegen_warnings)
+
+set(GENERATED_FPSVK_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/FpSvkCheck.h)
+add_custom_command(
+    OUTPUT ${GENERATED_FPSVK_HEADER}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND $<TARGET_FILE:generate_fpsvk_check> ${GENERATED_FPSVK_HEADER}
+    DEPENDS generate_fpsvk_check
+    COMMENT "Generating first-PK SVK material header via numsim-codegen"
+    VERBATIM)
+
+add_executable(fpsvk_check_driver
+    generated/fpsvk_check_driver.cpp
+    ${GENERATED_FPSVK_HEADER})
+target_include_directories(fpsvk_check_driver
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(fpsvk_check_driver
+    PRIVATE numsim::codegen numsim_codegen_warnings_light
+            GTest::gtest GTest::gtest_main)
+
+gtest_discover_tests(fpsvk_check_driver)
+
 # ─── numsim-materials end-to-end gate (Phase B) ──────────────────────────────
 #
 # The string-asserting NumSimMaterialTargetTest proves the emitted TEXT matches
