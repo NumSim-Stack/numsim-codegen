@@ -9,14 +9,14 @@
 //
 //   Hencky strain    E = ½ log(C)
 //   energy           ψ(E) = ½λ (tr E)² + μ E:E
-//   Hencky stress    = ∂ψ/∂E = λ tr(E) I + 2μ E   (conjugate to E = ½ log C)
-//   consistent tangent  d(stress)/dC   (rank-4, via cas::diff(tensor, tensor))
+//   Hencky stress    H = ∂ψ/∂E = λ tr(E) I + 2μ E   (conjugate to E = ½ log C)
+//   consistent tangent  dH/dC   (rank-4, via cas::diff(tensor, tensor))
 //
-// STRESS MEASURE: the output is the Hencky stress, work-conjugate to the
+// STRESS MEASURE: the output H is the Hencky stress, work-conjugate to the
 // material logarithmic strain E = ½ log C — one self-consistent (stress, strain)
 // pair, and the example stays entirely in it.
 //
-// TANGENT / FE-CONSISTENCY: d(stress)/dC is differentiated w.r.t. the input C.
+// TANGENT / FE-CONSISTENCY: dH/dC is differentiated w.r.t. the input C.
 // The MOOSE target wires a consistent tangent into `_Jacobian_mult`, which the
 // StressDivergence kernels consume as the tangent w.r.t. THEIR strain measure —
 // so this material is FE-consistent only when C is the strain the kernel
@@ -56,10 +56,10 @@ inline ConstitutiveModel make_hencky_hyperelastic() {
   auto const E = 0.5 * log(C); // Hencky strain ½ log C
   auto const I =
       make_expression<identity_tensor>(std::size_t{3}, std::size_t{2});
-  auto const stress = lambda * trace(E) * I + 2.0 * mu * E;
+  auto const H = lambda * trace(E) * I + 2.0 * mu * E; // Hencky stress ∂ψ/∂E
 
-  model.add_output("stress", stress, roles::Stress);
-  model.add_algorithmic_tangent("dstress_dC", "stress", "C");
+  model.add_output("H", H, roles::Stress);
+  model.add_algorithmic_tangent("dH_dC", "H", "C");
 
   return model;
 }
