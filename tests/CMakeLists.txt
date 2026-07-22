@@ -162,6 +162,40 @@ target_link_libraries(spectral_check_driver
 
 gtest_discover_tests(spectral_check_driver)
 
+# ─── MOOSE Hencky material end-to-end gate (#105 follow-up) ──────────────────
+# Emit the Hencky hyperelastic material (spectral stress + exact consistent
+# tangent) via the StandaloneCxx target, compile it, and FD-verify the tangent
+# (distinct + near-identity) plus finiteness at coalescence. Proves the spectral
+# lowering composes into a real generated constitutive material.
+add_executable(generate_hencky_check
+    generated/generate_hencky_check.cpp)
+target_include_directories(generate_hencky_check
+    PRIVATE ${CMAKE_SOURCE_DIR}/examples)
+target_link_libraries(generate_hencky_check
+    PRIVATE numsim::codegen numsim_codegen_warnings)
+
+set(GENERATED_HENCKY_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/HenckyCheck.h)
+add_custom_command(
+    OUTPUT ${GENERATED_HENCKY_HEADER}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND $<TARGET_FILE:generate_hencky_check> ${GENERATED_HENCKY_HEADER}
+    DEPENDS generate_hencky_check
+    COMMENT "Generating Hencky material header via numsim-codegen"
+    VERBATIM)
+
+add_executable(hencky_check_driver
+    generated/hencky_check_driver.cpp
+    ${GENERATED_HENCKY_HEADER})
+target_include_directories(hencky_check_driver
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(hencky_check_driver
+    PRIVATE numsim::codegen numsim_codegen_warnings_light
+            GTest::gtest GTest::gtest_main)
+
+gtest_discover_tests(hencky_check_driver)
+
 # ─── St. Venant–Kirchhoff (S, E) end-to-end gate ─────────────────────────────
 # Emit the shipped St. Venant–Kirchhoff example (2nd-PK stress S + consistent
 # tangent dS/dE) via the StandaloneCxx target, compile it, and FD-verify the
