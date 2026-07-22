@@ -236,6 +236,25 @@ struct ResidualEquation {
   std::string doc;
 };
 
+// #92: an INTERNAL variable set by a post-solve formula rather than solved by the
+// Newton residual — e.g. the plastic strain εᵖ.new = εᵖ.old + Δγ·n in a J2 return
+// map. Unlike a ResidualEquation (a Newton unknown), the state here is history
+// updated after the solve. `update` may be scalar or tensor; both reference the
+// solved state(s), any `_old` values, params and inputs. Enables path-dependent
+// materials (tensor history) on the scalar-solve Mode-B path.
+struct UpdateEquation {
+  std::size_t state_variable_idx;
+  // INVARIANT: the active alternative matches the state variable's kind — a
+  // scalar `update` for a scalar state var, tensor for tensor. Enforced by
+  // construction: `add_scalar_update_equation` takes a ScalarStateVariableHandle
+  // (→ scalar state) and a scalar expr; the tensor adder is the tensor mirror.
+  // The emitter `std::get`s the alternative matching `state_variable_idx`'s kind.
+  std::variant<cas::expression_holder<cas::scalar_expression>,
+               cas::expression_holder<cas::tensor_expression>>
+      update;
+  std::string doc;
+};
+
 // Phase 3a-2 (issue #75): tuning for the in-function Newton solve emitted
 // by LocalNewtonLoweringPass. `tol` is the absolute residual threshold for
 // convergence; `max_iter` caps the iteration count (no line search /
@@ -544,6 +563,36 @@ public:
     validate_residual_expression_leaves_(residual, sv_name);
     ResidualEquation eq{found_idx, std::move(residual), std::move(doc)};
     m_residual_equations.push_back(std::move(eq));
+  }
+
+  // #92: declare an internal variable updated by a post-solve formula (not a
+  // Newton unknown). `update` may reference solved states, any `_old` values,
+  // params and inputs. Enables path-dependent materials (e.g. J2 plastic strain).
+  auto add_scalar_update_equation(
+      ScalarStateVariableHandle const &state_var,
+      cas::expression_holder<cas::scalar_expression> update,
+      std::string doc = "") -> void {
+    auto const idx = resolve_scalar_state_var_index_(
+        state_var, "add_scalar_update_equation");
+    assert_update_target_free_(idx, "add_scalar_update_equation");
+    m_update_equations.push_back(
+        UpdateEquation{idx, std::move(update), std::move(doc)});
+  }
+
+  auto add_tensor_update_equation(
+      TensorStateVariableHandle const &state_var,
+      cas::expression_holder<cas::tensor_expression> update,
+      std::string doc = "") -> void {
+    auto const idx = resolve_tensor_state_var_index_(
+        state_var, "add_tensor_update_equation");
+    assert_update_target_free_(idx, "add_tensor_update_equation");
+    m_update_equations.push_back(
+        UpdateEquation{idx, std::move(update), std::move(doc)});
+  }
+
+  [[nodiscard]] auto update_equations() const noexcept
+      -> std::span<UpdateEquation const> {
+    return m_update_equations;
   }
 
   // ─── Output declarations ────────────────────────────────────────
@@ -1055,6 +1104,62 @@ private:
         m_name, caller, sv_name, registered));
   }
 
+  // #92: tensor analogue of resolve_scalar_state_var_index_ (same token safety).
+  [[nodiscard]] auto resolve_tensor_state_var_index_(
+      TensorStateVariableHandle const &state_var, std::string_view caller) const
+      -> std::size_t {
+    if (state_var.model_token == nullptr || state_var.model_token != this) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': {} handle has no/foreign model token — "
+          "handles must come from add_tensor_state_variable on this model.",
+          m_name, caller));
+    }
+    auto const *typed =
+        dynamic_cast<cas::tensor const *>(state_var.current.data().get());
+    if (!typed) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': {} handle's `current` is not a bare tensor "
+          "leaf symbol.",
+          m_name, caller));
+    }
+    auto const &sv_name = typed->name();
+    for (std::size_t i = 0; i < m_state_variables.size(); ++i) {
+      if (m_state_variables[i].kind == SymbolDecl::Kind::Tensor &&
+          m_state_variables[i].name == sv_name) {
+        return i;
+      }
+    }
+    throw std::runtime_error(std::format(
+        "ConstitutiveModel '{}': {} handle names tensor state variable '{}' but "
+        "no such tensor state variable is registered on this model.",
+        m_name, caller, sv_name));
+  }
+
+  // #92: a state variable is EITHER solved (residual) OR updated post-solve
+  // (update equation), and carries at most one update equation. Reject at the
+  // API (fail-early) rather than only at emit. (The reverse — a residual added
+  // AFTER an update on the same state — is caught at emit by the target's
+  // scope guard.)
+  void assert_update_target_free_(std::size_t idx,
+                                  std::string_view caller) const {
+    for (auto const &u : m_update_equations) {
+      if (u.state_variable_idx == idx) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': {} — internal variable '{}' already has an "
+            "update equation.",
+            m_name, caller, m_state_variables[idx].name));
+      }
+    }
+    for (auto const &r : m_residual_equations) {
+      if (r.state_variable_idx == idx) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': {} — state variable '{}' is solved by a "
+            "residual; it cannot also be an internal variable (update equation).",
+            m_name, caller, m_state_variables[idx].name));
+      }
+    }
+  }
+
   // A scalar state variable carries EXACTLY ONE evolution mechanism — a rate
   // (EvolutionEquation) or an implicit residual (ResidualEquation). Reject a
   // second binding rather than emitting a contradictory material.
@@ -1169,6 +1274,7 @@ private:
   std::vector<OutputDecl> m_outputs;
   std::vector<StateVariable> m_state_variables; // Phase 2.1
   std::vector<EvolutionEquation> m_evolution_equations; // Phase 2.2
+  std::vector<UpdateEquation> m_update_equations;       // #92 internal-var updates
   std::vector<ResidualEquation> m_residual_equations;   // Phase D strain-coupled
   bool m_local_newton = false;          // Phase 3a-2 (issue #75)
   NewtonOptions m_newton_options{};     // Phase 3a-2 (issue #75)

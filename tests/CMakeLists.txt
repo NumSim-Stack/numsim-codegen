@@ -296,7 +296,7 @@ option(NUMSIM_CODEGEN_FETCH_MATERIALS
 local checkout is present (headers only)" OFF)
 # Feature-branch pins — see the IMPORTANT note above. Single source of truth.
 set(_ncg_materials_pin "aaa6614c1aa9eebaa62f8d07a6306bb9defe47ab") # feature/drucker-prager
-set(_ncg_core_pin      "c462d9caf09cba8722076d68da7c7346e0c0623e") # feature/missing-param-names
+set(_ncg_core_pin      "a160408deb8e6e9b71ea6d2623f063f4c0915eef") # main (incl. #17 history_property<tensor> fix, numsim-core#16) — REQUIRED for tensor internal-variable history (#92)
 
 set(_ncg_materials_inc "")
 set(_ncg_core_inc "")
@@ -341,11 +341,14 @@ if(_ncg_materials_inc AND _ncg_core_inc)
         ${CMAKE_CURRENT_BINARY_DIR}/generated/J2Voce.h)
     set(GENERATED_J2_SWIFT_HEADER
         ${CMAKE_CURRENT_BINARY_DIR}/generated/J2Swift.h)
+    set(GENERATED_J2PATHDEP_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/J2PathDep.h)
     add_custom_command(
         OUTPUT ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
                ${GENERATED_VISCO_HEADER} ${GENERATED_RETURNMAP_HEADER}
                ${GENERATED_RETURNMAP_CUBIC_HEADER} ${GENERATED_J2_HEADER}
                ${GENERATED_J2_VOCE_HEADER} ${GENERATED_J2_SWIFT_HEADER}
+               ${GENERATED_J2PATHDEP_HEADER}
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 ${CMAKE_CURRENT_BINARY_DIR}/generated
         COMMAND $<TARGET_FILE:generate_numsim_material_check>
@@ -353,6 +356,7 @@ if(_ncg_materials_inc AND _ncg_core_inc)
                 ${GENERATED_VISCO_HEADER} ${GENERATED_RETURNMAP_HEADER}
                 ${GENERATED_RETURNMAP_CUBIC_HEADER} ${GENERATED_J2_HEADER}
                 ${GENERATED_J2_VOCE_HEADER} ${GENERATED_J2_SWIFT_HEADER}
+                ${GENERATED_J2PATHDEP_HEADER}
         DEPENDS generate_numsim_material_check
         COMMENT "Generating numsim-materials rate materials via NumSimMaterialTarget"
         VERBATIM)
@@ -362,7 +366,8 @@ if(_ncg_materials_inc AND _ncg_core_inc)
         ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
         ${GENERATED_VISCO_HEADER} ${GENERATED_RETURNMAP_HEADER}
         ${GENERATED_RETURNMAP_CUBIC_HEADER} ${GENERATED_J2_HEADER}
-        ${GENERATED_J2_VOCE_HEADER} ${GENERATED_J2_SWIFT_HEADER})
+        ${GENERATED_J2_VOCE_HEADER} ${GENERATED_J2_SWIFT_HEADER}
+        ${GENERATED_J2PATHDEP_HEADER})
     # numsim-materials, numsim-core, Eigen and tmech are header-only and included
     # as SYSTEM so their warnings stay silent under the first-party -Werror gate.
     # tmech (via cas's CPM) is needed for the tensor-stress material/test.

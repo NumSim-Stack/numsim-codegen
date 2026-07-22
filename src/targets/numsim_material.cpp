@@ -173,12 +173,44 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
   // ── Scope validation (residual contract) ──
   auto const reqs = model.residual_equations();
   auto const svs = model.state_variables();
-  if (reqs.size() != 1 || svs.size() != 1) {
+  auto const ueqs = model.update_equations();
+  // Exactly ONE scalar Newton unknown (the residual's state). Any OTHER state
+  // variable must be an INTERNAL variable — set by a post-solve update equation,
+  // not solved. This is the #92 path: a scalar solve (no vector solver / Mandel)
+  // with tensor/scalar HISTORY (e.g. J2 plastic strain εᵖ) carried across steps.
+  if (reqs.size() != 1) {
     throw std::runtime_error(
-        "NumSimMaterialTarget: a strain-coupled residual material supports "
-        "exactly one scalar state variable defined by one residual equation. "
-        "Coupled multi-state return maps need the numsim-materials vector "
-        "solver (numsim-materials#12).");
+        "NumSimMaterialTarget: a residual material needs exactly one residual "
+        "equation (one scalar Newton unknown). Coupled multi-unknown return maps "
+        "need the numsim-materials vector solver (numsim-materials#12).");
+  }
+  {
+    std::size_t const newton_idx = reqs[0].state_variable_idx;
+    std::set<std::size_t> updated;
+    for (auto const &ue : ueqs) {
+      if (ue.state_variable_idx == newton_idx) {
+        throw std::runtime_error(
+            "NumSimMaterialTarget: the Newton state '" +
+            svs[newton_idx].name +
+            "' has both a residual and an update equation — a state is either "
+            "solved (residual) or updated post-solve (internal variable), not "
+            "both.");
+      }
+      if (!updated.insert(ue.state_variable_idx).second) {
+        throw std::runtime_error(
+            "NumSimMaterialTarget: internal variable '" +
+            svs[ue.state_variable_idx].name +
+            "' has more than one update equation.");
+      }
+    }
+    for (std::size_t i = 0; i < svs.size(); ++i) {
+      if (i == newton_idx || updated.contains(i)) continue;
+      throw std::runtime_error(
+          "NumSimMaterialTarget: state variable '" + svs[i].name +
+          "' is neither the Newton unknown (a residual) nor an internal "
+          "variable (an update equation). Add one via "
+          "add_scalar/tensor_update_equation, or remove it.");
+    }
   }
   if (!model.evolution_equations().empty()) {
     // Unreachable through the public API (a state carries a rate XOR a residual,
@@ -224,6 +256,33 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     tensor_input_names.insert(in.name);
   }
 
+  // #92: internal variables (state vars set by a post-solve update equation).
+  // Each carries its own history (scalar or tensor); their `_old` value is bound
+  // as a local and referenced by the residual/outputs/updates; their `_new` is
+  // set post-solve. `<name>` (current) is NOT bound — only `<name>_old`.
+  struct InternalVar {
+    std::string name;      // current bare name (add_history_output key + member)
+    std::string old_name;  // "<name>_old" — the bound local
+    bool is_tensor = false;
+    std::size_t dim = 0, rank = 0;
+    UpdateEquation const *eq = nullptr;
+  };
+  std::vector<InternalVar> internals;
+  std::set<std::string> internal_names;                       // current names
+  std::set<std::string> internal_scalar_old, internal_tensor_old; // bound _old
+  for (auto const &ue : ueqs) {
+    auto const &isv = svs[ue.state_variable_idx];
+    bool const is_tensor = isv.kind == SymbolDecl::Kind::Tensor;
+    std::string const old_name =
+        isv.name + std::string{state_variable_old_suffix};
+    internals.push_back(
+        {isv.name, old_name, is_tensor, isv.dim, isv.rank, &ue});
+    internal_names.insert(isv.name);
+    (is_tensor ? internal_tensor_old : internal_scalar_old).insert(old_name);
+  }
+  std::string const cur_old_name =
+      cur_name + std::string{state_variable_old_suffix};
+
   // Reserved-name guard. A residual material emits the fixed member `m_solver`
   // (the material_ref), the schema key `solver_source`, and the compute()-local
   // identifiers `eval`, `residual`, `jacobian`. A recipe symbol that renders to
@@ -255,17 +314,30 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     }
   }
   // The Newton increment is a compute()-local named `d<state>`; a tensor input
-  // (also a bare compute() local) named the same would redeclare it.
+  // OR an internal variable's `_old` local (also bare compute()-locals) named
+  // the same would redeclare it.
   std::string const increment_local = "d" + cur_name;
+  auto reject_increment_collision = [&](std::string const &n,
+                                        char const *what) {
+    if (n == increment_local) {
+      throw std::runtime_error(
+          std::string("NumSimMaterialTarget: ") + what + " '" + n +
+          "' collides with the synthesized Newton-increment local '" +
+          increment_local + "'; rename it or the state.");
+    }
+  };
   for (auto const &in : tensor_inputs) {
     reject_reserved(in.name, "tensor input name");
-    if (in.name == increment_local) {
-      throw std::runtime_error(
-          "NumSimMaterialTarget: tensor input '" + in.name +
-          "' collides with the synthesized Newton-increment local '" +
-          increment_local + "'; rename the input or the state.");
-    }
+    reject_increment_collision(in.name, "tensor input");
   }
+  // #92: internal-variable names reach compute() as `m_<name>` (member) and
+  // `<name>_old` (bare local). Guard both against reserved emit-locals and the
+  // increment local — same hazards as the state/inputs above.
+  for (auto const &iv : internals) {
+    reject_reserved(iv.name, "internal-variable name");
+    reject_increment_collision(iv.old_name, "internal-variable previous local");
+  }
+  reject_increment_collision(cur_old_name, "state previous local");
 
   // Resolve the current-state scalar holder — the diff variable for ∂R/∂x.
   cas::expression_holder<cas::scalar_expression> cur_expr;
@@ -294,31 +366,37 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     }
   };
 
-  // Residual-leaf guard: every scalar leaf of R must be the current state or a
-  // parameter, and every tensor leaf must be a declared tensor input. The recipe
-  // checks all leaves are *declared* symbols, but NOT that they map to a bound
-  // emit name — e.g. the previous-step state `<state>_old` is a declared symbol
-  // yet has no local in compute() (the increment form x = x_old + dz is the
-  // emitter's own concern). Without this guard such a residual would emit an
-  // unbound identifier inside the eval lambda. Mirrors the rate-leaf guard.
+  // Leaf-guard predicates: a scalar leaf must be the Newton state (current), its
+  // `_old`, a parameter, or an internal variable's scalar `_old`; a tensor leaf
+  // must be a declared tensor input or an internal variable's tensor `_old`. All
+  // of these are bound as locals in compute() (#92 binds the `_old` values); a
+  // reference to anything else would emit an unbound identifier. Reused for the
+  // residual, the outputs, and the update equations.
+  auto bound_scalar = [&](std::string const &n) {
+    return n == cur_name || n == cur_old_name || param_names.contains(n) ||
+           internal_scalar_old.contains(n);
+  };
+  auto bound_tensor = [&](std::string const &n) {
+    return tensor_input_names.contains(n) || internal_tensor_old.contains(n);
+  };
   {
     LeafCollector rlc;
     rlc.collect_t2s(req.residual);
     for (auto const &n : rlc.scalar_names()) {
-      if (n != cur_name && !param_names.contains(n)) {
+      if (!bound_scalar(n)) {
         throw std::runtime_error(
             "NumSimMaterialTarget: the residual references scalar '" + n +
-            "', which is neither the state '" + cur_name +
-            "' nor a parameter. A residual R(" + cur_name +
-            ", inputs) cannot depend on the previous-step state or a scalar "
-            "input on this path.");
+            "', which is not the state '" + cur_name +
+            "', its previous value, a parameter, or an internal variable's "
+            "previous value.");
       }
     }
     for (auto const &n : rlc.tensor_names()) {
-      if (!tensor_input_names.contains(n)) {
+      if (!bound_tensor(n)) {
         throw std::runtime_error(
             "NumSimMaterialTarget: the residual references tensor '" + n +
-            "', which is not a declared tensor input.");
+            "', which is not a declared tensor input or an internal variable's "
+            "previous value.");
       }
     }
   }
@@ -344,11 +422,12 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
   std::vector<EmittedOutput> outputs;
   for (auto const &o : model.outputs()) {
     if (is_reserved_residual(o.name) || o.name == cur_name ||
-        param_names.contains(o.name) || tensor_input_names.contains(o.name)) {
+        param_names.contains(o.name) || tensor_input_names.contains(o.name) ||
+        internal_names.contains(o.name)) {
       throw std::runtime_error(
           "NumSimMaterialTarget: output name '" + o.name +
-          "' collides with an emitted member, the state, a parameter, or a "
-          "tensor input; rename it.");
+          "' collides with an emitted member, the state, a parameter, a "
+          "tensor input, or an internal variable; rename it.");
     }
     CodeGenContext oc;
     CodeEmitPipeline op(oc);
@@ -359,11 +438,12 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
       LeafCollector olc;
       olc.collect_scalar(oexpr);
       for (auto const &n : olc.scalar_names()) {
-        if (n != cur_name && !param_names.contains(n)) {
+        if (!bound_scalar(n)) {
           throw std::runtime_error(
               "NumSimMaterialTarget: scalar output '" + o.name +
-              "' references '" + n + "', which is neither the state '" +
-              cur_name + "' nor a parameter.");
+              "' references '" + n +
+              "', which is not the state, its previous value, a parameter, or "
+              "an internal variable's previous value.");
         }
       }
       oc.reset();
@@ -375,19 +455,21 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
       LeafCollector olc;
       olc.collect_tensor(oexpr);
       for (auto const &n : olc.scalar_names()) {
-        if (n != cur_name && !param_names.contains(n)) {
+        if (!bound_scalar(n)) {
           throw std::runtime_error(
               "NumSimMaterialTarget: tensor output '" + o.name +
-              "' references scalar '" + n + "', which is neither the state '" +
-              cur_name + "' nor a parameter.");
+              "' references scalar '" + n +
+              "', which is not the state, its previous value, a parameter, or "
+              "an internal variable's previous value.");
         }
       }
       for (auto const &n : olc.tensor_names()) {
-        if (!tensor_input_names.contains(n)) {
+        if (!bound_tensor(n)) {
           throw std::runtime_error(
               "NumSimMaterialTarget: tensor output '" + o.name +
               "' references tensor '" + n +
-              "', which is not a declared tensor input.");
+              "', which is not a declared tensor input or an internal "
+              "variable's previous value.");
         }
       }
       oc.reset();
@@ -395,6 +477,55 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
       outputs.push_back(
           {o.name, oc.render_statements("    "), orhs, true, o.dim, o.rank});
     }
+  }
+
+  // ── Internal-variable post-solve updates (#92) ──
+  // Each internal variable's `_new` value is set from its update expression
+  // (referencing the converged Newton state, any `_old` values, params, inputs).
+  struct EmittedUpdate {
+    std::string name, decls, rhs;
+    bool is_tensor = false;
+  };
+  std::vector<EmittedUpdate> internal_updates;
+  for (auto const &iv : internals) {
+    CodeGenContext uc;
+    CodeEmitPipeline up(uc);
+    register_all(uc);
+    std::string rhs;
+    if (iv.is_tensor) {
+      auto const &uexpr =
+          std::get<cas::expression_holder<cas::tensor_expression>>(
+              iv.eq->update);
+      LeafCollector ulc;
+      ulc.collect_tensor(uexpr);
+      for (auto const &n : ulc.scalar_names())
+        if (!bound_scalar(n))
+          throw std::runtime_error("NumSimMaterialTarget: update of '" +
+                                   iv.name + "' references unbound scalar '" +
+                                   n + "'.");
+      for (auto const &n : ulc.tensor_names())
+        if (!bound_tensor(n))
+          throw std::runtime_error("NumSimMaterialTarget: update of '" +
+                                   iv.name + "' references unbound tensor '" +
+                                   n + "'.");
+      uc.reset();
+      rhs = up.tensor().apply(uexpr);
+    } else {
+      auto const &uexpr =
+          std::get<cas::expression_holder<cas::scalar_expression>>(
+              iv.eq->update);
+      LeafCollector ulc;
+      ulc.collect_scalar(uexpr);
+      for (auto const &n : ulc.scalar_names())
+        if (!bound_scalar(n))
+          throw std::runtime_error("NumSimMaterialTarget: update of '" +
+                                   iv.name + "' references unbound scalar '" +
+                                   n + "'.");
+      uc.reset();
+      rhs = up.scalar().apply(uexpr);
+    }
+    internal_updates.push_back(
+        {iv.name, uc.render_statements("    "), rhs, iv.is_tensor});
   }
 
   // ── Consistent tangent(s) dσ/dε (strain-coupled, Mode B) ──
@@ -450,7 +581,8 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     }
     // The tangent output name shares the same collision surface as any output.
     if (is_reserved_residual(t.name) || t.name == cur_name ||
-        param_names.contains(t.name) || tensor_input_names.contains(t.name)) {
+        param_names.contains(t.name) || tensor_input_names.contains(t.name) ||
+        internal_names.contains(t.name)) {
       throw std::runtime_error(
           "NumSimMaterialTarget: consistent-tangent name '" + t.name +
           "' collides with an emitted member, the state, a parameter, or a "
@@ -510,6 +642,7 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     };
     claim("solver"); // the fixed material_ref member m_solver
     claim(cur_name);
+    for (auto const &iv : internals) claim(iv.name); // internal-var histories
     for (auto const &p : params) claim(p.name);
     for (auto const &o : outputs) claim("out_" + o.name);
     for (auto const &ti : tensor_inputs) {
@@ -588,6 +721,12 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
   h << "        m_" << cur_name
     << "(base::template add_history_output<value_type>(\"" << cur_name
     << "\")),\n";
+  for (auto const &iv : internals) { // #92 internal-variable histories
+    std::string const ty =
+        iv.is_tensor ? tensor_cxx_type(iv.dim, iv.rank) : "value_type";
+    h << "        m_" << iv.name << "(base::template add_history_output<" << ty
+      << ">(\"" << iv.name << "\")),\n";
+  }
   for (auto const &p : params) {
     h << "        m_" << p.name
       << "(base::template get_parameter<value_type>(\"" << p.name << "\")),\n";
@@ -643,6 +782,19 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     h << "    [[maybe_unused]] const auto& " << ti.name << " = m_" << ti.name
       << ".get();\n";
   }
+  // #92: bind the previous-step values. `<state>_old` and every internal
+  // variable's `_old` are captured by the eval lambda (residual may reference
+  // them) AND used post-solve (outputs + updates).
+  h << "    [[maybe_unused]] const value_type " << cur_old_name << " = m_"
+    << cur_name << ".old_value();\n";
+  for (auto const &iv : internals) {
+    if (iv.is_tensor)
+      h << "    [[maybe_unused]] const auto& " << iv.old_name << " = m_"
+        << iv.name << ".old_value();\n";
+    else
+      h << "    [[maybe_unused]] const value_type " << iv.old_name << " = m_"
+        << iv.name << ".old_value();\n";
+  }
   h << "    auto eval = [&](value_type d" << cur_name
     << ") -> std::pair<value_type, value_type> {\n";
   h << "      const value_type " << cur_name << " = m_" << cur_name
@@ -668,6 +820,21 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     << ".old_value() + d" << cur_name << ";\n";
   h << "    [[maybe_unused]] const value_type " << cur_name << " = m_"
     << cur_name << ".new_value();\n";
+  // #92: internal-variable updates (post-solve). Brace-scoped for CSE-temp
+  // isolation like outputs. NOTE: outputs/residual/tangent can reference ONLY an
+  // internal variable's `_old` value (bound above), never its post-update value
+  // — there is no binding for `<iv>` current. This is LOAD-BEARING for the
+  // consistent tangent: cas::diff(σ, ε) and cas::diff(R, ε) hold `<iv>_old` fixed
+  // (it is a distinct symbol, history from the previous step), which is exactly
+  // the algorithmic tangent. Exposing the post-update value to outputs would make
+  // it strain-dependent and silently drop the ∂σ/∂εᵖ·dεᵖ/dε term — do NOT relax
+  // the bound_scalar/bound_tensor sets to include internal-variable currents.
+  for (auto const &u : internal_updates) {
+    h << "    {\n";
+    if (!u.decls.empty()) h << u.decls;
+    h << "      m_" << u.name << ".new_value() = " << u.rhs << ";\n";
+    h << "    }\n";
+  }
   for (auto const &o : outputs) {
     // Each output is rendered in its OWN CodeGenContext, so its CSE temporaries
     // restart at t0 — and ALL outputs share this single compute() body. Without
@@ -690,6 +857,12 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     h << "  " << ty << "& m_out_" << o.name << ";\n";
   }
   h << "  numsim_core::history_property<value_type>& m_" << cur_name << ";\n";
+  for (auto const &iv : internals) { // #92 internal-variable histories
+    std::string const ty =
+        iv.is_tensor ? tensor_cxx_type(iv.dim, iv.rank) : "value_type";
+    h << "  numsim_core::history_property<" << ty << ">& m_" << iv.name
+      << ";\n";
+  }
   for (auto const &p : params) {
     h << "  [[maybe_unused]] const value_type& m_" << p.name << ";\n";
   }

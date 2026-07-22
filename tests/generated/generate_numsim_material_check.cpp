@@ -54,10 +54,11 @@ bool write_header(ConstitutiveModel const& model, char const* path) {
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 9) {
+  if (argc < 10) {
     std::cerr << "usage: generate_numsim_material_check <linear.h> "
                  "<nonlinear.h> <viscoelastic.h> <returnmap.h> "
-                 "<returnmapcubic.h> <j2return.h> <j2voce.h> <j2swift.h>\n";
+                 "<returnmapcubic.h> <j2return.h> <j2voce.h> <j2swift.h> "
+                 "<j2pathdep.h>\n";
     return 2;
   }
 
@@ -139,6 +140,33 @@ int main(int argc, char** argv) {
     returnmap_cubic.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
   }
 
+  // #92 golden: PATH-DEPENDENT J2 — plastic strain εᵖ carried as tensor history
+  // and subtracted in the trial stress, so the response depends on the loading
+  // PATH (accumulates under load, retained on unload) — not just the current
+  // strain. α (accumulated plastic strain) is the scalar Newton unknown; εᵖ is a
+  // tensor internal variable updated post-solve. Requires history_property<tensor>
+  // (numsim-core#16 fix) — hence the bumped _ncg_core_pin.
+  ConstitutiveModel j2pd("J2PathDep");
+  {
+    auto G = j2pd.add_parameter("G", 80.0);
+    auto sy = j2pd.add_parameter("sy", 1.0);
+    auto H = j2pd.add_parameter("H", 10.0);
+    auto eps = j2pd.add_tensor_input("strain", 3, 2, roles::Strain);
+    auto alpha = j2pd.add_scalar_state_variable(
+        "alpha", make_expression<scalar_constant>(0.0));
+    auto epsp = j2pd.add_tensor_state_variable(
+        "eps_p", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+    auto dg = alpha.current - alpha.previous;             // per-step Δγ
+    auto s_trial = (2.0 * G) * dev(eps - epsp.previous);  // subtract accumulated εᵖ
+    auto q = norm(s_trial);
+    auto n = s_trial / q;
+    j2pd.add_scalar_residual_equation(
+        alpha, q - (2.0 * G) * dg - sy - H * alpha.current);
+    j2pd.add_tensor_update_equation(epsp, epsp.previous + dg * n); // εᵖ += Δγ·n
+    j2pd.add_output("stress", s_trial - (2.0 * G) * dg * n);
+    j2pd.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
+  }
+
   // Phase C golden (#90): a REAL J2 return-map material — the deviatoric radial
   // return with linear isotropic hardening. State = Δγ (plastic multiplier),
   // solved on the plastic branch from R(Δγ,ε) = ‖s_trial‖ − 2G·Δγ − σ_y − H·Δγ,
@@ -215,5 +243,6 @@ int main(int argc, char** argv) {
   if (!write_header(j2, argv[6])) return 1;
   if (!write_header(j2voce, argv[7])) return 1;
   if (!write_header(j2swift, argv[8])) return 1;
+  if (!write_header(j2pd, argv[9])) return 1;
   return 0;
 }
