@@ -9,23 +9,20 @@
 //
 //   Hencky strain    E = ½ log(C)
 //   energy           ψ(E) = ½λ (tr E)² + μ E:E
-//   stress           σ = λ tr(E) I + 2μ E
-//   consistent tangent  dσ/dC   (rank-4, via cas::diff(tensor, tensor))
+//   Hencky stress    = ∂ψ/∂E = λ tr(E) I + 2μ E   (conjugate to E = ½ log C)
+//   consistent tangent  d(stress)/dC   (rank-4, via cas::diff(tensor, tensor))
 //
-// STRESS MEASURE: σ here is work-conjugate to the material log-strain ½log(C) —
-// the "rotated"/material Hencky stress. It is NOT the 2nd Piola–Kirchhoff or
-// the Cauchy/Kirchhoff stress; do not wire it into a kernel expecting one of
-// those without the appropriate stress transformation.
+// STRESS MEASURE: the output is the Hencky stress, work-conjugate to the
+// material logarithmic strain E = ½ log C — one self-consistent (stress, strain)
+// pair, and the example stays entirely in it.
 //
-// TANGENT ⚠  dσ/dC IS NOT dσ/dε.  The requested tangent is differentiated
-// w.r.t. the input C. The MOOSE target wires any consistent tangent into
-// `_Jacobian_mult`, which the StressDivergence kernels consume as the
-// algorithmic tangent w.r.t. THEIR strain measure. So this material is
-// FE-consistent only if C is the coupled strain the kernel differentiates
-// against; otherwise a push-forward/chain-rule to the kernel's strain measure
-// is required (kinematic wrapping — out of scope here, see
-// SCOPE-moose-hencky.md). The StandaloneCxx form (what the e2e compiles and
-// FD-verifies) has no such coupling and is exact.
+// TANGENT / FE-CONSISTENCY: d(stress)/dC is differentiated w.r.t. the input C.
+// The MOOSE target wires a consistent tangent into `_Jacobian_mult`, which the
+// StressDivergence kernels consume as the tangent w.r.t. THEIR strain measure —
+// so this material is FE-consistent only when C is the strain the kernel
+// differentiates against; a push-forward to another strain measure is a
+// kinematic wrapper, out of scope here (see SCOPE-moose-hencky.md). The
+// StandaloneCxx form (what the e2e compiles and FD-verifies) is exact.
 //
 // VERIFICATION BOUNDARY: the e2e exercises the StandaloneCxx form (the shared
 // Layer-2 compute). The MOOSE .h/.C is string-checked only — its RankFourTensor
