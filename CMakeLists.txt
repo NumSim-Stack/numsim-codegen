@@ -132,9 +132,8 @@ else()
         GITHUB_REPOSITORY NumSim-Stack/numsim-cas
         # Bumped for numsim-cas#332 (tmech pin → v1.1.1): fixes tmech
         # inner_product zeroing a lazy rank-4 operand, which made finite-strain
-        # ∂stress/∂F tangents (C=FᵀF) half-correct. Repoint to the squashed
-        # numsim-cas main SHA once #332 merges.
-        GIT_TAG 09f41c9971e6c365c710f33d531af76ca521b113
+        # ∂stress/∂F tangents (C=FᵀF) half-correct.
+        GIT_TAG 56da0907b1021edcd80ac5dfde6771665222c112 # numsim-cas main, post-#332
         SYSTEM YES
         EXCLUDE_FROM_ALL YES
         OPTIONS
