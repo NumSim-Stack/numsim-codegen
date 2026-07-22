@@ -196,6 +196,41 @@ target_link_libraries(hencky_check_driver
 
 gtest_discover_tests(hencky_check_driver)
 
+# ─── St. Venant–Kirchhoff (S, E) end-to-end gate ─────────────────────────────
+# Emit the shipped St. Venant–Kirchhoff example (2nd-PK stress S + consistent
+# tangent dS/dE) via the StandaloneCxx target, compile it, and FD-verify the
+# tangent in every symmetric direction. Demonstrates selecting the (2nd-PK,
+# Green–Lagrange) conjugate pair by making E the differentiation input — the
+# tangent MOOSE's total-Lagrangian kernels consume. Uses only diff(tensor,
+# tensor) (no spectral machinery), so it lives on the primary path.
+add_executable(generate_svk_check
+    generated/generate_svk_check.cpp)
+target_include_directories(generate_svk_check
+    PRIVATE ${CMAKE_SOURCE_DIR}/examples)
+target_link_libraries(generate_svk_check
+    PRIVATE numsim::codegen numsim_codegen_warnings)
+
+set(GENERATED_SVK_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/SvkCheck.h)
+add_custom_command(
+    OUTPUT ${GENERATED_SVK_HEADER}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND $<TARGET_FILE:generate_svk_check> ${GENERATED_SVK_HEADER}
+    DEPENDS generate_svk_check
+    COMMENT "Generating St. Venant–Kirchhoff material header via numsim-codegen"
+    VERBATIM)
+
+add_executable(svk_check_driver
+    generated/svk_check_driver.cpp
+    ${GENERATED_SVK_HEADER})
+target_include_directories(svk_check_driver
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(svk_check_driver
+    PRIVATE numsim::codegen numsim_codegen_warnings_light
+            GTest::gtest GTest::gtest_main)
+
+gtest_discover_tests(svk_check_driver)
+
 # ─── numsim-materials end-to-end gate (Phase B) ──────────────────────────────
 #
 # The string-asserting NumSimMaterialTargetTest proves the emitted TEXT matches
@@ -266,16 +301,24 @@ if(_ncg_materials_inc AND _ncg_core_inc)
         ${CMAKE_CURRENT_BINARY_DIR}/generated/ReturnMap.h)
     set(GENERATED_RETURNMAP_CUBIC_HEADER
         ${CMAKE_CURRENT_BINARY_DIR}/generated/ReturnMapCubic.h)
+    set(GENERATED_J2_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/J2Return.h)
+    set(GENERATED_J2_VOCE_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/J2Voce.h)
+    set(GENERATED_J2_SWIFT_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/J2Swift.h)
     add_custom_command(
         OUTPUT ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
                ${GENERATED_VISCO_HEADER} ${GENERATED_RETURNMAP_HEADER}
-               ${GENERATED_RETURNMAP_CUBIC_HEADER}
+               ${GENERATED_RETURNMAP_CUBIC_HEADER} ${GENERATED_J2_HEADER}
+               ${GENERATED_J2_VOCE_HEADER} ${GENERATED_J2_SWIFT_HEADER}
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 ${CMAKE_CURRENT_BINARY_DIR}/generated
         COMMAND $<TARGET_FILE:generate_numsim_material_check>
                 ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
                 ${GENERATED_VISCO_HEADER} ${GENERATED_RETURNMAP_HEADER}
-                ${GENERATED_RETURNMAP_CUBIC_HEADER}
+                ${GENERATED_RETURNMAP_CUBIC_HEADER} ${GENERATED_J2_HEADER}
+                ${GENERATED_J2_VOCE_HEADER} ${GENERATED_J2_SWIFT_HEADER}
         DEPENDS generate_numsim_material_check
         COMMENT "Generating numsim-materials rate materials via NumSimMaterialTarget"
         VERBATIM)
@@ -284,7 +327,8 @@ if(_ncg_materials_inc AND _ncg_core_inc)
         generated/numsim_material_check_driver.cpp
         ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
         ${GENERATED_VISCO_HEADER} ${GENERATED_RETURNMAP_HEADER}
-        ${GENERATED_RETURNMAP_CUBIC_HEADER})
+        ${GENERATED_RETURNMAP_CUBIC_HEADER} ${GENERATED_J2_HEADER}
+        ${GENERATED_J2_VOCE_HEADER} ${GENERATED_J2_SWIFT_HEADER})
     # numsim-materials, numsim-core, Eigen and tmech are header-only and included
     # as SYSTEM so their warnings stay silent under the first-party -Werror gate.
     # tmech (via cas's CPM) is needed for the tensor-stress material/test.

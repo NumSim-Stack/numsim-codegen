@@ -13,6 +13,7 @@
 // that the emitted code actually compiles and runs against the solver contract.
 #include <cmath>
 #include <string>
+#include <functional>
 
 #include "numsim-materials/core/material_context.h"
 #include "numsim-materials/core/history_property.h"
@@ -39,6 +40,9 @@
 #include "Viscoelastic.h" // generated: σ = α·ε (tensor stress from scalar state)
 #include "ReturnMap.h"     // generated: implicit residual R(z,ε)=z−c·tr(ε), σ=z·ε
 #include "ReturnMapCubic.h" // generated: NONLINEAR residual R=z+z³−c·tr(ε)
+#include "J2Return.h"       // generated: J2 deviatoric radial return (golden, #90)
+#include "J2Voce.h"         // generated: J2 with Voce (saturating) hardening
+#include "J2Swift.h"        // generated: J2 with Swift (power-law) hardening
 #endif
 
 #include <gtest/gtest.h>
@@ -57,6 +61,9 @@ using Nonlinear = numsim::materials::generated::NonlinearDecay<policy>;
 using Visco = numsim::materials::generated::Viscoelastic<policy>;
 using ReturnMap = numsim::materials::generated::ReturnMap<policy>;
 using ReturnMapCubic = numsim::materials::generated::ReturnMapCubic<policy>;
+using J2Return = numsim::materials::generated::J2Return<policy>;
+using J2Voce = numsim::materials::generated::J2Voce<policy>;
+using J2Swift = numsim::materials::generated::J2Swift<policy>;
 using tensor2 = tmech::tensor<T, 3, 2>;
 #endif
 
@@ -500,6 +507,165 @@ TEST(NumSimMaterialEndToEnd, NonlinearResidualValidatesEmittedJacobian) {
   // Contrast: without the division it would be c·ε₀₀ — assert we are NOT that.
   EXPECT_GT(std::abs(C(0, 0, 1, 1) - c * eps(0, 0)), 1e-3)
       << "tangent must divide by ∂R/∂z, not omit it";
+}
+
+// ── Phase C golden (#90): J2 radial-return consistent tangent ────────────────
+// A REAL, validated plasticity model driven end-to-end through the real solver.
+// σ = s_trial − 2G·Δγ·n with s_trial = 2G·dev(ε), Δγ from R = ‖s_trial‖ − 2G·Δγ
+// − σ_y − H·Δγ = 0 (plastic branch). Two independent checks:
+//   (1) PHYSICS: the updated stress sits on the hardened yield surface,
+//       ‖dev(σ)‖ = σ_y + H·Δγ (the return-map consistency condition);
+//   (2) TANGENT: the emitted consistent tangent dσ/dε — which carries the full
+//       flow-direction structure (P_dev, n⊗n, geometric softening ∝ 1/‖s_trial‖)
+//       — FD-matches numerical differences through the real re-solve.
+// Loading is monotonic so the increment Δγ stays ≥ 0 (backward_euler's clamp
+// never activates) and the state stays on the plastic branch.
+TEST(NumSimMaterialEndToEnd, J2RadialReturnTangentMatchesNumericalDiff) {
+  ctx_type ctx;
+  param_type p;
+
+  const T G = T{80.0}, sy = T{1.0}, H = T{10.0};
+
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.02}); // monotonic uniaxial-ish loading
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 50);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "J2Return");
+  p.insert<T>("G", G);
+  p.insert<T>("sy", sy);
+  p.insert<T>("H", H);
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<J2Return>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "checker");
+  p.insert<ctx_type*>("context", &ctx);
+  p.insert<std::string>("output_source", "J2Return::stress");
+  p.insert<std::string>("input_source", "stepper::strain");
+  p.insert<std::string>("analytical_source", "J2Return::dstress_dstrain");
+  p.insert<std::vector<std::string>>("history_sources", {"J2Return::dgamma"});
+  p.insert<T>("epsilon", T{1e-7});
+  ctx.create<numsim::materials::tangent_checker<policy>>(p);
+
+  ctx.finalize();
+
+  T max_rel = 0;
+  for (int i = 0; i < 8; ++i) {
+    ctx.update();
+
+    const auto eps = read_tensor(ctx, "stepper", "strain");
+    const T dgamma = ctx.get<T>("J2Return", "dgamma");
+    const auto sig = read_tensor(ctx, "J2Return", "stress");
+
+    // Must be on the plastic branch (Δγ > 0) for this golden to be meaningful.
+    ASSERT_GT(dgamma, T{0}) << "step " << i << ": expected plastic loading";
+
+    // (1) PHYSICS — the returned stress is on the hardened yield surface:
+    //     ‖dev(σ)‖ = σ_y + H·Δγ.
+    auto dev_sig = sig - (sig(0, 0) + sig(1, 1) + sig(2, 2)) / T{3} *
+                             tmech::eye<T, 3, 2>();
+    const T dev_sig_norm = std::sqrt(tmech::dcontract(dev_sig, dev_sig));
+    EXPECT_NEAR(dev_sig_norm, sy + H * dgamma, 1e-9)
+        << "step " << i << ": stress must lie on the yield surface";
+    (void)eps;
+
+    // (2) TANGENT — the emitted dσ/dε FD-matches through the real re-solve.
+    max_rel = std::max(max_rel, ctx.get<T>("checker", "rel_error"));
+    ctx.commit();
+  }
+  EXPECT_LT(max_rel, 1e-6) << "J2 consistent tangent disagrees with numerical diff";
+}
+
+// Same J2 golden with NONLINEAR isotropic hardening. Now σ_y(Δγ) is nonlinear, so
+// ∂R/∂Δγ is Δγ-dependent — the emitted jacobian AND the dΔγ/dε = −∂R/∂ε/∂R/∂Δγ
+// division in the tangent both exercise cas::diff of the hardening law (exp / pow).
+// The FD check would fail if either were wrong. Params are gentle so backward_
+// euler's clamped Newton stays well-conditioned on the plastic branch.
+static void run_nonlinear_j2_golden(
+    const char* mat, param_type mat_params,
+    const std::function<T(T)>& sy_of_dgamma) {
+  ctx_type ctx;
+  param_type p;
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.02});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 100);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  mat_params.insert<std::string>("name", mat);
+  mat_params.insert<std::string>("solver_source", "solver");
+  mat_params.insert<std::string>("strain_source", "stepper");
+  if (std::string(mat) == "J2Voce")
+    ctx.create<J2Voce>(mat_params);
+  else
+    ctx.create<J2Swift>(mat_params);
+
+  p.clear();
+  p.insert<std::string>("name", "checker");
+  p.insert<ctx_type*>("context", &ctx);
+  p.insert<std::string>("output_source", std::string(mat) + "::stress");
+  p.insert<std::string>("input_source", "stepper::strain");
+  p.insert<std::string>("analytical_source", std::string(mat) + "::dstress_dstrain");
+  p.insert<std::vector<std::string>>("history_sources", {std::string(mat) + "::dgamma"});
+  p.insert<T>("epsilon", T{1e-7});
+  ctx.create<numsim::materials::tangent_checker<policy>>(p);
+  ctx.finalize();
+
+  T max_rel = 0;
+  for (int i = 0; i < 8; ++i) {
+    ctx.update();
+    const T dgamma = ctx.get<T>(mat, "dgamma");
+    const auto sig = read_tensor(ctx, mat, "stress");
+    ASSERT_GT(dgamma, T{0}) << mat << " step " << i << ": expected plastic loading";
+    // PHYSICS: ‖dev(σ)‖ = σ_y(Δγ) (nonlinear hardened yield surface).
+    auto dev_sig = sig - (sig(0, 0) + sig(1, 1) + sig(2, 2)) / T{3} *
+                             tmech::eye<T, 3, 2>();
+    const T dev_sig_norm = std::sqrt(tmech::dcontract(dev_sig, dev_sig));
+    EXPECT_NEAR(dev_sig_norm, sy_of_dgamma(dgamma), 1e-9)
+        << mat << " step " << i << ": stress off the nonlinear yield surface";
+    // TANGENT: FD-match through the real re-solve.
+    max_rel = std::max(max_rel, ctx.get<T>("checker", "rel_error"));
+    ctx.commit();
+  }
+  EXPECT_LT(max_rel, 1e-6) << mat << " nonlinear-hardening tangent disagrees with FD";
+}
+
+TEST(NumSimMaterialEndToEnd, J2VoceHardeningTangentMatchesNumericalDiff) {
+  param_type p;
+  const T sy0 = T{1.0}, Q = T{0.8}, b = T{25.0};
+  p.insert<T>("G", T{80.0});
+  p.insert<T>("sy0", sy0);
+  p.insert<T>("Q", Q);
+  p.insert<T>("b", b);
+  run_nonlinear_j2_golden("J2Voce", p, [=](T dg) {
+    return sy0 + Q * (T{1} - std::exp(-b * dg)); // Voce
+  });
+}
+
+TEST(NumSimMaterialEndToEnd, J2SwiftHardeningTangentMatchesNumericalDiff) {
+  param_type p;
+  const T C = T{2.0}, e0 = T{0.05}, k = T{0.3};
+  p.insert<T>("G", T{80.0});
+  p.insert<T>("C", C);
+  p.insert<T>("e0", e0);
+  p.insert<T>("k", k);
+  run_nonlinear_j2_golden("J2Swift", p, [=](T dg) {
+    return C * std::pow(e0 + dg, k); // Swift power law
+  });
 }
 
 #endif // NCG_TENSOR_E2E

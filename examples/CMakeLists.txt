@@ -15,3 +15,6 @@ target_link_libraries(elastic_tangent PRIVATE numsim::codegen)
 
 add_executable(hencky_hyperelastic hencky_hyperelastic.cpp)
 target_link_libraries(hencky_hyperelastic PRIVATE numsim::codegen)
+
+add_executable(stvenant_kirchhoff stvenant_kirchhoff.cpp)
+target_link_libraries(stvenant_kirchhoff PRIVATE numsim::codegen)
