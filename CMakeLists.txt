@@ -130,7 +130,11 @@ else()
     CPMAddPackage(
         NAME numsim_cas
         GITHUB_REPOSITORY NumSim-Stack/numsim-cas
-        GIT_TAG 33a38a671cce08afac82d2eb49914eda9ef0e81d
+        # Bumped for numsim-cas#332 (tmech pin → v1.1.1): fixes tmech
+        # inner_product zeroing a lazy rank-4 operand, which made finite-strain
+        # ∂stress/∂F tangents (C=FᵀF) half-correct. Repoint to the squashed
+        # numsim-cas main SHA once #332 merges.
+        GIT_TAG 09f41c9971e6c365c710f33d531af76ca521b113
         SYSTEM YES
         EXCLUDE_FROM_ALL YES
         OPTIONS
