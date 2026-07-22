@@ -59,9 +59,9 @@ A new example + registry entry. Formulation (unambiguous):
 - input `C` — right Cauchy–Green, symmetric rank-2, SPD (the driving strain).
 - parameters `lambda`, `mu` (Lamé).
 - Hencky strain `E = ½ log(C)` (uses the isotropic `log`).
-- stress `σ = λ tr(E) I + 2μ E = ½λ tr(log C) I + μ log C`.
-- `add_output("stress", σ, roles::Stress)`.
-- `add_algorithmic_tangent("dstress_dC", "stress", "C")`.
+- Hencky stress `H = λ tr(E) I + 2μ E = ½λ tr(log C) I + μ log C`.
+- `add_output("H", H, roles::Stress)`.
+- `add_algorithmic_tangent("dH_dC", "H", "C")`.
 
 Exercises the full surface: isotropic `log` (spectral value), `trace` (t2s),
 identity, `t2s × I` (`tensor_to_scalar_with_tensor_mul`), scalar·tensor, add — and
@@ -93,10 +93,10 @@ robustness at coalescence. Methods-paper deliverable, downstream of Slice 4.
 ---
 
 ## Out of scope / risks
-- **Kinematic wrapping.** We emit `σ(C)` and `dσ/dC`; the finite-strain
+- **Kinematic wrapping.** We emit `H(C)` and `dH/dC`; the finite-strain
   push-forward to MOOSE's spatial tangent (and the F→C map) is a modeling wrapper
-  documented separately, not a codegen concern. The e2e verifies `dσ/dC` against
-  FD of `σ(C)` — self-consistent regardless of the wrapping.
+  documented separately, not a codegen concern. The e2e verifies `dH/dC` against
+  FD of `H(C)` — self-consistent regardless of the wrapping.
 - **`C ≈ I` vs exact `C = I`.** At exact `C = I` all eigenvalues coincide and the
   tangent is the invariant `I_sym` (already proven in #107's e2e). Near `C = I`
   (tiny distinct eigenvalues) is the harder FD case — include it explicitly.
