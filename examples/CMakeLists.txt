@@ -12,3 +12,12 @@ target_link_libraries(resin_curing PRIVATE numsim::codegen)
 
 add_executable(elastic_tangent elastic_tangent.cpp)
 target_link_libraries(elastic_tangent PRIVATE numsim::codegen)
+
+add_executable(hencky_hyperelastic hencky_hyperelastic.cpp)
+target_link_libraries(hencky_hyperelastic PRIVATE numsim::codegen)
+
+add_executable(stvenant_kirchhoff stvenant_kirchhoff.cpp)
+target_link_libraries(stvenant_kirchhoff PRIVATE numsim::codegen)
+
+add_executable(first_piola_svk first_piola_svk.cpp)
+target_link_libraries(first_piola_svk PRIVATE numsim::codegen)

@@ -4,7 +4,8 @@
 #include <numsim_cas/scalar/scalar_all.h>
 #include <numsim_cas/scalar/scalar_visitor_typedef.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
-#include <numsim_cas/tensor/tensor_if_then_else.h>
+#include <numsim_cas/tensor/tensor_if_then_else_scalar.h>
+#include <numsim_cas/tensor/tensor_if_then_else_t2s.h>
 #include <numsim_cas/tensor/tensor_visitor_typedef.h>
 #include <numsim_cas/tensor_to_scalar/operators/tensor_to_scalar_add.h>
 #include <numsim_cas/tensor_to_scalar/operators/tensor_to_scalar_mul.h>
@@ -27,16 +28,16 @@ namespace numsim::codegen {
 // as needed.
 class LeafCollector {
 public:
-  void collect_scalar(
-      cas::expression_holder<cas::scalar_expression> const &expr) {
+  void
+  collect_scalar(cas::expression_holder<cas::scalar_expression> const &expr) {
     if (!expr.is_valid() || !m_visited_scalar.insert(&expr.get()).second) {
       return;
     }
     expr.template get<cas::scalar_visitable_t>().accept(m_scalar_v);
   }
 
-  void collect_tensor(
-      cas::expression_holder<cas::tensor_expression> const &expr) {
+  void
+  collect_tensor(cas::expression_holder<cas::tensor_expression> const &expr) {
     if (!expr.is_valid() || !m_visited_tensor.insert(&expr.get()).second) {
       return;
     }
@@ -70,12 +71,14 @@ private:
     void operator()(cas::scalar_one const &) override {}
     void operator()(cas::scalar_constant const &) override {}
     void operator()(cas::scalar_add const &v) override {
-      if (v.coeff().is_valid()) m_p.collect_scalar(v.coeff());
+      if (v.coeff().is_valid())
+        m_p.collect_scalar(v.coeff());
       for (auto const &c : v.symbol_map() | std::views::values)
         m_p.collect_scalar(c);
     }
     void operator()(cas::scalar_mul const &v) override {
-      if (v.coeff().is_valid()) m_p.collect_scalar(v.coeff());
+      if (v.coeff().is_valid())
+        m_p.collect_scalar(v.coeff());
       for (auto const &c : v.symbol_map() | std::views::values)
         m_p.collect_scalar(c);
     }
@@ -140,7 +143,8 @@ private:
       m_p.collect_tensor(v.expr());
     }
     void operator()(cas::tensor_add const &v) override {
-      if (v.coeff().is_valid()) m_p.collect_tensor(v.coeff());
+      if (v.coeff().is_valid())
+        m_p.collect_tensor(v.coeff());
       for (auto const &c : v.symbol_map() | std::views::values)
         m_p.collect_tensor(c);
     }
@@ -172,10 +176,25 @@ private:
       m_p.collect_tensor(v.expr_lhs());
       m_p.collect_t2s(v.expr_rhs());
     }
-    void operator()(cas::tensor_if_then_else const &v) override {
+    void operator()(cas::tensor_if_then_else_scalar const &v) override {
       m_p.collect_scalar(v.expr_cond()); // scalar condition
       m_p.collect_tensor(v.expr_then());
       m_p.collect_tensor(v.expr_else());
+    }
+    void operator()(cas::tensor_if_then_else_t2s const &v) override {
+      m_p.collect_t2s(v.expr_cond()); // t2s condition (#241)
+      m_p.collect_tensor(v.expr_then());
+      m_p.collect_tensor(v.expr_else());
+    }
+    // Spectral nodes (#325/#326): the only leaf is the tensor argument.
+    void operator()(cas::tensor_eigenprojection const &v) override {
+      m_p.collect_tensor(v.expr());
+    }
+    void operator()(cas::tensor_eigenvector const &v) override {
+      m_p.collect_tensor(v.expr());
+    }
+    void operator()(cas::tensor_isotropic_function const &v) override {
+      m_p.collect_tensor(v.expr());
     }
 
   private:
@@ -206,12 +225,14 @@ private:
       m_p.collect_t2s(v.expr());
     }
     void operator()(cas::tensor_to_scalar_add const &v) override {
-      if (v.coeff().is_valid()) m_p.collect_t2s(v.coeff());
+      if (v.coeff().is_valid())
+        m_p.collect_t2s(v.coeff());
       for (auto const &c : v.symbol_map() | std::views::values)
         m_p.collect_t2s(c);
     }
     void operator()(cas::tensor_to_scalar_mul const &v) override {
-      if (v.coeff().is_valid()) m_p.collect_t2s(v.coeff());
+      if (v.coeff().is_valid())
+        m_p.collect_t2s(v.coeff());
       for (auto const &c : v.symbol_map() | std::views::values)
         m_p.collect_t2s(c);
     }
@@ -231,6 +252,14 @@ private:
     void operator()(cas::tensor_inner_product_to_scalar const &v) override {
       m_p.collect_tensor(v.expr_lhs());
       m_p.collect_tensor(v.expr_rhs());
+    }
+    // Spectral scalars (#325/#326): the only leaf is the tensor argument.
+    void operator()(cas::tensor_to_scalar_eigenvalue const &v) override {
+      m_p.collect_tensor(v.expr());
+    }
+    void
+    operator()(cas::tensor_to_scalar_divided_difference const &v) override {
+      m_p.collect_tensor(v.expr());
     }
     void operator()(cas::tensor_to_scalar_if_then_else const &v) override {
       m_p.collect_t2s(v.expr_cond()); // cond is t2s, not scalar
