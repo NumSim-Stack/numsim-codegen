@@ -25,6 +25,7 @@
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_diff.h> // Phase 3b-1: diff(tensor, tensor)
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_diff.h> // #108: diff(energy ψ, strain) → stress
 
 #include <cstddef>
 #include <format>
@@ -881,6 +882,34 @@ public:
     m_tangents.push_back(
         {std::move(name), std::move(of_output), std::move(wrt_input)});
   }
+
+  // #108 material-compiler front-end: derive a hyperelastic material from its
+  // energy potential ψ instead of writing the stress by hand. Registers the
+  // stress output σ = ∂ψ/∂ε and the consistent tangent ∂σ/∂ε = ∂²ψ/∂ε², both
+  // via cas::diff — the AceGen "differentiate the potential" paradigm.
+  //
+  //   `stress_name`  — name of the emitted stress output (roles::Stress).
+  //   `energy`       — the scalar strain-energy density ψ (a tensor-to-scalar
+  //                    expression built from `strain` + parameters).
+  //   `strain`       — the strain input to differentiate against; must be the
+  //                    same input leaf `energy` is built from.
+  //   `strain_name`  — that input's registered name (the tangent's wrt-input).
+  //   `tangent_name` — name of the emitted rank-4 consistent tangent.
+  //
+  // The human writes only ψ and the kinematics; σ and dσ/dε are derived. This is
+  // the front-end slice of #108 (hyperelastic); the plastic return-map front-end
+  // and the compile-time radial-return reduction pass are separate, later slices.
+  void add_hyperelastic_potential(
+      std::string stress_name,
+      cas::expression_holder<cas::tensor_to_scalar_expression> const &energy,
+      cas::expression_holder<cas::tensor_expression> const &strain,
+      std::string strain_name, std::string tangent_name) {
+    auto const stress = cas::diff(energy, strain); // σ = ∂ψ/∂ε
+    add_output(stress_name, stress, roles::Stress);
+    add_algorithmic_tangent(std::move(tangent_name), std::move(stress_name),
+                            std::move(strain_name)); // ∂σ/∂ε = ∂²ψ/∂ε²
+  }
+
   [[nodiscard]] auto algorithmic_tangent_enabled() const noexcept -> bool {
     return !m_tangents.empty();
   }
