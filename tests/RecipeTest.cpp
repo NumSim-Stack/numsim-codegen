@@ -260,4 +260,53 @@ TEST(Recipe, ResidualRejectsForeignHandle) {
   }
 }
 
+// ── #108 add_hyperelastic_potential guards ──────────────────────────────────
+
+TEST(Recipe, HyperelasticPotentialDerivesStressAndTangent) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Hyper");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto E = m.add_tensor_input("E", 3, 2, roles::Strain);
+  m.add_hyperelastic_potential("S", mu * dot(E), E, "dS_dE");
+  // Registers exactly one stress output and one tangent.
+  EXPECT_EQ(m.outputs().size(), 1u);
+  EXPECT_EQ(m.tangents().size(), 1u);
+}
+
+TEST(Recipe, HyperelasticPotentialRejectsNonInputStrain) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Hyper");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto E = m.add_tensor_input("E", 3, 2, roles::Strain);
+  // A derived expression, not the registered input leaf, is rejected loudly.
+  EXPECT_THROW(m.add_hyperelastic_potential("S", mu * dot(E), 2.0 * E, "dS_dE"),
+               std::runtime_error);
+}
+
+TEST(Recipe, HyperelasticPotentialRejectsStrainIndependentEnergy) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Hyper");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto E = m.add_tensor_input("E", 3, 2, roles::Strain);
+  auto F = m.add_tensor_input("F", 3, 2, roles::Strain);
+  // ψ depends on F, not on the strain E we differentiate against → ∂ψ/∂E ≡ 0.
+  EXPECT_THROW(m.add_hyperelastic_potential("S", mu * dot(F), E, "dS_dE"),
+               std::runtime_error);
+}
+
+TEST(Recipe, HyperelasticPotentialRollsBackStressOutputOnBadTangentName) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Hyper");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto E = m.add_tensor_input("E", 3, 2, roles::Strain);
+  // An invalid tangent name makes add_algorithmic_tangent throw AFTER the stress
+  // output was added — the stress output must be rolled back, leaving the model
+  // clean so a corrected retry succeeds.
+  EXPECT_THROW(m.add_hyperelastic_potential("S", mu * dot(E), E, "bad name"),
+               std::runtime_error);
+  EXPECT_EQ(m.outputs().size(), 0u) << "stress output must be rolled back";
+  EXPECT_NO_THROW(m.add_hyperelastic_potential("S", mu * dot(E), E, "dS_dE"));
+  EXPECT_EQ(m.outputs().size(), 1u);
+}
+
 } // namespace numsim::codegen

@@ -1,14 +1,28 @@
-// #108 e2e generator: emit the energy-derived SVK material to a header the driver
-// compiles and verifies against the hand-written closed form.
+// #108 e2e generator: emit the energy-derived materials to headers the driver
+// compiles and verifies. Two materials: SvkFromEnergy (quadratic ψ → constant
+// tangent, checked against the hand-written closed form) and NonlinearFromEnergy
+// (quartic ψ → non-constant tangent, exercising the second-diff machinery).
 #include "svk_from_energy_recipe.h"
 #include <numsim_codegen/targets/standalone_cxx.h>
 #include <fstream>
 #include <iostream>
+
+namespace {
+bool write_header(numsim::codegen::ConstitutiveModel const &m, char const *path) {
+  std::ofstream f(path);
+  for (auto const &e : numsim::codegen::StandaloneCxxTarget{}.emit(m))
+    f << e.contents;
+  return static_cast<bool>(f);
+}
+} // namespace
+
 int main(int argc, char **argv) {
-  if (argc < 2) { std::cerr << "usage: generate_energy_check <out.h>\n"; return 2; }
-  auto const model = numsim::codegen::examples::make_svk_from_energy();
-  numsim::codegen::StandaloneCxxTarget target;
-  std::ofstream f(argv[1]);
-  for (auto const &e : target.emit(model)) f << e.contents;
-  return f ? 0 : 1;
+  if (argc < 3) {
+    std::cerr << "usage: generate_energy_check <svk.h> <nonlinear.h>\n";
+    return 2;
+  }
+  using namespace numsim::codegen::examples;
+  if (!write_header(make_svk_from_energy(), argv[1])) return 1;
+  if (!write_header(make_nonlinear_from_energy(), argv[2])) return 1;
+  return 0;
 }

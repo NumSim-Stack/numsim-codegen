@@ -278,19 +278,23 @@ target_include_directories(generate_energy_check
 target_link_libraries(generate_energy_check
     PRIVATE numsim::codegen numsim_codegen_warnings)
 
-set(GENERATED_ENERGY_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/EnergyCheck.h)
+set(GENERATED_SVK_ENERGY_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/SvkEnergyCheck.h)
+set(GENERATED_NL_ENERGY_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/NlEnergyCheck.h)
 add_custom_command(
-    OUTPUT ${GENERATED_ENERGY_HEADER}
+    OUTPUT ${GENERATED_SVK_ENERGY_HEADER} ${GENERATED_NL_ENERGY_HEADER}
     COMMAND ${CMAKE_COMMAND} -E make_directory
             ${CMAKE_CURRENT_BINARY_DIR}/generated
-    COMMAND $<TARGET_FILE:generate_energy_check> ${GENERATED_ENERGY_HEADER}
+    COMMAND $<TARGET_FILE:generate_energy_check>
+            ${GENERATED_SVK_ENERGY_HEADER} ${GENERATED_NL_ENERGY_HEADER}
     DEPENDS generate_energy_check
-    COMMENT "Generating energy-derived SVK material header via numsim-codegen"
+    COMMENT "Generating energy-derived material headers via numsim-codegen"
     VERBATIM)
 
 add_executable(energy_check_driver
     generated/energy_check_driver.cpp
-    ${GENERATED_ENERGY_HEADER})
+    ${GENERATED_SVK_ENERGY_HEADER} ${GENERATED_NL_ENERGY_HEADER})
 target_include_directories(energy_check_driver
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(energy_check_driver

@@ -15,8 +15,17 @@
 // This is the same material as the hand-written St. Venant–Kirchhoff example —
 // the e2e checks the derived S against that closed form — but here the stress
 // and tangent fall out of `cas::diff` of ψ, the AceGen "differentiate the
-// potential" paradigm. E is the Green–Lagrange strain, taken as the symmetric
-// input leaf.
+// potential" paradigm.
+//
+// STRESS/STRAIN MEASURE: (S, Green–Lagrange E), 2nd Piola–Kirchhoff conjugate
+// pair — same as the hand-written SVK example.
+// CONSTRAINTS: `E` must be a declared INPUT leaf (add_hyperelastic_potential
+// recovers its name from the handle and rejects a derived measure), and it is
+// roles::Strain (symmetric), which is what makes the derived tangent
+// minor-symmetric — a non-symmetric leaf would not.
+// VERIFICATION BOUNDARY: the e2e compiles the StandaloneCxx form and checks the
+// derived S against the independent closed form + the derived tangent vs FD +
+// major symmetry (the Hessian property an energy-derived tangent must have).
 
 #include <numsim_codegen/recipe.h>
 
@@ -43,7 +52,35 @@ inline ConstitutiveModel make_svk_from_energy() {
   auto const psi = 0.5 * lambda * trE * trE + mu * dot(E); // dot(E) = E : E
 
   // Derive S = ∂ψ/∂E and the consistent tangent dS/dE = ∂²ψ/∂E².
-  model.add_hyperelastic_potential("S", psi, E, "E", "dS_dE");
+  model.add_hyperelastic_potential("S", psi, E, "dS_dE");
+
+  return model;
+}
+
+// A second, deliberately NON-QUADRATIC potential so the derived tangent is a
+// genuine function of E (not the constant SVK tangent) — this exercises the
+// second-differentiation machinery on a curvature-bearing Hessian, which a
+// linear-stress material cannot.
+//
+//   ψ = ½λ (tr E)² + μ (E:E) + c (E:E)²
+//   S = ∂ψ/∂E = λ tr(E) I + 2μ E + 4c (E:E) E      (cubic in E)
+//   dS/dE = ∂²ψ/∂E²                                 (non-constant)
+inline ConstitutiveModel make_nonlinear_from_energy() {
+  using namespace numsim::cas;
+
+  ConstitutiveModel model("NonlinearFromEnergy");
+
+  auto lambda = model.add_parameter("lambda", 1.0, "Lame first parameter");
+  auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
+  auto c = model.add_parameter("c", 0.4, "Quartic stiffening coefficient");
+  auto E = model.add_tensor_input("E", 3, 2, roles::Strain);
+
+  auto const trE = trace(E);
+  auto const EE = dot(E); // E : E
+  auto const psi =
+      0.5 * lambda * trE * trE + mu * EE + c * EE * EE;
+
+  model.add_hyperelastic_potential("S", psi, E, "dS_dE");
 
   return model;
 }
