@@ -1,16 +1,20 @@
 // #108 e2e driver: compile the ENERGY-DERIVED materials and verify the material
-// compiler. Two materials:
+// compiler. Three materials:
 //   * SvkFromEnergy (quadratic ψ) — the DERIVED stress ∂ψ/∂E matches the
 //     INDEPENDENTLY hand-written closed form (per #108's "self-FD insufficient"
 //     caveat); its tangent is constant.
 //   * NonlinearFromEnergy (quartic ψ) — a genuinely NON-CONSTANT derived tangent,
 //     which exercises the second-differentiation machinery a linear-stress
 //     material cannot; checked stress-vs-closed-form AND tangent-vs-FD.
-// Both are additionally checked for MAJOR symmetry (C_ijkl = C_klij) — the
-// Hessian property any energy-derived tangent ∂²ψ/∂E² must have, and the property
-// that most distinguishes a derived tangent from an arbitrary hand-written one.
+//   * NonsymmetricFromEnergy (ψ of a non-symmetric leaf F) — exercises the
+//     non-symmetric-leaf path; its tangent is major- but NOT minor-symmetric,
+//     which also proves minor_symmetric() discriminates.
+// Symmetry is checked two ways: MAJOR (C_ijkl=C_klij) is automatic for a Hessian
+// so it only guards against emit/diff corruption; MINOR (C_ijkl=C_jikl=C_ijlk) is
+// the load-bearing property the symmetric roles::Strain leaf confers.
 
 #include "NlEnergyCheck.h"
+#include "NsEnergyCheck.h"
 #include "SvkEnergyCheck.h"
 
 #include <tmech/tmech.h>
@@ -168,4 +172,54 @@ TEST(MaterialCompilerE2E, DerivedTangentIsSymmetric) {
     EXPECT_TRUE(major_symmetric(dS)) << "nonlinear tangent not major-symmetric";
     EXPECT_TRUE(minor_symmetric(dS)) << "nonlinear tangent not minor-symmetric";
   }
+}
+
+// ── NonsymmetricFromEnergy: ψ(F) with a NON-SYMMETRIC leaf ───────────────────
+
+namespace {
+// 12 GENERAL (non-symmetric) directions — F is a deformation gradient (9 DOF).
+std::array<T2, 12> general_directions() {
+  std::array<T2, 12> d;
+  double v[12][9] = {
+      {1,0,0,0,0,0,0,0,0}, {0,1,0,0,0,0,0,0,0}, {0,0,1,0,0,0,0,0,0},
+      {0,0,0,1,0,0,0,0,0}, {0,0,0,0,1,0,0,0,0}, {0,0,0,0,0,1,0,0,0},
+      {0,0,0,0,0,0,1,0,0}, {0,0,0,0,0,0,0,1,0}, {0,0,0,0,0,0,0,0,1},
+      {1,0.4,-0.2,0.3,1,0.1,-0.2,0.1,1}, {0.5,-0.7,0.2,0.9,0.3,-0.4,0.1,0.6,0.8},
+      {-0.3,0.8,0.5,-0.6,0.2,0.7,0.4,-0.9,0.1}};
+  for (int k = 0; k < 12; ++k)
+    d[k] = T2{v[k][0],v[k][1],v[k][2],v[k][3],v[k][4],v[k][5],v[k][6],v[k][7],v[k][8]};
+  return d;
+}
+} // namespace
+
+// The derived P = ∂ψ/∂F for a NON-symmetric leaf matches FD in general (9-DOF)
+// directions — proving the non-symmetric-leaf path works, not just the symmetric.
+TEST(MaterialCompilerE2E, NonsymmetricTangentMatchesFD) {
+  constexpr double mu = 0.5, c = 0.4;
+  for (T2 const &F : {T2{1.1,0.2,0.0, 0.05,0.95,0.1, 0.0,0.08,1.04},
+                      T2{1.3,0.2,0.1, -0.2,1.1,0.3, 0.05,-0.1,0.9}}) {
+    T2 P; T4 dP;
+    NonsymmetricFromEnergy_compute(mu, c, F, P, dP);
+    const double t = 1e-6;
+    for (auto const &dF : general_directions()) {
+      T2 pp, pm; T4 scratch;
+      NonsymmetricFromEnergy_compute(mu, c, T2(tmech::eval(F + t * dF)), pp, scratch);
+      NonsymmetricFromEnergy_compute(mu, c, T2(tmech::eval(F - t * dF)), pm, scratch);
+      auto fd = tmech::eval((pp - pm) / (2.0 * t));
+      auto an = tmech::eval(tmech::dcontract(dP, dF));
+      EXPECT_TRUE(tmech::almost_equal(an, fd, 1e-6)) << "non-symmetric-leaf tangent vs FD";
+    }
+  }
+}
+
+// ∂²ψ/∂F² is MAJOR-symmetric (Hessian) but NOT minor-symmetric (F is not a
+// symmetric leaf). This confirms both that the non-symmetric path is correct AND
+// that minor_symmetric() genuinely discriminates (does not pass vacuously).
+TEST(MaterialCompilerE2E, NonsymmetricTangentIsMajorButNotMinorSymmetric) {
+  constexpr double mu = 0.5, c = 0.4;
+  T2 F{1.3,0.2,0.1, -0.2,1.1,0.3, 0.05,-0.1,0.9};
+  T2 P; T4 dP;
+  NonsymmetricFromEnergy_compute(mu, c, F, P, dP);
+  EXPECT_TRUE(major_symmetric(dP)) << "Hessian must be major-symmetric";
+  EXPECT_FALSE(minor_symmetric(dP)) << "a non-symmetric leaf must NOT give a minor-symmetric tangent";
 }

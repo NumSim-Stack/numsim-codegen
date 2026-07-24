@@ -85,6 +85,29 @@ inline ConstitutiveModel make_nonlinear_from_energy() {
   return model;
 }
 
+// A potential in a NON-SYMMETRIC leaf F (roles::DeformationGradient), to exercise
+// add_hyperelastic_potential's non-symmetric-leaf path and to give the
+// minor-symmetry check teeth: ∂²ψ/∂F² is major-symmetric (a Hessian) but NOT
+// minor-symmetric, because F carries no i↔j symmetry.
+//
+//   ψ = ½μ (F:F) + c (F:F)²   →   P = ∂ψ/∂F,   dP/dF = ∂²ψ/∂F²  (minor-asymmetric)
+inline ConstitutiveModel make_nonsymmetric_from_energy() {
+  using namespace numsim::cas;
+
+  ConstitutiveModel model("NonsymmetricFromEnergy");
+
+  auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
+  auto c = model.add_parameter("c", 0.4, "Quartic stiffening coefficient");
+  auto F = model.add_tensor_input("F", 3, 2, roles::DeformationGradient);
+
+  auto const FF = dot(F); // F : F
+  auto const psi = 0.5 * mu * FF + c * FF * FF;
+
+  model.add_hyperelastic_potential("P", psi, F, "dP_dF");
+
+  return model;
+}
+
 } // namespace numsim::codegen::examples
 
 #endif // NUMSIM_CODEGEN_EXAMPLES_SVK_FROM_ENERGY_RECIPE_H

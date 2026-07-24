@@ -17,12 +17,14 @@ bool write_header(numsim::codegen::ConstitutiveModel const &m, char const *path)
 } // namespace
 
 int main(int argc, char **argv) {
-  if (argc < 3) {
-    std::cerr << "usage: generate_energy_check <svk.h> <nonlinear.h>\n";
+  if (argc < 4) {
+    std::cerr << "usage: generate_energy_check <svk.h> <nonlinear.h> "
+                 "<nonsymmetric.h>\n";
     return 2;
   }
   using namespace numsim::codegen::examples;
   if (!write_header(make_svk_from_energy(), argv[1])) return 1;
   if (!write_header(make_nonlinear_from_energy(), argv[2])) return 1;
+  if (!write_header(make_nonsymmetric_from_energy(), argv[3])) return 1;
   return 0;
 }
