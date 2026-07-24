@@ -916,22 +916,32 @@ public:
     // from the handle (rather than taking a second string) makes the stress diff
     // and the tangent diff use the same leaf by construction.
     std::string strain_name;
+    bool is_input = false;
     for (auto const &sym : m_tensor_symbols) {
       if (sym.second.data().get() == strain.data().get()) {
         strain_name = sym.first;
+        // m_tensor_symbols also holds state-variable current/_old handles, which
+        // are NOT valid strains; require Category::Input specifically.
+        for (auto const &in : m_inputs_cache)
+          if (in.name == strain_name) {
+            is_input = true;
+            break;
+          }
         break;
       }
     }
-    if (strain_name.empty()) {
+    if (!is_input) {
       throw std::runtime_error(std::format(
           "ConstitutiveModel '{}': add_hyperelastic_potential's `strain` must be "
-          "a registered tensor input (the handle returned by add_tensor_input), "
-          "not a derived expression.",
+          "a registered tensor INPUT (the handle returned by add_tensor_input) — "
+          "not a state variable or a derived expression.",
           m_name));
     }
-    // The energy must actually depend on the strain, else ∂ψ/∂ε ≡ 0 emits an
-    // inert zero stress and tangent. Reject loudly (mirrors the residual-leaf
-    // guard) rather than ship a silently-null material.
+    // The energy must at least mention the strain leaf, else ∂ψ/∂ε ≡ 0 emits an
+    // inert zero stress and tangent. This is a leaf-PRESENCE check (it does not
+    // catch a pathological energy where the strain appears but cancels to a zero
+    // gradient); it rejects the common "built ψ from the wrong input" mistake
+    // loudly rather than shipping a silently-null material.
     LeafCollector lc;
     lc.collect_t2s(energy);
     bool depends = false;

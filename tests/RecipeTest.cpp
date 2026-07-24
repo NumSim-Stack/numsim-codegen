@@ -294,6 +294,19 @@ TEST(Recipe, HyperelasticPotentialRejectsStrainIndependentEnergy) {
                std::runtime_error);
 }
 
+TEST(Recipe, HyperelasticPotentialRejectsStateVariableStrain) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Hyper");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto ep = m.add_tensor_state_variable(
+      "eps_p", 3, 2, make_expression<tensor_zero>(std::size_t{3}, std::size_t{2}));
+  // A state-variable handle is registered in m_tensor_symbols but is NOT a
+  // kinematic input — it must be rejected, not silently differentiated against.
+  EXPECT_THROW(
+      m.add_hyperelastic_potential("S", mu * dot(ep.current), ep.current, "dS_dE"),
+      std::runtime_error);
+}
+
 TEST(Recipe, HyperelasticPotentialRollsBackStressOutputOnBadTangentName) {
   using namespace numsim::cas;
   ConstitutiveModel m("Hyper");

@@ -54,9 +54,25 @@ bool major_symmetric(T4 const &C, double tol = 1e-12) {
   return true;
 }
 
-// 12 linearly-independent symmetric directions — more than the 6 symmetric DOF,
-// so contracting the tangent against all of them pins the whole minor-symmetric
-// rank-4.
+// True if the tangent is MINOR-symmetric: C_ijkl = C_jikl = C_ijlk. This is the
+// property the symmetric (roles::Strain) leaf is supposed to confer — and, unlike
+// major symmetry (automatic for any Hessian), it can genuinely fail if the leaf's
+// symmetry space is dropped, so it's the load-bearing symmetry check here.
+bool minor_symmetric(T4 const &C, double tol = 1e-12) {
+  for (int i = 0; i < 3; ++i)
+    for (int j = 0; j < 3; ++j)
+      for (int k = 0; k < 3; ++k)
+        for (int l = 0; l < 3; ++l)
+          if (std::abs(C(i, j, k, l) - C(j, i, k, l)) > tol ||
+              std::abs(C(i, j, k, l) - C(i, j, l, k)) > tol)
+            return false;
+  return true;
+}
+
+// 12 symmetric directions (a redundant, over-determined set — the symmetric
+// space is only 6-D). Contracting the tangent against all of them exercises its
+// action on symmetric strains; note this is blind to any minor-ASYMMETRIC
+// component (checked separately by minor_symmetric()).
 std::array<T2, 12> directions() {
   std::array<T2, 12> d;
   double b[6][9] = {{1,0,0,0,0,0,0,0,0}, {0,0,0,0,1,0,0,0,0}, {0,0,0,0,0,0,0,0,1},
@@ -134,16 +150,22 @@ TEST(MaterialCompilerE2E, NonlinearTangentMatchesFD) {
   }
 }
 
-// Both derived tangents are MAJOR-symmetric (C_ijkl = C_klij) — the Hessian
-// property ∂²ψ/∂E² must satisfy. This is the assertion that most justifies
-// deriving the tangent from a potential rather than writing it by hand.
-TEST(MaterialCompilerE2E, DerivedTangentIsMajorSymmetric) {
+// Both derived tangents are symmetric. Two distinct checks:
+//   * MAJOR symmetry (C_ijkl = C_klij) is automatic for any correct Hessian
+//     ∂²ψ/∂E² (Clairaut), so this mainly guards against a diff-non-commutation
+//     or an emit/CSE corruption of the rank-4 — NOT a value error (FD covers that).
+//   * MINOR symmetry (C_ijkl = C_jikl = C_ijlk) is the property the symmetric
+//     roles::Strain leaf actually confers; it is NOT automatic and would fail if
+//     the leaf's symmetry space were dropped — this is the load-bearing check.
+TEST(MaterialCompilerE2E, DerivedTangentIsSymmetric) {
   for (T2 const &E : {T2{0.03,0.01,0.0, 0.01,-0.02,0.005, 0.0,0.005,0.04},
                       T2{0.25,0.12,-0.06, 0.12,0.18,0.09, -0.06,0.09,-0.14}}) {
     T2 S; T4 dS;
     SvkFromEnergy_compute(kLambda, kMu, E, S, dS);
-    EXPECT_TRUE(major_symmetric(dS)) << "SVK-from-energy tangent not major-symmetric";
+    EXPECT_TRUE(major_symmetric(dS)) << "SVK tangent not major-symmetric";
+    EXPECT_TRUE(minor_symmetric(dS)) << "SVK tangent not minor-symmetric";
     NonlinearFromEnergy_compute(kLambda, kMu, kC, E, S, dS);
-    EXPECT_TRUE(major_symmetric(dS)) << "nonlinear-from-energy tangent not major-symmetric";
+    EXPECT_TRUE(major_symmetric(dS)) << "nonlinear tangent not major-symmetric";
+    EXPECT_TRUE(minor_symmetric(dS)) << "nonlinear tangent not minor-symmetric";
   }
 }
