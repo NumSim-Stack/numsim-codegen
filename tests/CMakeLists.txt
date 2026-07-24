@@ -265,6 +265,44 @@ target_link_libraries(svk_check_driver
 
 gtest_discover_tests(svk_check_driver)
 
+# ─── #108 material-compiler front-end end-to-end gate ────────────────────────
+# Emit the ENERGY-DERIVED St. Venant–Kirchhoff material (S=∂ψ/∂E, tangent
+# ∂²ψ/∂E², both derived by cas::diff of the potential), compile it, and verify
+# the derived stress against the independently hand-written closed form plus the
+# derived tangent against FD. Proves the material compiler produces the material
+# a human would have written by hand.
+add_executable(generate_energy_check
+    generated/generate_energy_check.cpp)
+target_include_directories(generate_energy_check
+    PRIVATE ${CMAKE_SOURCE_DIR}/examples)
+target_link_libraries(generate_energy_check
+    PRIVATE numsim::codegen numsim_codegen_warnings)
+
+set(GENERATED_SVK_ENERGY_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/SvkEnergyCheck.h)
+set(GENERATED_NL_ENERGY_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/NlEnergyCheck.h)
+add_custom_command(
+    OUTPUT ${GENERATED_SVK_ENERGY_HEADER} ${GENERATED_NL_ENERGY_HEADER}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND $<TARGET_FILE:generate_energy_check>
+            ${GENERATED_SVK_ENERGY_HEADER} ${GENERATED_NL_ENERGY_HEADER}
+    DEPENDS generate_energy_check
+    COMMENT "Generating energy-derived material headers via numsim-codegen"
+    VERBATIM)
+
+add_executable(energy_check_driver
+    generated/energy_check_driver.cpp
+    ${GENERATED_SVK_ENERGY_HEADER} ${GENERATED_NL_ENERGY_HEADER})
+target_include_directories(energy_check_driver
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(energy_check_driver
+    PRIVATE numsim::codegen numsim_codegen_warnings_light
+            GTest::gtest GTest::gtest_main)
+
+gtest_discover_tests(energy_check_driver)
+
 # ─── numsim-materials end-to-end gate (Phase B) ──────────────────────────────
 #
 # The string-asserting NumSimMaterialTargetTest proves the emitted TEXT matches

@@ -25,6 +25,7 @@
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_diff.h> // Phase 3b-1: diff(tensor, tensor)
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_diff.h> // #108: diff(energy ψ, strain) → stress
 
 #include <cstddef>
 #include <format>
@@ -881,6 +882,85 @@ public:
     m_tangents.push_back(
         {std::move(name), std::move(of_output), std::move(wrt_input)});
   }
+
+  // #108 material-compiler front-end: derive a hyperelastic material from its
+  // energy potential ψ instead of writing the stress by hand. Registers the
+  // stress output (∂ψ/∂ε) and the consistent tangent (∂²ψ/∂ε² = ∂stress/∂ε),
+  // both via cas::diff — the AceGen "differentiate the potential" paradigm.
+  //
+  //   `stress_name`  — name of the emitted stress output (roles::Stress).
+  //   `energy`       — the scalar strain-energy density ψ (a tensor-to-scalar
+  //                    expression built from `strain` + parameters).
+  //   `strain`       — the strain input to differentiate against. MUST be a
+  //                    registered input leaf (the handle from add_tensor_input),
+  //                    not a derived measure, and `energy` must depend on it —
+  //                    both are checked, loudly. Its name is recovered from the
+  //                    handle so the stress and tangent differentiate w.r.t. the
+  //                    SAME leaf (no separate, desyncable name argument).
+  //   `tangent_name` — name of the emitted rank-4 consistent tangent.
+  //
+  // The derived tangent inherits its symmetry from `strain`: a symmetric
+  // (roles::Strain) leaf gives the minor-symmetric tangent; a non-symmetric leaf
+  // (roles::DeformationGradient) does not. The human writes only ψ; stress and
+  // tangent are derived. This is the front-end slice of #108 (hyperelastic); the
+  // plastic return-map front-end and the compile-time reduction pass are separate,
+  // LATER slices — and note this helper eagerly derives-and-discards ψ (it stores
+  // only the results), so those slices need a STORED-potential representation, not
+  // an extension of this eager pattern.
+  void add_hyperelastic_potential(
+      std::string stress_name,
+      cas::expression_holder<cas::tensor_to_scalar_expression> const &energy,
+      cas::expression_holder<cas::tensor_expression> const &strain,
+      std::string tangent_name) {
+    // Recover the strain input's registered name by node identity — deriving it
+    // from the handle (rather than taking a second string) makes the stress diff
+    // and the tangent diff use the same leaf by construction.
+    std::string strain_name;
+    for (auto const &sym : m_tensor_symbols) {
+      if (sym.second.data().get() == strain.data().get()) {
+        strain_name = sym.first;
+        break;
+      }
+    }
+    if (strain_name.empty()) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': add_hyperelastic_potential's `strain` must be "
+          "a registered tensor input (the handle returned by add_tensor_input), "
+          "not a derived expression.",
+          m_name));
+    }
+    // The energy must actually depend on the strain, else ∂ψ/∂ε ≡ 0 emits an
+    // inert zero stress and tangent. Reject loudly (mirrors the residual-leaf
+    // guard) rather than ship a silently-null material.
+    LeafCollector lc;
+    lc.collect_t2s(energy);
+    bool depends = false;
+    for (auto const &leaf : lc.tensor_names())
+      if (leaf == strain_name) {
+        depends = true;
+        break;
+      }
+    if (!depends) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': the strain-energy passed to "
+          "add_hyperelastic_potential does not depend on strain '{}'; ∂ψ/∂{} "
+          "would be identically zero (an inert stress and tangent).",
+          m_name, strain_name, strain_name));
+    }
+    auto stress = cas::diff(energy, strain); // σ = ∂ψ/∂ε
+    add_output(stress_name, std::move(stress), roles::Stress);
+    // add_algorithmic_tangent validates AFTER add_output has committed; roll the
+    // stress output back on throw so a bad tangent_name leaves the model unchanged
+    // (strong exception guarantee) instead of half-registered.
+    try {
+      add_algorithmic_tangent(std::move(tangent_name), std::move(stress_name),
+                              std::move(strain_name)); // ∂σ/∂ε = ∂²ψ/∂ε²
+    } catch (...) {
+      m_outputs.pop_back();
+      throw;
+    }
+  }
+
   [[nodiscard]] auto algorithmic_tangent_enabled() const noexcept -> bool {
     return !m_tangents.empty();
   }
