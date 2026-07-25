@@ -324,10 +324,24 @@ inline void AlgorithmicTangentPass::run(PassContext &pctx) {
     return;
   }
 
-  // Resolve a tensor input variable (the strain ε) by name.
+  // Resolve a tensor input variable (the strain ε) by name. Only a declared
+  // tensor INPUT is a valid differentiation variable: `tensor_symbol_map()` also
+  // holds state-variable current/_old handles, which are NOT kinematic inputs, so
+  // exclude them (else a `wrt_input` naming a tensor state variable would be
+  // silently differentiated against instead of rejected). #118.
   auto find_tensor_input =
       [&](std::string const &nm)
       -> cas::expression_holder<cas::tensor_expression> const * {
+    bool is_input = false;
+    for (auto const &s : model_mut.inputs()) {
+      if (s.name == nm) {
+        is_input = true;
+        break;
+      }
+    }
+    if (!is_input) {
+      return nullptr;
+    }
     for (auto const &[name, expr] : model_mut.tensor_symbol_map()) {
       if (name == nm) {
         return &expr;
@@ -369,7 +383,8 @@ inline void AlgorithmicTangentPass::run(PassContext &pctx) {
     if (eps == nullptr) {
       throw std::runtime_error(std::format(
           "AlgorithmicTangentPass: tangent '{}' differentiates w.r.t. '{}', "
-          "which is not a declared tensor input.",
+          "which is not a declared tensor input (a state variable is not a "
+          "valid differentiation variable for a consistent tangent).",
           spec.name, spec.wrt_input));
     }
 

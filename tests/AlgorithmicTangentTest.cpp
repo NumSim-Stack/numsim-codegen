@@ -355,6 +355,20 @@ TEST(AlgorithmicTangent, UnknownStrainInputThrowsAtEmit) {
   EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
 }
 
+// #118: a tensor STATE VARIABLE is a registered tensor symbol (so it used to
+// resolve), but it is NOT a kinematic input — differentiating a consistent
+// tangent w.r.t. it is meaningless and must be rejected, not silently emitted.
+TEST(AlgorithmicTangent, StateVariableStrainInputRejectedAtEmit) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  auto h = m.add_tensor_state_variable(
+      "h", 3, 2, make_expression<tensor_zero>(std::size_t{3}, std::size_t{2}));
+  m.add_output("stress", eps, roles::Stress);
+  m.add_algorithmic_tangent("t", "stress", "h"); // "h" is a state var, not input
+  EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
+}
+
 // Locks the current rank-4 identity emission (PR #80 review, math finding Q3).
 // dσ/dε for σ = 2μ ε renders as 2μ · tmech::otimesu(eye,eye) — the
 // NON-symmetrized identity δ_ik δ_jl. Correct contracting against symmetric ε,
