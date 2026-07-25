@@ -48,29 +48,26 @@ T2 hand_written_S_nonlinear(T2 const &E) {
                      4.0 * kC * EE * E);
 }
 
-// True if the rank-4 tangent is MAJOR-symmetric: C_ijkl = C_klij.
+// True if the rank-4 tangent is MAJOR-symmetric: C_ijkl = C_klij. The pair-swap
+// is a tmech::basis_change with the (ij)↔(kl) permutation <3,4,1,2>; it's an
+// involution, so equality with the original is convention-independent.
 bool major_symmetric(T4 const &C, double tol = 1e-12) {
-  for (int i = 0; i < 3; ++i)
-    for (int j = 0; j < 3; ++j)
-      for (int k = 0; k < 3; ++k)
-        for (int l = 0; l < 3; ++l)
-          if (std::abs(C(i, j, k, l) - C(k, l, i, j)) > tol) return false;
-  return true;
+  return tmech::almost_equal(
+      C, tmech::eval(tmech::basis_change<tmech::sequence<3, 4, 1, 2>>(C)), tol);
 }
 
-// True if the tangent is MINOR-symmetric: C_ijkl = C_jikl = C_ijlk. This is the
-// property the symmetric (roles::Strain) leaf is supposed to confer — and, unlike
-// major symmetry (automatic for any Hessian), it can genuinely fail if the leaf's
-// symmetry space is dropped, so it's the load-bearing symmetry check here.
+// True if the tangent is MINOR-symmetric: C_ijkl = C_jikl = C_ijlk — the two
+// intra-pair swaps <2,1,3,4> and <1,2,4,3>. This is the property the symmetric
+// (roles::Strain) leaf confers; unlike major symmetry (automatic for any Hessian)
+// it can genuinely fail if the leaf's symmetry space is dropped, so it's the
+// load-bearing symmetry check here.
 bool minor_symmetric(T4 const &C, double tol = 1e-12) {
-  for (int i = 0; i < 3; ++i)
-    for (int j = 0; j < 3; ++j)
-      for (int k = 0; k < 3; ++k)
-        for (int l = 0; l < 3; ++l)
-          if (std::abs(C(i, j, k, l) - C(j, i, k, l)) > tol ||
-              std::abs(C(i, j, k, l) - C(i, j, l, k)) > tol)
-            return false;
-  return true;
+  return tmech::almost_equal(
+             C, tmech::eval(tmech::basis_change<tmech::sequence<2, 1, 3, 4>>(C)),
+             tol) &&
+         tmech::almost_equal(
+             C, tmech::eval(tmech::basis_change<tmech::sequence<1, 2, 4, 3>>(C)),
+             tol);
 }
 
 // 12 symmetric directions (a redundant, over-determined set — the symmetric
