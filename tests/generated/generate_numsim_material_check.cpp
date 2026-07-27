@@ -54,11 +54,11 @@ bool write_header(ConstitutiveModel const& model, char const* path) {
 } // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 10) {
+  if (argc < 11) {
     std::cerr << "usage: generate_numsim_material_check <linear.h> "
                  "<nonlinear.h> <viscoelastic.h> <returnmap.h> "
                  "<returnmapcubic.h> <j2return.h> <j2voce.h> <j2swift.h> "
-                 "<j2pathdep.h>\n";
+                 "<j2pathdep.h> <j2returnderived.h>\n";
     return 2;
   }
 
@@ -235,6 +235,30 @@ int main(int argc, char** argv) {
     j2swift.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
   }
 
+  // #108 plastic front-end: the SAME linear-hardening J2 return map as `j2`
+  // above, but DERIVED from physics via add_j2_radial_return. The author
+  // writes only the trial stress, the yield function f = ‖dev σ‖ − (σy + H·Δγ)
+  // against a bare stress placeholder, and the return coefficient 2G; the helper
+  // derives n = ∂f/∂σ, the consistency residual R(Δγ) = f(s_trial) − 2G·Δγ, the
+  // return-mapped stress σ = s_trial − 2G·Δγ·n, and wires the consistent tangent.
+  // The driver asserts this reproduces the hand-written `J2Return` step-for-step
+  // through the REAL backward_euler solver.
+  ConstitutiveModel j2d("J2ReturnDerived");
+  {
+    auto G = j2d.add_parameter("G", 80.0);
+    auto sy = j2d.add_parameter("sy", 1.0);
+    auto H = j2d.add_parameter("H", 10.0);
+    auto eps = j2d.add_tensor_input("strain", 3, 2, roles::Strain);
+    auto dg = j2d.add_scalar_state_variable(
+        "dgamma", make_expression<scalar_constant>(0.0));
+    // Bare stress placeholder — NOT a registered input; substituted out.
+    auto sig = make_expression<tensor>("sigma", 3, 2);
+    auto s_trial = (2.0 * G) * dev(eps);
+    auto yield = norm(dev(sig)) - (sy + H * dg.current); // f(σ, Δγ)
+    j2d.add_j2_radial_return(dg, s_trial, sig, yield, 2.0 * G, "stress",
+                                  "dstress_dstrain");
+  }
+
   if (!write_header(linear, argv[1])) return 1;
   if (!write_header(nonlinear, argv[2])) return 1;
   if (!write_header(viscoelastic, argv[3])) return 1;
@@ -244,5 +268,6 @@ int main(int argc, char** argv) {
   if (!write_header(j2voce, argv[7])) return 1;
   if (!write_header(j2swift, argv[8])) return 1;
   if (!write_header(j2pd, argv[9])) return 1;
+  if (!write_header(j2d, argv[10])) return 1;
   return 0;
 }
