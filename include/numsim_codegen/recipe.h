@@ -1710,6 +1710,54 @@ inline auto render_compute_function(
   }
   os << "inline void " << model.name() << "_compute(\n";
 
+  // issue #79: reject colliding parameter names on the POST-synthesis argument
+  // list — the single sound point to do so. The lowering passes synthesise
+  // outputs (`<sv>_residual` / `<sv>_jacobian`) and the renderer appends `_out`
+  // to every output / solved-state parameter, so the final identifier of a
+  // parameter is only knowable here, after passes have run. A user declaration
+  // that renders to the same identifier as another parameter (e.g. an input
+  // `x_out` vs the out-param for an output `x`; an input `<sv>_residual_out`
+  // vs the out-param for the synthesised `<sv>_residual`; a tangent `t` whose
+  // `t_out` aliases an input) would otherwise emit duplicate parameters —
+  // ill-formed C++ that only fails at the downstream compile. Checking the
+  // rendered identifiers (not guessed suffixes on the pristine recipe) is
+  // complete and free of false positives: it fires exactly when two parameters
+  // would share a name, whatever lowering path produced them.
+  {
+    auto arg_identifier = [](ArgSpec const &a) -> std::string {
+      switch (a.role) {
+      case ArgSpec::Role::TensorOutput:
+      case ArgSpec::Role::TensorTangentOutput:
+      case ArgSpec::Role::ScalarOutput:
+      case ArgSpec::Role::NewtonStateOut:
+        return a.name + "_out";
+      case ArgSpec::Role::TensorInput:
+      case ArgSpec::Role::ScalarParam:
+      case ArgSpec::Role::ScalarInput:
+      case ArgSpec::Role::StateOld:
+      case ArgSpec::Role::StateCurrentRead:
+      case ArgSpec::Role::TimeStep:
+        return a.name;
+      }
+      return a.name; // unreachable; all roles enumerated above
+    };
+    std::set<std::string> seen;
+    for (auto const &a : canonical_arguments(model)) {
+      auto id = arg_identifier(a);
+      if (!seen.insert(id).second) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': generated compute function would emit two "
+            "parameters named '{}'. This happens when a user symbol/output "
+            "renders to the same identifier as another parameter — most often a "
+            "declared name colliding with a generated out-parameter (`<name>_out`) "
+            "or with a synthesised residual/Jacobian output (`<state>_residual` / "
+            "`<state>_jacobian`). Rename the offending symbol, output, or state "
+            "variable.",
+            model.name(), id));
+      }
+    }
+  }
+
   // Signature built from the canonical argument list (issue #77) — the
   // exact order backends must reproduce in their call-sites.
   int tmpl_counter = 0;
