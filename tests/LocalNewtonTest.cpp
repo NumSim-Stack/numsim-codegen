@@ -109,7 +109,10 @@ TEST(LocalNewton, MaxIterReflectedInGeneratedLoop) {
           .emit(build_hardening_newton(NewtonOptions{.tol = 1e-12, .max_iter = 7}))
           .at(0)
           .contents;
-  EXPECT_NE(src.find("alpha_iter < 7;"), std::string::npos) << src;
+  // issue #85: the loop runs one pass past max_iter to check the final update's
+  // residual; the UPDATE is capped at max_iter by the `== 7` guard.
+  EXPECT_NE(src.find("alpha_iter <= 7;"), std::string::npos) << src;
+  EXPECT_NE(src.find("alpha_iter == 7"), std::string::npos) << src;
   EXPECT_NE(src.find("< 1e-12)"), std::string::npos) << src;
 }
 
@@ -139,6 +142,28 @@ TEST(LocalNewton, FailurePolicyThrowEmitsThrowScalar) {
   EXPECT_NE(src.find("throw std::runtime_error"), std::string::npos) << src;
   EXPECT_NE(src.find("did not converge"), std::string::npos) << src;
   EXPECT_EQ(src.find("quiet_NaN"), std::string::npos) << src;
+}
+
+// issue #85: the scalar path must not emit a scaffolding local that redeclares a
+// user symbol. A state variable `alpha` with an input literally named
+// `alpha_converged` (which the flag would otherwise reuse) must mangle the
+// scaffolding prefix, mirroring the coupled path.
+TEST(LocalNewton, ScalarScaffoldingAvoidsCollisionWithUserSymbol) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("Collide");
+  auto K = m.add_parameter("K", 1.0);
+  auto bad = m.add_scalar_input("alpha_converged"); // clashes with the flag
+  auto alpha =
+      m.add_scalar_state_variable("alpha", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(alpha, K * alpha.current);
+  m.add_output("y", bad); // reference the input so it is declared
+  m.enable_local_newton();
+  auto const src = m.emit_compute_function();
+  // The user input is a parameter; the scaffolding flag must be mangled away
+  // from it (no `bool alpha_converged` redeclaration of the param).
+  EXPECT_NE(src.find("double const alpha_converged"), std::string::npos) << src;
+  EXPECT_EQ(src.find("bool alpha_converged ="), std::string::npos) << src;
+  EXPECT_NE(src.find("alpha__converged"), std::string::npos) << src; // mangled
 }
 
 TEST(LocalNewton, DefaultPipelineStillEmitsResidualJacobianOutputs) {
