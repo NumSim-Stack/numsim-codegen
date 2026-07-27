@@ -482,12 +482,14 @@ inline void LocalNewtonLoweringPass::run(PassContext &pctx) {
       auto const i = members[0];
       auto jac = detail::build_backward_euler_jacobian(be[i]);
       pctx.newton_segments.push_back(NewtonSegment{
-          names[i], be[i].residual, std::move(jac), opts.tol, opts.max_iter});
+          names[i], be[i].residual, std::move(jac), opts.tol, opts.max_iter,
+          opts.on_failure == NewtonOptions::OnFailure::Throw});
     } else {
       // Coupled N×N system: residual vector + dense Jacobian ∂R_i/∂x_j.
       NewtonSystem sys;
       sys.tol = opts.tol;
       sys.max_iter = opts.max_iter;
+      sys.throw_on_failure = opts.on_failure == NewtonOptions::OnFailure::Throw;
       for (auto m : members) {
         sys.unknowns.push_back(names[m]);
         sys.residuals.push_back(be[m].residual);
@@ -535,7 +537,8 @@ inline void CodeEmitPass::run(PassContext &pctx) {
     auto j_rhs = pipeline.scalar().apply(seg.jacobian);
     newton.push_back(RenderedNewtonSegment{
         seg.state_var_name, ctx.render_statements("    "),
-        std::move(r_rhs), std::move(j_rhs), seg.tol, seg.max_iter});
+        std::move(r_rhs), std::move(j_rhs), seg.tol, seg.max_iter,
+        seg.throw_on_failure});
   }
   // Phase 3b-2b: render each COUPLED system. One reset() per system so the
   // residual vector + the whole N×N Jacobian share ONE set of loop-local CSE
@@ -550,6 +553,7 @@ inline void CodeEmitPass::run(PassContext &pctx) {
     r.unknowns = sys.unknowns;
     r.tol = sys.tol;
     r.max_iter = sys.max_iter;
+    r.throw_on_failure = sys.throw_on_failure;
     r.residual_rhs.reserve(sys.residuals.size());
     for (auto const &res : sys.residuals) {
       r.residual_rhs.push_back(pipeline.scalar().apply(res));

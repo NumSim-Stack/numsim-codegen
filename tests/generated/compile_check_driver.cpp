@@ -150,6 +150,22 @@ TEST(CompileCheckGenerated, NewtonSolveConvergesToAnalyticFixedPoint) {
   EXPECT_NEAR(sigma_y_out, 2.5, 1e-10);
 }
 
+// issue #85: a SINGULAR Jacobian must not silently write garbage. NewtonCheck's
+// residual R = (α − α_old)/dt − K·α has ∂R/∂α = 1/dt − K, which is exactly zero
+// when K·dt = 1. With a non-zero α_old the initial residual is non-zero, so the
+// solve needs a step it cannot take — the guarded update is non-finite, the loop
+// exits un-converged, and the default policy writes a quiet NaN (not a bogus
+// finite value the host would trust).
+TEST(CompileCheckGenerated, NewtonSolveSignalsSingularJacobianWithNaN) {
+  double const K = 10.0;
+  double const dt = 0.1; // K*dt = 1 ⇒ J = 1/dt - K = 0 (singular)
+  double sigma_y_out = 0.0;
+  double alpha_out = 0.0;
+  NewtonCheck_compute(K, /*alpha_old=*/1.0, dt, sigma_y_out, alpha_out);
+  EXPECT_TRUE(std::isnan(alpha_out))
+      << "singular-Jacobian solve must signal failure (NaN), got " << alpha_out;
+}
+
 TEST(CompileCheckGenerated, NewtonSolveHandlesZeroOldState) {
   // alpha_old = 0 ⇒ residual root is alpha* = 0; the initial guess IS the
   // root, so the convergence check breaks on iteration 0.

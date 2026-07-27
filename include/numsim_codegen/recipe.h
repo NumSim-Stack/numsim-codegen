@@ -257,13 +257,26 @@ struct UpdateEquation {
 
 // Phase 3a-2 (issue #75): tuning for the in-function Newton solve emitted
 // by LocalNewtonLoweringPass. `tol` is the absolute residual threshold for
-// convergence; `max_iter` caps the iteration count (no line search /
-// divergence detection in 3a-2 — a plain max-iter guard). Recipe-level for
-// now (uniform across all evolution equations); per-equation tuning can be
-// added when a real consumer needs it.
+// convergence; `max_iter` caps the iteration count. Recipe-level for now
+// (uniform across all evolution equations); per-equation tuning can be added
+// when a real consumer needs it.
 struct NewtonOptions {
+  // Failure policy (issue #85): what the generated solve does when it fails to
+  // converge — the loop exhausts `max_iter` without the residual reaching `tol`,
+  // OR the Newton step is non-finite (singular Jacobian). Without this the loop
+  // silently wrote back the last (un-converged) iterate, corrupting the host FE
+  // solve with no signal.
+  //   NaN   — write a quiet NaN to the failed state variable(s); it propagates
+  //           into every output derived from them, so the host detects a
+  //           non-finite result (MOOSE cutback-friendly — no throw in a QP loop).
+  //   Throw — throw std::runtime_error from the generated compute function
+  //           (clean for standalone drivers; unsafe inside a MOOSE QP loop).
+  // NaN is the default: universally detectable and safe on every backend.
+  enum class OnFailure { NaN, Throw };
+
   double tol = 1e-10;
   int max_iter = 50;
+  OnFailure on_failure = OnFailure::NaN;
 };
 
 // Declaration of a computed output that the generated function emits.
@@ -1529,6 +1542,34 @@ inline auto tensor_arg_count(RecipeView model) -> int {
   return n;
 }
 
+// issue #85: emit the post-loop failure action for a local Newton solve. Runs
+// after the loop, keyed on the `converged_flag` the loop sets true only on a
+// genuine `‖R‖ < tol` exit. On failure (max-iter exhausted or a singular
+// Jacobian broke the loop early) either throw, or poison every solved unknown
+// with a quiet NaN so the value propagates into all derived outputs and the
+// host detects a non-finite result. `descriptor` names the solve for the throw
+// message. Requires <cmath>/<limits> (NaN) and <stdexcept> (throw) in the
+// emitted TU — the self-contained targets include them.
+inline void emit_newton_failure_policy(std::ostream &os,
+                                       std::string const &converged_flag,
+                                       std::vector<std::string> const &unknowns,
+                                       bool throw_on_failure,
+                                       std::string const &model_name,
+                                       std::string const &descriptor) {
+  os << "  if (!" << converged_flag << ") {\n";
+  if (throw_on_failure) {
+    os << "    throw std::runtime_error(\"" << model_name
+       << ": local Newton for " << descriptor
+       << " did not converge (residual above tol after max_iter, or a "
+          "singular Jacobian).\");\n";
+  } else {
+    for (auto const &u : unknowns) {
+      os << "    " << u << " = std::numeric_limits<double>::quiet_NaN();\n";
+    }
+  }
+  os << "  }\n";
+}
+
 } // namespace detail
 
 // Phase 2.6 (issue #77): the single source of truth for the generated
@@ -1750,21 +1791,28 @@ inline auto render_compute_function(
   // Newton iteration segments first — they declare + solve the local
   // state-variable iterates that downstream output expressions reference.
   for (auto const &seg : newton) {
-    os << "  double " << seg.state_var_name << " = " << seg.state_var_name
-       << "_old;\n";
-    os << "  for (int " << seg.state_var_name << "_iter = 0; "
-       << seg.state_var_name << "_iter < " << seg.max_iter << "; ++"
-       << seg.state_var_name << "_iter) {\n";
+    auto const &sv = seg.state_var_name;
+    os << "  double " << sv << " = " << sv << "_old;\n";
+    // issue #85: track convergence so a max-iter exhaustion or a singular
+    // Jacobian is detected rather than silently writing the last iterate.
+    os << "  bool " << sv << "_converged = false;\n";
+    os << "  for (int " << sv << "_iter = 0; " << sv << "_iter < "
+       << seg.max_iter << "; ++" << sv << "_iter) {\n";
     os << seg.loop_local_decls; // already 4-indented, trailing newline
-    os << "    double " << seg.state_var_name << "_R = " << seg.residual_rhs
-       << ";\n";
-    os << "    double " << seg.state_var_name << "_J = " << seg.jacobian_rhs
-       << ";\n";
-    os << "    if (std::abs(" << seg.state_var_name << "_R) < " << seg.tol
-       << ") {\n      break;\n    }\n";
-    os << "    " << seg.state_var_name << " -= " << seg.state_var_name
-       << "_R / " << seg.state_var_name << "_J;\n";
+    os << "    double " << sv << "_R = " << seg.residual_rhs << ";\n";
+    os << "    double " << sv << "_J = " << seg.jacobian_rhs << ";\n";
+    os << "    if (std::abs(" << sv << "_R) < " << seg.tol << ") {\n      "
+       << sv << "_converged = true;\n      break;\n    }\n";
+    // A singular / ill-scaled Jacobian makes the update non-finite; stop rather
+    // than propagate inf/nan through further iterations. Near-singular-but-finite
+    // steps are caught by the convergence flag (the loop exhausts max_iter).
+    os << "    double " << sv << "_d = " << sv << "_R / " << sv << "_J;\n";
+    os << "    if (!std::isfinite(" << sv << "_d)) {\n      break;\n    }\n";
+    os << "    " << sv << " -= " << sv << "_d;\n";
     os << "  }\n";
+    detail::emit_newton_failure_policy(
+        os, sv + "_converged", {sv}, seg.throw_on_failure, model.name(),
+        "state variable '" + sv + "'");
   }
 
   // Phase 3b-2b: coupled N×N Newton systems. render owns the library-AGNOSTIC
@@ -1781,7 +1829,8 @@ inline auto render_compute_function(
   // `<out>_out`), checking the loop counter + every emitter suffix.
   if (!newton_systems.empty()) {
     auto suffixes = la.local_suffixes();
-    suffixes.emplace_back("iter"); // render's loop counter
+    suffixes.emplace_back("iter");      // render's loop counter
+    suffixes.emplace_back("converged"); // issue #85 convergence flag
     std::set<std::string> reserved_ids;
     for (auto const &[nm, _] : model.scalar_symbol_map())
       reserved_ids.insert(nm);
@@ -1805,12 +1854,20 @@ inline auto render_compute_function(
       for (auto const &u : sys.unknowns) {
         os << "  double " << u << " = " << u << "_old;\n";
       }
+      os << "  bool " << p << "_converged = false;\n"; // issue #85
       os << "  for (int " << p << "_iter = 0; " << p << "_iter < "
          << sys.max_iter << "; ++" << p << "_iter) {\n";
       os << sys.loop_local_decls; // shared CSE temps (4-indented)
       la.emit_newton_step(os, p, sys.unknowns, sys.residual_rhs,
-                          sys.jacobian_rhs, sys.tol);
+                          sys.jacobian_rhs, sys.tol, p + "_converged");
       os << "  }\n";
+      std::string desc = "coupled system {";
+      for (std::size_t i = 0; i < sys.unknowns.size(); ++i)
+        desc += (i ? ", " : "") + sys.unknowns[i];
+      desc += "}";
+      detail::emit_newton_failure_policy(os, p + "_converged", sys.unknowns,
+                                         sys.throw_on_failure, model.name(),
+                                         desc);
     }
   }
 

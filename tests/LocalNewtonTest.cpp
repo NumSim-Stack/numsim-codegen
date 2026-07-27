@@ -82,7 +82,13 @@ TEST(LocalNewton, EmitReplacesResidualJacobianOutputsWithLoop) {
 
   // The Newton loop is present.
   EXPECT_NE(src.find("for (int alpha_iter"), std::string::npos) << src;
-  EXPECT_NE(src.find("alpha -= alpha_R / alpha_J"), std::string::npos) << src;
+  // issue #85: the update is via a guarded step local (`alpha_d`), and the loop
+  // records convergence so a failure is detectable post-loop.
+  EXPECT_NE(src.find("double alpha_d = alpha_R / alpha_J"), std::string::npos)
+      << src;
+  EXPECT_NE(src.find("alpha -= alpha_d"), std::string::npos) << src;
+  EXPECT_NE(src.find("if (!std::isfinite(alpha_d))"), std::string::npos) << src;
+  EXPECT_NE(src.find("bool alpha_converged = false"), std::string::npos) << src;
   EXPECT_NE(src.find("double alpha = alpha_old"), std::string::npos) << src;
 
   // The state variable is an OUT-param, not a `double const` input (#60).
@@ -105,6 +111,34 @@ TEST(LocalNewton, MaxIterReflectedInGeneratedLoop) {
           .contents;
   EXPECT_NE(src.find("alpha_iter < 7;"), std::string::npos) << src;
   EXPECT_NE(src.find("< 1e-12)"), std::string::npos) << src;
+}
+
+// ─── issue #85: local-Newton failure policy ─────────────────────────────
+
+// Default policy is NaN-on-failure: a scalar solve that doesn't converge writes
+// a quiet NaN to its state, with no throw (MOOSE-QP-safe).
+TEST(LocalNewton, FailurePolicyDefaultsToNaNScalar) {
+  auto const src =
+      StandaloneCxxTarget{}.emit(build_hardening_newton()).at(0).contents;
+  EXPECT_NE(src.find("if (!alpha_converged)"), std::string::npos) << src;
+  EXPECT_NE(src.find("alpha = std::numeric_limits<double>::quiet_NaN()"),
+            std::string::npos)
+      << src;
+  EXPECT_EQ(src.find("throw std::runtime_error"), std::string::npos) << src;
+}
+
+// Throw policy: the same solve throws from the generated function instead.
+TEST(LocalNewton, FailurePolicyThrowEmitsThrowScalar) {
+  auto const src =
+      StandaloneCxxTarget{}
+          .emit(build_hardening_newton(NewtonOptions{
+              .on_failure = NewtonOptions::OnFailure::Throw}))
+          .at(0)
+          .contents;
+  EXPECT_NE(src.find("if (!alpha_converged)"), std::string::npos) << src;
+  EXPECT_NE(src.find("throw std::runtime_error"), std::string::npos) << src;
+  EXPECT_NE(src.find("did not converge"), std::string::npos) << src;
+  EXPECT_EQ(src.find("quiet_NaN"), std::string::npos) << src;
 }
 
 TEST(LocalNewton, DefaultPipelineStillEmitsResidualJacobianOutputs) {
@@ -163,6 +197,19 @@ auto build_coupled_pair() -> ConstitutiveModel {
 
 TEST(LocalNewton, CoupledSystemDetected) {
   EXPECT_TRUE(has_coupled_local_newton(build_coupled_pair()));
+}
+
+// issue #85: the coupled path signals failure too — NaN each unknown on
+// non-convergence (default policy), with a recorded convergence flag.
+TEST(LocalNewton, FailurePolicyDefaultIsNaNCoupled) {
+  auto const src = build_coupled_pair().emit_compute_function();
+  EXPECT_NE(src.find("_converged = false"), std::string::npos) << src;
+  EXPECT_NE(src.find("a = std::numeric_limits<double>::quiet_NaN()"),
+            std::string::npos)
+      << src;
+  EXPECT_NE(src.find("b = std::numeric_limits<double>::quiet_NaN()"),
+            std::string::npos)
+      << src;
 }
 
 TEST(LocalNewton, CoupledSystemEmitsSingleEigenSolve) {
@@ -295,7 +342,9 @@ TEST(LocalNewton, CoupledAndIndependentCoexist) {
   m.enable_local_newton();
   auto const src = m.emit_compute_function();
   EXPECT_NE(src.find("Eigen::Matrix<double, 2, 2>"), std::string::npos) << src;
-  EXPECT_NE(src.find("c -= c_R / c_J"), std::string::npos) << src; // scalar path
+  // scalar path for the independent unknown (issue #85: guarded step local).
+  EXPECT_NE(src.find("double c_d = c_R / c_J"), std::string::npos) << src;
+  EXPECT_NE(src.find("c -= c_d"), std::string::npos) << src;
 }
 
 // PR #83 review (MAJOR): a system-local must not collide with another unknown.

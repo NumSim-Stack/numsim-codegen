@@ -33,6 +33,9 @@ struct NewtonSegment {
   cas::expression_holder<cas::scalar_expression> jacobian;
   double tol;
   int max_iter;
+  // issue #85 failure policy, lowered from NewtonOptions::on_failure to a plain
+  // bool so pass.h needn't depend on recipe.h (true → throw, false → NaN).
+  bool throw_on_failure = false;
 };
 
 // Phase 3b-2b (issue #35): a COUPLED local Newton system of N>1 scalar unknowns.
@@ -59,6 +62,7 @@ struct NewtonSystem {
       jacobian; // N×N, row-major: jacobian[i][j] = ∂R_i/∂x_j
   double tol;
   int max_iter;
+  bool throw_on_failure = false; // issue #85 (true → throw, false → NaN)
 };
 
 // Shared state for a single PassManager invocation. Passes read the
