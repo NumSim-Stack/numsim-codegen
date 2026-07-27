@@ -326,6 +326,10 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name,
   os << "#include \"" << model.name() << ".h\"\n";
   os << "#include <tmech/tmech.h>\n";
   os << "#include <cmath>\n";
+  // issue #85: a failed local-Newton solve poisons its state with a quiet NaN
+  // (<limits>) or throws (<stdexcept>). Cheap standard headers — always emitted.
+  os << "#include <limits>\n";
+  os << "#include <stdexcept>\n";
   if (needs_spectral) {
     os << "#include <numsim_codegen/runtime/spectral.h>\n";
   }
