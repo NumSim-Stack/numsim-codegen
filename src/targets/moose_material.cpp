@@ -450,16 +450,26 @@ auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
   // that the MOOSE backend doesn't implement yet. Fail loudly rather
   // than silently emit a regular read.
   //
-  // NOTE: stateful *outputs* (is_stateful == true on an OutputDecl) are
-  // NOT guarded here. They are currently accepted silently and produce
-  // a regular non-stateful MaterialProperty write, which is semantically
-  // wrong for state-variable updates. Tracked in issue #15. When adding
-  // the output guard, mirror the pattern below.
+  // The check is symmetric over inputs AND outputs: a stateful *output*
+  // (e.g. `add_output("h_new", expr, roles::History)`) would otherwise be
+  // accepted silently and emit a regular non-stateful MaterialProperty
+  // write — semantically wrong for a state-variable update (no old/new
+  // pair, no stateful init). Guard both roles the same way (issue #15).
   for (auto const &i : model.inputs()) {
     if (i.role.is_stateful) {
       throw std::runtime_error(
           "MooseMaterialTarget: stateful role '" + i.role.name +
           "' on input '" + i.name +
+          "' requires the History machinery (old/new MaterialProperty pair, "
+          "stateful initialisation) which is not implemented in this phase. "
+          "See the numsim-codegen Phase B roadmap.");
+    }
+  }
+  for (auto const &o : model.outputs()) {
+    if (o.role.is_stateful) {
+      throw std::runtime_error(
+          "MooseMaterialTarget: stateful role '" + o.role.name +
+          "' on output '" + o.name +
           "' requires the History machinery (old/new MaterialProperty pair, "
           "stateful initialisation) which is not implemented in this phase. "
           "See the numsim-codegen Phase B roadmap.");
