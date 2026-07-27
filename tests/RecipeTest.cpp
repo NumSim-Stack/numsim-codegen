@@ -322,4 +322,79 @@ TEST(Recipe, HyperelasticPotentialRollsBackStressOutputOnBadTangentName) {
   EXPECT_EQ(m.outputs().size(), 1u);
 }
 
+// ── #108 add_j2_radial_return guards ────────────────────────────────────────
+
+namespace {
+// Build a well-formed J2 recipe up to (but not including) the helper call.
+struct J2Fixture {
+  ConstitutiveModel m{"J2"};
+  cas::expression_holder<cas::scalar_expression> G = m.add_parameter("G", 80.0);
+  cas::expression_holder<cas::scalar_expression> sy = m.add_parameter("sy", 1.0);
+  cas::expression_holder<cas::tensor_expression> eps =
+      m.add_tensor_input("strain", 3, 2, roles::Strain);
+  ConstitutiveModel::ScalarStateVariableHandle dg = m.add_scalar_state_variable(
+      "dgamma", cas::make_expression<cas::scalar_constant>(0.0));
+  cas::expression_holder<cas::tensor_expression> sig =
+      cas::make_expression<cas::tensor>("sigma", 3, 2);
+  cas::expression_holder<cas::tensor_expression> s_trial = 2.0 * G * dev(eps);
+};
+} // namespace
+
+TEST(Recipe, J2RadialReturnDerivesResidualStressAndTangent) {
+  using namespace numsim::cas;
+  J2Fixture f;
+  auto yield = norm(dev(f.sig)) - f.sy; // f = ‖dev σ‖ − σy
+  EXPECT_NO_THROW(f.m.add_j2_radial_return(f.dg, f.s_trial, f.sig, yield,
+                                           2.0 * f.G, "stress", "dstress"));
+  EXPECT_EQ(f.m.outputs().size(), 1u);          // stress
+  EXPECT_EQ(f.m.residual_equations().size(), 1u); // R(Δγ)
+  EXPECT_TRUE(f.m.algorithmic_tangent_enabled());
+}
+
+TEST(Recipe, J2RadialReturnRejectsRegisteredPlaceholder) {
+  using namespace numsim::cas;
+  J2Fixture f;
+  auto reg = f.m.add_tensor_input("sigma_in", 3, 2, roles::Other); // registered
+  auto yield = norm(dev(reg)) - f.sy;
+  EXPECT_THROW(f.m.add_j2_radial_return(f.dg, f.s_trial, reg, yield, 2.0 * f.G,
+                                        "stress", "dstress"),
+               std::runtime_error);
+}
+
+TEST(Recipe, J2RadialReturnRejectsStressIndependentYield) {
+  using namespace numsim::cas;
+  J2Fixture f;
+  auto yield = norm(dev(f.eps)) - f.sy; // depends on ε, not the placeholder σ
+  EXPECT_THROW(f.m.add_j2_radial_return(f.dg, f.s_trial, f.sig, yield, 2.0 * f.G,
+                                        "stress", "dstress"),
+               std::runtime_error);
+}
+
+// P3: a back-stress / second tensor input in the yield is not J2-reducible and
+// its coupling would be dropped from the single-input tangent — reject loudly.
+TEST(Recipe, J2RadialReturnRejectsBackStressInYield) {
+  using namespace numsim::cas;
+  J2Fixture f;
+  auto beta = f.m.add_tensor_input("beta", 3, 2, roles::Other); // back-stress
+  auto yield = norm(dev(f.sig) - beta) - f.sy; // kinematic-hardening form
+  EXPECT_THROW(f.m.add_j2_radial_return(f.dg, f.s_trial, f.sig, yield, 2.0 * f.G,
+                                        "stress", "dstress"),
+               std::runtime_error);
+}
+
+TEST(Recipe, J2RadialReturnRollsBackOnBadTangentName) {
+  using namespace numsim::cas;
+  J2Fixture f;
+  auto yield = norm(dev(f.sig)) - f.sy;
+  EXPECT_THROW(f.m.add_j2_radial_return(f.dg, f.s_trial, f.sig, yield, 2.0 * f.G,
+                                        "stress", "bad name"),
+               std::runtime_error);
+  // Both the stress output AND the residual equation must be rolled back.
+  EXPECT_EQ(f.m.outputs().size(), 0u) << "stress output must be rolled back";
+  EXPECT_EQ(f.m.residual_equations().size(), 0u)
+      << "residual equation must be rolled back";
+  EXPECT_NO_THROW(f.m.add_j2_radial_return(f.dg, f.s_trial, f.sig, yield,
+                                           2.0 * f.G, "stress", "dstress"));
+}
+
 } // namespace numsim::codegen
