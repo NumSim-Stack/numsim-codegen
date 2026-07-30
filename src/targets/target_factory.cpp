@@ -1,5 +1,6 @@
 #include <numsim_codegen/targets/target_factory.h>
 
+#include <numsim_codegen/targets/calculix_umat.h>
 #include <numsim_codegen/targets/moose_material.h>
 #include <numsim_codegen/targets/numsim_material.h>
 #include <numsim_codegen/targets/standalone_cxx.h>
@@ -11,8 +12,8 @@ namespace numsim::codegen {
 
 auto target_names() -> std::vector<std::string_view> const & {
   // Default first (kept in sync with make_target + default_target_name).
-  static std::vector<std::string_view> const names{"numsim_material",
-                                                   "standalone", "moose"};
+  static std::vector<std::string_view> const names{
+      "numsim_material", "standalone", "moose", "calculix"};
   return names;
 }
 
@@ -23,6 +24,7 @@ auto make_target(std::string_view name) -> std::unique_ptr<Target> {
   if (name == "numsim_material") return std::make_unique<NumSimMaterialTarget>();
   if (name == "standalone") return std::make_unique<StandaloneCxxTarget>();
   if (name == "moose") return std::make_unique<MooseMaterialTarget>();
+  if (name == "calculix") return std::make_unique<CalculiXUMATTarget>();
 
   std::string msg = "make_target: unknown target '";
   msg.append(name);

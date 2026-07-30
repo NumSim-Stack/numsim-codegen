@@ -27,6 +27,7 @@ boundary using tmech's adaptors (`full`, `voigt`, `abq_std`).
 |--------|--------|--------|
 | `StandaloneCxxTarget` | ✓ Phase A | Single inline header with the generic compute function |
 | `MooseMaterialTarget` | ✓ Phase A | `.h` + `.C` pair: Material class with `validParams`, constructor, `computeQpProperties` |
+| `CalculiXUMATTarget`  | ✓ elastic | `<Model>_umat.cpp`: `extern "C" umat_user_` (CalculiX native ABI) with a tmech `abq_std` Voigt boundary; validated by a real single-element `ccx` run (`examples/calculix/`) |
 | `AbaqusUMATTarget`    | planned | Fortran-callable `extern "C"` UMAT with Voigt boundary |
 | `AnsysUSERMATTarget`  | planned | Fortran-callable USERMAT |
 | `LSDynaUMATTarget`    | planned | LS-DYNA convention |

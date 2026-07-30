@@ -16,6 +16,7 @@ TEST(TargetFactory, ConstructsEachKnownTarget) {
   EXPECT_EQ(make_target("numsim_material")->target_name(), "NumSimMaterial");
   EXPECT_EQ(make_target("standalone")->target_name(), "StandaloneCxx");
   EXPECT_EQ(make_target("moose")->target_name(), "MooseMaterial");
+  EXPECT_EQ(make_target("calculix")->target_name(), "CalculiXUMAT");
 }
 
 TEST(TargetFactory, DefaultIsNumSimMaterial) {
@@ -27,7 +28,7 @@ TEST(TargetFactory, NamesListDefaultFirstAndAreAllConstructible) {
   auto const &names = target_names();
   // Pinned count: adding a target without updating the list (or vice-versa)
   // trips this — the cheap guard for the "three places, no enforcement" shape.
-  EXPECT_EQ(names.size(), 3u);
+  EXPECT_EQ(names.size(), 4u);
   ASSERT_FALSE(names.empty());
   EXPECT_EQ(names.front(), default_target_name);
   // Every advertised name must actually construct.

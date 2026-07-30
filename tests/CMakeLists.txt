@@ -33,6 +33,7 @@ add_executable(numsim_codegen_tests
     LinearAlgebraEmitterTest.cpp
     NumSimMaterialTargetTest.cpp
     TargetFactoryTest.cpp
+    CalculiXTargetTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests
@@ -230,6 +231,45 @@ else()
                    "${NUMSIM_MATERIALS_DIR} / ${NUMSIM_CORE_DIR} and "
                    "NUMSIM_CODEGEN_FETCH_MATERIALS=OFF")
 endif()
+
+# ─── CalculiX UMAT end-to-end gate (Phase 0 recipe + Phase 1 ABI) ────────────
+#
+# Emit full isotropic linear elasticity as (a) a StandaloneCxx header (for the
+# FD tangent + stress oracle) and (b) a CalculiXUMAT `umat_user` .cpp, then
+# compile a driver that calls the emitted `umat_user_` exactly as `ccx` would
+# and checks stre(6)/stiff(21) against an INDEPENDENT isotropic oracle. Proves
+# the abq_std Voigt boundary + column-major stiff packing with zero external
+# deps — the correctness lock behind the real `ccx` run (examples/calculix/).
+add_executable(generate_calculix_check
+    generated/generate_calculix_check.cpp)
+target_link_libraries(generate_calculix_check
+    PRIVATE numsim::codegen numsim_codegen_warnings)
+
+set(GENERATED_ELASTIC_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/LinearElastic.h)
+set(GENERATED_ELASTIC_UMAT
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/LinearElastic_umat.cpp)
+add_custom_command(
+    OUTPUT ${GENERATED_ELASTIC_HEADER} ${GENERATED_ELASTIC_UMAT}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${CMAKE_CURRENT_BINARY_DIR}/generated
+    COMMAND $<TARGET_FILE:generate_calculix_check>
+            ${GENERATED_ELASTIC_HEADER} ${GENERATED_ELASTIC_UMAT}
+    DEPENDS generate_calculix_check
+    COMMENT "Generating CalculiX UMAT + standalone header via numsim-codegen"
+    VERBATIM)
+
+add_executable(calculix_check_driver
+    generated/calculix_check_driver.cpp
+    ${GENERATED_ELASTIC_HEADER}
+    ${GENERATED_ELASTIC_UMAT})
+target_include_directories(calculix_check_driver
+    PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated
+            ${CMAKE_CURRENT_SOURCE_DIR}/support)
+target_link_libraries(calculix_check_driver
+    PRIVATE numsim::codegen numsim_codegen_warnings_light
+            GTest::gtest GTest::gtest_main)
+gtest_discover_tests(calculix_check_driver)
 
 # ─── Header-purity guard ───────────────────────────────────────────────────
 #
