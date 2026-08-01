@@ -1,9 +1,11 @@
 **
 ** Single C3D8 element, uniaxial-strain test of the codegen'd external (.so) material.
 **
-** The material is numsim-codegen's CalculiXUMATTarget output (LinearElastic_umat
-** .cpp), linked into ccx in place of the stock umat_user.f. CalculiX dispatches
-** to umat_user for any *MATERIAL whose NAME begins with `USER`.
+** The material is numsim-codegen's CalculiXExternalTarget output
+** (LinearElastic_ext.cpp) compiled to libLINEARELASTIC.so and loaded by ccx at
+** RUNTIME via dlopen — NO ccx recompile. The `@`-prefixed NAME below makes ccx
+** (which uppercases it) dlopen libLINEARELASTIC.so and dlsym NCG_UMAT. The two
+** constants below are passed to NCG_UMAT as MPROPS.
 **
 ** Lateral faces are fully confined (u_y=0 on y-faces, u_z=0 on z-faces) and the
 ** x1 face is pulled by 0.01 on a unit cube, so the strain is homogeneous

@@ -66,28 +66,38 @@ fi
 
 # ── Patch the ccx Makefile ───────────────────────────────────────────────────
 SRC="CalculiX/ccx_${CCX_VER}/src"
-#  * use system ARPACK/LAPACK/BLAS instead of the bundled ARPACK static lib, and
-#    link our generated umat object (the umat is C++/tmech);
-#  * drop the stock umat_user.f so our umat_user_ is the one that resolves.
-sed -i 's#^CC=cc#CC=gcc#' "$SRC/Makefile"
-sed -i 's#\.\./\.\./\.\./ARPACK/libarpack_INTEL\.a#umat_codegen.o -larpack -llapack -lblas#' "$SRC/Makefile"
-sed -i '/^umat_user\.f *\\$/d' "$SRC/Makefile.inc"
-# libstdc++ (needed by the C++ umat object) goes on the link COMMAND, not the
-# prerequisite LIBS: GNU make would try to resolve `-lstdc++` as a target file
-# and fail (no libstdc++.so under /usr/lib without -dev), while the linker
-# resolves it fine.
-sed -i 's#ccx_2.22.a $(LIBS) -fopenmp#ccx_2.22.a $(LIBS) -fopenmp -lstdc++#' "$SRC/Makefile"
-
-# ── Compile the generated umat_user_ (C++/tmech) into the ccx src dir ─────────
-echo "compiling generated umat ..."
-g++ -std=c++23 -O2 -c "$UMAT_CPP" -I"$TMECH_INC" -o "$SRC/umat_codegen.o"
-
-# ── Build ccx ────────────────────────────────────────────────────────────────
-echo "building ccx (this takes a while) ..."
-pushd "$SRC" >/dev/null
-make "ccx_${CCX_VER}" >ccx_build.log 2>&1 || { echo "ccx build FAILED:"; tail -30 ccx_build.log; exit 1; }
-popd >/dev/null
 CCX="$WORK/$SRC/ccx_${CCX_VER}"
+
+# assert a sed substitution actually changed the file (a ccx version bump would
+# otherwise silently no-op the patch and fail confusingly downstream).
+patch_or_die() { # <sed-expr> <file> <what>
+  local before; before="$(md5sum "$2")"
+  sed -i "$1" "$2"
+  [[ "$(md5sum "$2")" != "$before" ]] || { echo "ERROR: patch had no effect ($3) — ccx layout changed?"; exit 1; }
+}
+
+# Patch + build ONCE (guard makes the whole thing idempotent; the -lstdc++ sed
+# is intentionally not re-run, as its replacement contains its own pattern).
+if [[ ! -x "$CCX" ]]; then
+  echo "patching + building ccx (one-time) ..."
+  #  * use system ARPACK/LAPACK/BLAS instead of the bundled ARPACK static lib;
+  #  * link our generated umat object (C++/tmech);
+  #  * drop the stock umat_user.f so our umat_user_ resolves;
+  #  * -lstdc++ on the link COMMAND, not the prerequisite LIBS (GNU make can't
+  #    resolve -lstdc++ as a target file; the linker can).
+  patch_or_die 's#^CC=cc#CC=gcc#' "$SRC/Makefile" "CC=gcc"
+  patch_or_die 's#\.\./\.\./\.\./ARPACK/libarpack_INTEL\.a#umat_codegen.o -larpack -llapack -lblas#' "$SRC/Makefile" "ARPACK->system"
+  patch_or_die '/^umat_user\.f *\\$/d' "$SRC/Makefile.inc" "drop umat_user.f"
+  patch_or_die "s#ccx_${CCX_VER}.a \$(LIBS) -fopenmp#ccx_${CCX_VER}.a \$(LIBS) -fopenmp -lstdc++#" "$SRC/Makefile" "add -lstdc++"
+
+  echo "compiling generated umat ..."
+  g++ -std=c++23 -O2 -c "$UMAT_CPP" -I"$TMECH_INC" -o "$SRC/umat_codegen.o"
+
+  echo "building ccx (this takes a while) ..."
+  pushd "$SRC" >/dev/null
+  make "ccx_${CCX_VER}" >ccx_build.log 2>&1 || { echo "ccx build FAILED:"; tail -30 ccx_build.log; exit 1; }
+  popd >/dev/null
+fi
 [[ -x "$CCX" ]] || { echo "ERROR: ccx binary not produced"; exit 1; }
 echo "ccx built: $CCX"
 

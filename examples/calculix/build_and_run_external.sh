@@ -54,24 +54,32 @@ if [[ ! -f "SPOOLES.2.2/spooles.a" ]]; then
 fi
 
 SRC="CalculiX/ccx_${CCX_VER}/src"
-if [[ ! -x "$SRC/ccx_${CCX_VER}" ]]; then
+CCX="$WORK/$SRC/ccx_${CCX_VER}"
+
+# assert each sed actually changed the file — a ccx version bump would otherwise
+# silently no-op the patch (e.g. leave out -DCALCULIX_EXTERNAL_BEHAVIOURS_SUPPORT,
+# giving a ccx that can't find the .so with a confusing error).
+patch_or_die() { local before; before="$(md5sum "$2")"; sed -i "$1" "$2"; \
+  [[ "$(md5sum "$2")" != "$before" ]] || { echo "ERROR: patch had no effect ($3) — ccx layout changed?"; exit 1; }; }
+
+if [[ ! -x "$CCX" ]]; then
   echo "building ccx with external-behaviour support (one-time) ..."
   #  * enable the dlopen external-material path (external.c / call_external_umat_user.c);
   #  * link -ldl (dlopen) + system ARPACK/LAPACK/BLAS. The stock umat_user.f is kept.
-  sed -i 's#^CC=cc#CC=gcc#' "$SRC/Makefile"
-  sed -i 's#-DMATRIXSTORAGE -DNETWORKOUT#-DMATRIXSTORAGE -DNETWORKOUT -DCALCULIX_EXTERNAL_BEHAVIOURS_SUPPORT#' "$SRC/Makefile"
-  sed -i 's#\.\./\.\./\.\./ARPACK/libarpack_INTEL\.a#-larpack -llapack -lblas#' "$SRC/Makefile"
-  sed -i 's#ccx_2.22.a $(LIBS) -fopenmp#ccx_2.22.a $(LIBS) -fopenmp -ldl#' "$SRC/Makefile"
+  patch_or_die 's#^CC=cc#CC=gcc#' "$SRC/Makefile" "CC=gcc"
+  patch_or_die 's#-DMATRIXSTORAGE -DNETWORKOUT#-DMATRIXSTORAGE -DNETWORKOUT -DCALCULIX_EXTERNAL_BEHAVIOURS_SUPPORT#' "$SRC/Makefile" "enable external behaviours"
+  patch_or_die 's#\.\./\.\./\.\./ARPACK/libarpack_INTEL\.a#-larpack -llapack -lblas#' "$SRC/Makefile" "ARPACK->system"
+  patch_or_die "s#ccx_${CCX_VER}.a \$(LIBS) -fopenmp#ccx_${CCX_VER}.a \$(LIBS) -fopenmp -ldl#" "$SRC/Makefile" "add -ldl"
   pushd "$SRC" >/dev/null
   make "ccx_${CCX_VER}" >ccx_build.log 2>&1 || { echo "ccx build FAILED:"; tail -30 ccx_build.log; exit 1; }
   popd >/dev/null
 fi
-CCX="$WORK/$SRC/ccx_${CCX_VER}"
 echo "ccx (external-enabled): $CCX"
 
 # ── Compile the codegen'd material to a shared library (NO ccx recompile) ─────
 # ccx uppercases the deck name @<LIB>_NCG_UMAT → dlopen lib<LIB>.so, dlsym NCG_UMAT.
-LIB="LINEARELASTIC"
+# LIB must match library_name(model) in calculix_external.cpp (uppercase alnum).
+LIB="${LIB:-LINEARELASTIC}"
 echo "compiling lib${LIB}.so from generated source ..."
 g++ -std=c++23 -O2 -fPIC -shared "$EXT_CPP" -I"$TMECH_INC" -o "lib${LIB}.so"
 

@@ -21,11 +21,14 @@ adaptor, whose ordering `{11,22,33,12,13,23}` is exactly CalculiX's `emec` /
 
 ## Files
 
-* `uniaxial_c3d8.inp` — a single C3D8 element, laterally confined, x1-face pulled
-  by 0.01 on a unit cube → homogeneous uniaxial strain `ε = diag(0.01,0,0)`. The
-  material is `USERELAS` with `*USER MATERIAL, CONSTANTS=2` = `λ, μ` (1.3, 0.7).
-* `build_and_run.sh` — fetches + builds SPOOLES and `ccx` from source with the
-  generated material linked in, runs the deck, and checks the stress.
+* `uniaxial_c3d8.inp` — single C3D8, laterally confined, x1-face pulled by 0.01
+  on a unit cube → homogeneous uniaxial strain `ε = diag(0.01,0,0)`. Material
+  `USERELAS`, `*USER MATERIAL, CONSTANTS=2` = `λ, μ` (1.3, 0.7). Compiled-in path.
+* `uniaxial_c3d8_external.inp` — same test, external path (`NAME=@LINEARELASTIC_NCG_UMAT`).
+* `build_and_run.sh` — builds SPOOLES + `ccx` from source with the material
+  **linked in**, runs the deck, checks the stress (compiled-in path).
+* `build_and_run_external.sh` — builds `ccx` **once** with external support,
+  compiles the generated `.so`, runs the deck by `@`-name (no recompile).
 
 ## Two ways to run: compiled-in vs. external (dlopen)
 
@@ -78,13 +81,24 @@ this exactly at every integration point:
          ...   (all 8 integration points identical)
 ```
 
+## Shear-convention validation
+
+`uniaxial_c3d8*.inp` has zero shear, so it cannot tell tensorial from
+engineering shear. `simpleshear_c3d8_external.inp` applies `u_x = 0.01·y`
+(tensorial `ε₁₂ = 0.005`); a real `ccx` run gives **S₁₂ = 0.007 = 2μ·ε₁₂**,
+confirming the boundary reads/writes *tensorial* shear (`abq_std<3,false>`). Had
+it treated the strain as engineering, S₁₂ would be 0.014.
+
 ## What's tested where
 
 * **CI lock (no external deps):** `tests/generated/calculix_check_driver.cpp`
-  calls the emitted `umat_user_` exactly as CalculiX does for one integration
-  point and checks `stre`/`stiff` against an independent isotropic oracle, plus a
-  packing-order negative control. This is what proves the boundary on every
-  build; the real `ccx` run above is the end-to-end confirmation.
+  calls the emitted `umat_user_` **and** the external `NCG_UMAT` exactly as
+  CalculiX does for one integration point, checks `stre`/`stiff` against an
+  independent isotropic oracle, a packing-order negative control, the
+  read-constants-every-call regression, and the `icmd==3` stress-only path.
+* **Manual (not CI):** the `build_and_run*.sh` scripts and the decks above are
+  the end-to-end confirmation against a real `ccx` built from source; they are
+  run by hand (building ccx is too heavy for CI).
 
 ## Scope
 

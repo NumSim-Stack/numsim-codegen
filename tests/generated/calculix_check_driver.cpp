@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 
 // ── The emitted umat_user ABI (must match LinearElastic_umat.cpp exactly) ────
@@ -65,10 +66,13 @@ auto strain_tensor_from_emec(std::array<double, 6> const &e) -> T2 {
 }
 
 // Closed-form isotropic stress σ = λ·tr(ε)·I + 2μ·ε.
-auto isotropic_stress(T2 const &eps) -> T2 {
+auto isotropic_stress(T2 const &eps, double lambda, double mu) -> T2 {
   double const tr = eps(0, 0) + eps(1, 1) + eps(2, 2);
   T2 I = tmech::eye<double, 3, 2>();
-  return T2(kLambda * tr * I + 2.0 * kMu * eps);
+  return T2(lambda * tr * I + 2.0 * mu * eps);
+}
+auto isotropic_stress(T2 const &eps) -> T2 {
+  return isotropic_stress(eps, kLambda, kMu);
 }
 
 // Independent closed-form isotropic tangent packed into CalculiX's stiff(21):
@@ -88,14 +92,16 @@ auto expected_stiff_column_major() -> std::array<double, 21> {
 }
 
 // Call the emitted umat_user_ for one integration point with the given emec.
-// Fills stre(6) and stiff(21). icmd=1 requests stress + tangent.
+// Fills stre(6) and stiff(21). icmd_val=1 requests stress + tangent; 3 = stress
+// only (tangent must be left untouched). Constants default to kLambda/kMu.
 void call_umat(std::array<double, 6> const &emec_in, std::array<double, 6> &stre,
-               std::array<double, 21> &stiff) {
-  std::array<double, 2> elconloc{kLambda, kMu};
+               std::array<double, 21> &stiff, double lambda = kLambda,
+               double mu = kMu, int icmd_val = 1) {
+  std::array<double, 2> elconloc{lambda, mu};
   std::array<double, 6> emec = emec_in;
   // Dummies for the arguments the elastic umat ignores.
   char amat[80] = "USERLINEARELASTIC";
-  int iel = 1, iint = 1, kode = -102, icmd = 1, ielas = 0, mint_ = 1,
+  int iel = 1, iint = 1, kode = -102, icmd = icmd_val, ielas = 0, mint_ = 1,
       nstate_ = 0, iorien = 0, ipkon = 0, ithermal = 0;
   double emec0[6] = {}, beta[6] = {}, xokl[9] = {}, voj = 1.0, xkl[9] = {},
          vj = 1.0, t1l = 0.0, dtime = 1.0, time_[2] = {}, ttime = 0.0,
@@ -113,11 +119,12 @@ void call_umat(std::array<double, 6> const &emec_in, std::array<double, 6> &stre
 // exactly as ccx's dlopen path does. Native STANDARD interface: STRAN1=emec
 // tensorial, MPROPS=constants, DDSDDE=stiff(21).
 void call_ext(std::array<double, 6> const &emec_in, std::array<double, 6> &stre,
-              std::array<double, 21> &stiff) {
-  std::array<double, 2> mprops{kLambda, kMu};
+              std::array<double, 21> &stiff, double lambda = kLambda,
+              double mu = kMu, int icmd_val = 1) {
+  std::array<double, 2> mprops{lambda, mu};
   std::array<double, 6> stran1 = emec_in, stran0{}, beta{};
-  int iel = 1, iint = 1, nprops = -102, icmd = 1, ielas = 0, mi = 1, nstatv = 0,
-      iorien = 0, ipkon = 0, ithermal = 0;
+  int iel = 1, iint = 1, nprops = -102, icmd = icmd_val, ielas = 0, mi = 1,
+      nstatv = 0, iorien = 0, ipkon = 0, ithermal = 0;
   double f0[9] = {}, voj = 1.0, f1[9] = {}, vj = 1.0, temp1 = 0.0, dtime = 1.0,
          time_[2] = {}, ttime = 0.0, statev0 = 0.0, statev1 = 0.0, pgauss[3] = {},
          orab[7] = {}, pnewdt = 1.0;
@@ -277,5 +284,46 @@ TEST(CalculiXGate, ExternalMatchesCompiledInUmat) {
     call_umat(e, s_in, k_in);
     for (std::size_t i = 0; i < 6; ++i) EXPECT_DOUBLE_EQ(s_ext[i], s_in[i]);
     for (std::size_t i = 0; i < 21; ++i) EXPECT_DOUBLE_EQ(k_ext[i], k_in[i]);
+  }
+}
+
+// Regression (review CRITICAL): the external plugin must read MPROPS on EVERY
+// call. The earlier thread_local material cached the first call's constants, so
+// a second call on the same thread with different λ/μ silently returned the
+// first answer. Two back-to-back calls with different constants must both be
+// correct. (CalculiX legitimately varies the constants by temperature.)
+TEST(CalculiXGate, ExternalReadsConstantsEveryCall) {
+  std::array<double, 6> const e{{0.01, 0.0, 0.0, 0.0, 0.0, 0.0}};
+  std::array<double, 6> s1{}, s2{};
+  std::array<double, 21> k1{}, k2{};
+  call_ext(e, s1, k1, /*lambda=*/1.3, /*mu=*/0.7);
+  call_ext(e, s2, k2, /*lambda=*/0.5, /*mu=*/0.2); // same thread, new constants
+  // S11 = (λ+2μ)·0.01: 0.027 then 0.009 — must differ and both be correct.
+  EXPECT_NEAR(s1[0], (1.3 + 2 * 0.7) * 0.01, 1e-12);
+  EXPECT_NEAR(s2[0], (0.5 + 2 * 0.2) * 0.01, 1e-12);
+  EXPECT_GT(std::abs(s1[0] - s2[0]), 1e-6) << "constants not re-read per call";
+}
+
+// icmd==3 requests stress only: stress must still be correct, and stiff must be
+// left untouched. The call helpers pre-fill stiff with 0.0, so an untouched
+// stiff stays all-zero — whereas the icmd=1 path writes nonzero packed entries
+// (e.g. λ+2μ). Assert both to make "untouched" meaningful.
+TEST(CalculiXGate, StressOnlyIcmd3LeavesStiffUntouched) {
+  auto const &e = sample_strains().back();
+  T2 const sigma = isotropic_stress(strain_tensor_from_emec(e));
+  for (bool external : {false, true}) {
+    std::array<double, 6> stre{};
+    std::array<double, 21> stiff3{}, stiff1{};
+    if (external) {
+      call_ext(e, stre, stiff3, kLambda, kMu, /*icmd=*/3);
+      call_ext(e, stre, stiff1, kLambda, kMu, /*icmd=*/1);
+    } else {
+      call_umat(e, stre, stiff3, kLambda, kMu, /*icmd=*/3);
+      call_umat(e, stre, stiff1, kLambda, kMu, /*icmd=*/1);
+    }
+    EXPECT_NEAR(stre[0], sigma(0, 0), 1e-12); // stress still correct
+    for (std::size_t k = 0; k < 21; ++k)
+      EXPECT_DOUBLE_EQ(stiff3[k], 0.0) << "stiff written on icmd==3 at " << k;
+    EXPECT_GT(stiff1[0], 0.0) << "icmd==1 must fill stiff (control)";
   }
 }
