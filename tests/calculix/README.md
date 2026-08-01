@@ -12,16 +12,20 @@ ground truth, not a self-derived oracle.
 
 ## Layout
 
+The harness lives one level up (`tests/run_harness.py`) so it can span multiple
+solver families; `tests/calculix/` is the CalculiX family.
+
 ```
-tests/calculix/
-  run_harness.sh          # loops over materials: generate → compile .so → run ccx → diff
-  compare_dat.py          # field-by-field .dat diff
-  <material>/
-    recipe.cpp            # program that emits <Model>_ext.cpp (CalculiXExternalTarget)
-    <case>.inp            # deck using the @-codegen material
-    gold/
-      <case>.dat          # COMMITTED reference output from ccx's built-in material
-      gen_gold_<case>.inp # the built-in deck (*ELASTIC etc.) that produced the gold
+tests/
+  run_harness.py          # Python harness: loops families/materials → generate → run → diff
+  calculix/
+    compare_dat.py        # field-by-field .dat diff (CalculiX-specific)
+    <material>/
+      recipe.cpp          # program that emits <Model>_ext.cpp (CalculiXExternalTarget)
+      <case>.inp          # deck using the @-codegen material
+      gold/
+        <case>.dat        # COMMITTED reference output from ccx's built-in material
+        gen_gold_<case>.inp # the built-in deck (*ELASTIC etc.) that produced the gold
 ```
 
 Adding a material = a new folder with `recipe.cpp`, one or more `<case>.inp`, and
@@ -33,8 +37,8 @@ matching `gold/<case>.dat`. No harness changes.
 # 1. build numsim-codegen (provides libnumsim_codegen.a + the recipe deps)
 cmake -S . -B build && cmake --build build --target numsim_codegen
 # 2. build an external-enabled ccx once (see examples/calculix/build_and_run_external.sh)
-# 3. run the harness
-CCX=/path/to/ccx_2.22 tests/calculix/run_harness.sh
+# 3. run the harness (from the repo root)
+CCX=/path/to/ccx_2.22 python3 tests/run_harness.py
 ```
 
 Env: `CCX` (required, external-enabled), `CODEGEN_BUILD` (default `./build`),
