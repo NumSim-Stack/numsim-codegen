@@ -28,6 +28,14 @@ int main(int argc, char *argv[]) {
   using namespace numsim::cas;
   using namespace numsim::codegen;
 
+  // NOTE: the default values below are PLACEHOLDERS and are dead at runtime — the
+  // generated material reads its constants positionally from the deck's
+  // `*USER MATERIAL` (→ MPROPS), in this parameter declaration order (lambda,
+  // mu). The gold match is enforced by the deck constants + the gold's E/ν, not
+  // by these defaults. The manifest's negative-control case overrides the deck
+  // constants to prove the diff discriminates. (This recipe is intentionally a
+  // standalone fixture; a near-identical one lives in tests/generated/ for the
+  // in-repo compile-check gate.)
   ConstitutiveModel m("LinearElastic");
   auto lambda = m.add_parameter("lambda", 1.3, "First Lame parameter");
   auto mu = m.add_parameter("mu", 0.7, "Shear modulus");

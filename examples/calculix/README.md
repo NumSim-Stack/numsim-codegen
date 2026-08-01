@@ -38,7 +38,8 @@ Each test comes as a **pair** of decks that differ ONLY in the material — the
   laterally confined, x1-face pulled by 0.01 → uniaxial strain `ε=diag(0.01,0,0)`.
 * `simpleshear_c3d8_external.inp` / `simpleshear_c3d8_builtin.inp` — simple shear
   (tensorial ε₁₂=0.005); also pins the shear convention (see below).
-* `compare_dat.py` — diffs every numeric field of two ccx `.dat` files.
+* the diff is done by `tests/calculix/compare_dat.py` (single source of truth,
+  shared with the test harness).
 * `build_and_run_external.sh` — builds SPOOLES + `ccx` **once** with external
   support, compiles the generated `.so`, and runs each gold/test pair through ccx,
   comparing field-by-field.

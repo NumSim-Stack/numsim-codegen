@@ -100,6 +100,6 @@ for case in uniaxial simpleshear; do
   echo "=== $case: gold (*ELASTIC) vs test (@ codegen .so) ==="
   run_ccx "$HERE/${case}_c3d8_builtin.inp"  "gold_${case}.dat"
   run_ccx "$HERE/${case}_c3d8_external.inp" "test_${case}.dat"
-  python3 "$HERE/compare_dat.py" "gold_${case}.dat" "test_${case}.dat" || status=1
+  python3 "$REPO/tests/calculix/compare_dat.py" "gold_${case}.dat" "test_${case}.dat" || status=1
 done
 exit $status
