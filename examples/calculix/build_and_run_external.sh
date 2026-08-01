@@ -23,7 +23,6 @@ set -euo pipefail
 CCX_VER=2.22
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-INP="$HERE/uniaxial_c3d8_external.inp"
 WORK="${1:-$REPO/build/ccx_external}"
 
 EXT_CPP="${EXT_CPP:-$REPO/build/tests/generated/LinearElastic_ext.cpp}"
@@ -83,28 +82,24 @@ LIB="${LIB:-LINEARELASTIC}"
 echo "compiling lib${LIB}.so from generated source ..."
 g++ -std=c++23 -O2 -fPIC -shared "$EXT_CPP" -I"$TMECH_INC" -o "lib${LIB}.so"
 
-# ── Run the deck (ccx dlopen's the .so at runtime) ───────────────────────────
-cp "$INP" job.inp
-echo "running ccx (external .so) ..."
-LD_LIBRARY_PATH="$WORK" "$CCX" job >ccx_run.log 2>&1 || { echo "ccx run FAILED:"; tail -30 ccx_run.log; exit 1; }
+# ── Gold comparison: our .so vs CalculiX's OWN built-in *ELASTIC ──────────────
+# For each test (uniaxial, shear) run two decks that differ ONLY in the material:
+# the built-in *ELASTIC (gold) and our @-material (test), then diff every field
+# of the .dat. A pass means the codegen material reproduces ccx's own elasticity
+# — independent ground truth, not a self-derived oracle.
+run_ccx() { # <deck> <out.dat>
+  cp "$1" job.inp
+  LD_LIBRARY_PATH="$WORK" "$CCX" job >ccx_run.log 2>&1 \
+    || { echo "ccx run FAILED on $1:"; tail -30 ccx_run.log; exit 1; }
+  cp job.dat "$2"
+}
 
-echo
-echo "=== stresses (job.dat) ==="
-awk '/stress/{f=1} f&&NF>=8{print} /displacements/{f=0}' job.dat | head -9 || true
-echo
-python3 - "$WORK/job.dat" <<'PY'
-import re, sys, statistics as st
-rows=[]; cap=False
-for line in open(sys.argv[1]):
-    if 'stress' in line.lower(): cap=True; continue
-    if cap:
-        n=re.findall(r'[-+0-9.eE]+', line)
-        if len(n)>=8: rows.append([float(x) for x in n[-6:]])
-        elif rows: break
-if not rows: print("FAIL: no stress rows"); sys.exit(1)
-sxx=st.mean(r[0] for r in rows); syy=st.mean(r[1] for r in rows); szz=st.mean(r[2] for r in rows)
-ok = abs(sxx-0.027)<1e-4 and abs(syy-0.013)<1e-4 and abs(szz-0.013)<1e-4
-print(f"S11={sxx:.6f} (expect 0.027)  S22={syy:.6f} S33={szz:.6f} (expect 0.013)")
-print("RESULT:", "PASS - codegen'd .so ran in CalculiX via dlopen (no recompile)" if ok else "FAIL")
-sys.exit(0 if ok else 1)
-PY
+status=0
+for case in uniaxial simpleshear; do
+  echo
+  echo "=== $case: gold (*ELASTIC) vs test (@ codegen .so) ==="
+  run_ccx "$HERE/${case}_c3d8_builtin.inp"  "gold_${case}.dat"
+  run_ccx "$HERE/${case}_c3d8_external.inp" "test_${case}.dat"
+  python3 "$HERE/compare_dat.py" "gold_${case}.dat" "test_${case}.dat" || status=1
+done
+exit $status

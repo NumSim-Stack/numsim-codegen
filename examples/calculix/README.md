@@ -31,20 +31,27 @@ from `MPROPS` on **every** call (ccx interpolates them by temperature).
 
 ## Files
 
-* `uniaxial_c3d8_external.inp` — single C3D8, laterally confined, x1-face pulled
-  by 0.01 on a unit cube → homogeneous uniaxial strain `ε = diag(0.01,0,0)`.
-  Material `@LINEARELASTIC_NCG_UMAT`, `*USER MATERIAL, CONSTANTS=2` = `λ, μ`.
-* `simpleshear_c3d8_external.inp` — simple shear (tensorial ε₁₂=0.005); validates
-  the shear convention (see below).
+Each test comes as a **pair** of decks that differ ONLY in the material — the
+`@`-material (our `.so`) and CalculiX's own built-in `*ELASTIC` (the gold):
+
+* `uniaxial_c3d8_external.inp` / `uniaxial_c3d8_builtin.inp` — single C3D8,
+  laterally confined, x1-face pulled by 0.01 → uniaxial strain `ε=diag(0.01,0,0)`.
+* `simpleshear_c3d8_external.inp` / `simpleshear_c3d8_builtin.inp` — simple shear
+  (tensorial ε₁₂=0.005); also pins the shear convention (see below).
+* `compare_dat.py` — diffs every numeric field of two ccx `.dat` files.
 * `build_and_run_external.sh` — builds SPOOLES + `ccx` **once** with external
-  support, compiles the generated `.so`, runs the deck by `@`-name, checks stress.
+  support, compiles the generated `.so`, and runs each gold/test pair through ccx,
+  comparing field-by-field.
+
+The `*ELASTIC` gold uses `E=1.855, ν=0.325`, the exact equivalent of the codegen
+material's `λ=1.3, μ=0.7`.
 
 ## Run it
 
 ```sh
 # generate the material (part of the calculix_check_driver gate build)
 cmake --build build --target calculix_check_driver
-# build ccx once with external support, emit lib<MODEL>.so, run by @-name
+# build ccx once, run our .so vs CalculiX's built-in *ELASTIC, diff the fields
 examples/calculix/build_and_run_external.sh
 ```
 
@@ -58,15 +65,18 @@ target file).
 
 ## Verified result
 
-For `λ=1.3, μ=0.7, ε₁₁=0.01` the closed-form uniaxial-strain stress is
-`S₁₁=(λ+2μ)·ε₁₁=0.027`, `S₂₂=S₃₃=λ·ε₁₁=0.013`. A real `ccx 2.22` run of the
-codegen'd `.so` reproduces this exactly at every integration point:
+The codegen'd `.so` reproduces CalculiX's own built-in `*ELASTIC` **bit-for-bit**
+— every field of the `.dat` (stresses, strains, displacements) matches to `0.0`
+for both the uniaxial and shear tests:
 
 ```
- stresses (elem, integ.pnt.,sxx,syy,szz,sxy,sxz,syz) for set EALL
-         1   1  2.700000E-02  1.300000E-02  1.300000E-02  0.0  0.0  0.0
-         ...   (all 8 integration points identical)
+=== uniaxial: gold (*ELASTIC) vs test (@ codegen .so) ===
+160 fields compared; max_abs=0.00e+00 max_rel=0.00e+00 ... RESULT: PASS
+=== simpleshear: gold (*ELASTIC) vs test (@ codegen .so) ===
+128 fields compared; max_abs=0.00e+00 max_rel=0.00e+00 ... RESULT: PASS
 ```
+
+(For reference the uniaxial stress is `S₁₁=(λ+2μ)·ε₁₁=0.027`, `S₂₂=S₃₃=0.013`.)
 
 ## Shear-convention validation
 
@@ -83,9 +93,10 @@ it treated the strain as engineering, S₁₂ would be 0.014.
   for one integration point, checks `stre`/`stiff` against an independent
   isotropic oracle, a packing-order negative control, the
   read-constants-every-call regression, and the `icmd==3` stress-only path.
-* **Manual (not CI):** `build_and_run_external.sh` + the decks are the
-  end-to-end confirmation against a real `ccx` built from source; run by hand
-  (building ccx is too heavy for CI).
+* **Manual (not CI):** `build_and_run_external.sh` is the end-to-end
+  confirmation against a real `ccx` built from source — it diffs our `.so`
+  against CalculiX's own `*ELASTIC` (independent ground truth, not a self-derived
+  oracle). Run by hand (building ccx is too heavy for CI).
 
 ## Scope
 
