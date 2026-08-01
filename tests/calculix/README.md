@@ -20,6 +20,7 @@ tests/
   run_harness.py          # Python harness: loops families/materials → generate → run → diff
   calculix/
     compare_dat.py        # field-by-field .dat diff (single source of truth)
+    build_ccx.sh          # build the external-enabled ccx once (prints $CCX)
     <material>/
       tests.json          # manifest: which cases to run + per-case config
       recipe.cpp          # program that emits <Model>_ext.cpp (CalculiXExternalTarget)
@@ -62,9 +63,10 @@ No harness changes.
 ```sh
 # 1. build numsim-codegen (provides libnumsim_codegen.a + the recipe deps)
 cmake -S . -B build && cmake --build build --target numsim_codegen
-# 2. build an external-enabled ccx once (see examples/calculix/build_and_run_external.sh)
+# 2. build an external-enabled ccx once (fetches + builds SPOOLES + ccx)
+CCX=$(tests/calculix/build_ccx.sh)
 # 3. run the harness (from the repo root)
-CCX=/path/to/ccx_2.22 python3 tests/run_harness.py
+CCX="$CCX" python3 tests/run_harness.py
 ```
 
 Env: `CCX` (required; `--require-ccx` makes an unset `CCX` a failure instead of a
@@ -93,5 +95,3 @@ solver noise, well under `abs_tol`.)
   field count + per-field tolerance).
 - More materials (`j2_plasticity`, …) once the stateful path lands; a shared
   `generate`-stage + per-family strategy once a 2nd solver family arrives.
-- Retire the ad-hoc `examples/calculix/` scripts once the ccx-builder is promoted
-  into the harness.
