@@ -6,27 +6,27 @@ materials, run through the real solver, by diffing against committed gold files.
 Lives at tests/ level so it can span multiple solver families — currently
 `tests/calculix/`, with room for more subfolders later.
 
-Each material folder carries a `tests.json` manifest listing the cases to run:
+Each material folder carries a `tests.json` manifest. A test is always the same
+operation — run the generated material via its input deck and compare to gold —
+and each test defines its own tolerance parameter set (abs_tol, rel_tol):
 
     {
-      "abs_tol": 1e-8, "rel_tol": 1e-6,
       "cases": [
-        {"name": "uniaxial", "deck": "uniaxial.inp",
-         "gold": "gold/uniaxial.dat", "gold_deck": "gold/gen_gold_uniaxial.inp"},
-        {"name": "neg", "deck": "uniaxial.inp", "gold": "gold/uniaxial.dat",
-         "constants": [1.9, 0.7], "expect": "fail"}
+        {"name": "uniaxial", "deck": "uniaxial.inp", "gold": "gold/uniaxial.dat",
+         "gold_deck": "gold/gen_gold_uniaxial.inp", "abs_tol": 1e-8, "rel_tol": 1e-6},
+        {"name": "shear", "deck": "shear.inp", "gold": "gold/shear.dat",
+         "gold_deck": "gold/gen_gold_shear.inp", "abs_tol": 1e-8, "rel_tol": 1e-6}
       ]
     }
 
-Per case: `deck` (the @-material deck), `gold` (committed reference), optional
-`gold_deck` (the built-in deck that produced the gold — used by --regen-gold),
-optional `constants` (override the deck's *USER MATERIAL values — parametric /
-negative-control tests), optional per-case `abs_tol`/`rel_tol`, and `expect`
-("pass" default; "fail" inverts — a negative control passes iff the diff fails).
+Per case: `deck` (the @-material input deck), `gold` (committed reference),
+`gold_deck` (the built-in deck that produced the gold — run by --regen-gold), and
+`abs_tol`/`rel_tol` (this test's tolerance parameter set; manifest-level values
+are the fallback).
 
 The CalculiX family generates each material on the fly (compiles `recipe.cpp`
-against numsim::codegen), builds one lib<LIB>.so per material, runs each case
-deck through `ccx`, and diffs the .dat against the gold via compare_dat.py.
+against numsim::codegen), builds one lib<LIB>.so per material, runs each case deck
+through `ccx`, and diffs the .dat against the gold via compare_dat.py.
 
 Env: CCX (required for the calculix family — a ccx built with
 -DCALCULIX_EXTERNAL_BEHAVIOURS_SUPPORT), CODEGEN_BUILD (default ../build), and
@@ -76,20 +76,6 @@ def have(exe: str) -> bool:
     return shutil.which(exe) is not None or Path(exe).is_file()
 
 
-def patch_user_material(text: str, constants: list[float]) -> str:
-    """Replace the *USER MATERIAL data line with `constants` (parametric tests)."""
-    lines = text.splitlines()
-    for i, line in enumerate(lines):
-        if line.strip().upper().startswith("*USER MATERIAL"):
-            j = i + 1
-            while j < len(lines) and lines[j].lstrip().startswith("**"):
-                j += 1
-            if j < len(lines):
-                lines[j] = ", ".join(repr(float(c)) for c in constants)
-            break
-    return "\n".join(lines) + "\n"
-
-
 def ccx_run(ccx: str, work: Path, deck_text: str, so_dir: Path | None) -> str | None:
     """Run ccx on `deck_text` in `work`. Returns None on success, else an error."""
     (work / "job.inp").write_text(deck_text)
@@ -137,7 +123,8 @@ def compile_generator(recipe: Path, out: Path, cxx: str, inc: list[Path],
 
 
 def regen_gold(root: Path, ccx: str) -> int:
-    """Re-run each case's gold_deck (built-in material) → overwrite its gold."""
+    """Re-run each case's gold_deck (built-in material, with `gold_constants`) →
+    overwrite its committed gold. This is what locks gold provenance."""
     failed = 0
     for matdir in sorted(p for p in root.iterdir() if (p / "tests.json").is_file()):
         manifest = json.loads((matdir / "tests.json").read_text())
@@ -145,6 +132,7 @@ def regen_gold(root: Path, ccx: str) -> int:
             gd = case.get("gold_deck")
             gold = case.get("gold")
             if not gd or not gold:
+                print(f"  {matdir.name}/{case['name']}: no gold_deck/gold — skipped")
                 continue
             gdeck = matdir / gd
             if not gdeck.is_file():
@@ -253,18 +241,16 @@ def run_calculix_family(root: Path, args: argparse.Namespace) -> Tally:
                 gold = matdir / case["gold"]
                 abs_tol = case.get("abs_tol", d_abs)
                 rel_tol = case.get("rel_tol", d_rel)
-                expect_fail = case.get("expect") == "fail"
                 if not deck.is_file():
                     print(f"  {name}: FAIL — deck {case['deck']} missing")
                     t.add(False)
                     continue
                 if not gold.is_file():
-                    print(f"  {name}: FAIL — gold {case['gold']} missing")
+                    print(f"  {name}: FAIL — gold {case['gold']} missing "
+                          f"(run --regen-gold)")
                     t.add(False)
                     continue
                 text = deck.read_text()
-                if "constants" in case:
-                    text = patch_user_material(text, case["constants"])
                 m = LIB_RE.search(text)
                 if not m:
                     print(f"  {name}: FAIL — deck has no @<LIB>_NCG_UMAT name")
@@ -279,14 +265,12 @@ def run_calculix_family(root: Path, args: argparse.Namespace) -> Tally:
                     print(f"  {name}: FAIL — {err}")
                     t.add(False)
                     continue
+                # a test is always: generated-via-input vs gold.
                 c = sh([sys.executable, str(root / "compare_dat.py"),
                         str(gold), str(work / "job.dat"),
                         "--abs-tol", repr(abs_tol), "--rel-tol", repr(rel_tol)])
-                matched = c.returncode == 0
-                ok = (not matched) if expect_fail else matched
-                tag = "PASS" if ok else "FAIL"
-                extra = " (negative control: expected mismatch)" if expect_fail else ""
-                print(f"  {name}: {tag}{extra}")
+                ok = c.returncode == 0
+                print(f"  {name}: {'PASS' if ok else 'FAIL'}")
                 if not ok:
                     sys.stdout.write("    " +
                                      (c.stdout + c.stderr).strip().replace("\n", "\n    ")

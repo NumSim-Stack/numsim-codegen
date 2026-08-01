@@ -31,28 +31,27 @@ tests/
 
 ## The manifest (`tests.json`)
 
-Each material folder declares its cases — this is where you choose which tests run
-and set per-test parameters:
+Each material folder declares its cases — which tests run, and each test's
+parameter set (its tolerances). A test is always the same operation: run the
+generated material via its input deck and compare to gold.
 
 ```json
 {
-  "abs_tol": 1e-8, "rel_tol": 1e-6,
   "cases": [
-    {"name": "uniaxial", "deck": "uniaxial.inp",
-     "gold": "gold/uniaxial.dat", "gold_deck": "gold/gen_gold_uniaxial.inp"},
-    {"name": "neg", "deck": "uniaxial.inp", "gold": "gold/uniaxial.dat",
-     "constants": [1.9, 0.7], "expect": "fail"}
+    {"name": "uniaxial", "deck": "uniaxial.inp", "gold": "gold/uniaxial.dat",
+     "gold_deck": "gold/gen_gold_uniaxial.inp", "abs_tol": 1e-8, "rel_tol": 1e-6},
+    {"name": "shear", "deck": "shear.inp", "gold": "gold/shear.dat",
+     "gold_deck": "gold/gen_gold_shear.inp", "abs_tol": 1e-8, "rel_tol": 1e-6}
   ]
 }
 ```
 
-Per case: `deck` (the @-material deck), `gold` (committed reference), optional
-`gold_deck` (built-in deck that produced the gold — used by `--regen-gold`),
-optional `constants` (override the deck's `*USER MATERIAL` values → parametric /
-negative-control tests), optional per-case `abs_tol`/`rel_tol`, and `expect`
-(`"pass"` default; `"fail"` inverts — a negative control passes iff the diff
-fails). A declared case that can't run (missing deck/gold) is a **failure**, not a
-silent skip; a run that executes zero cases exits nonzero.
+Per case: `deck` (the @-material input deck), `gold` (committed reference),
+`gold_deck` (the built-in deck that produced the gold — run by `--regen-gold`),
+and `abs_tol`/`rel_tol` (this test's tolerance parameter set; manifest-level
+values, if given, are the fallback). A declared case that can't run (missing
+deck/gold) is a **failure**, not a silent skip; a run that executes zero cases
+exits nonzero.
 
 Adding a material = a new folder with `tests.json` + `recipe.cpp` + decks + gold.
 No harness changes.
