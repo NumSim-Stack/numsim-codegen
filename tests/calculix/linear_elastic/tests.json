@@ -1,0 +1,28 @@
+{
+  "description": "Isotropic linear elasticity  sigma = lambda*tr(eps)*I + 2*mu*eps  (lambda=1.3, mu=0.7). Gold is CalculiX's own built-in *ELASTIC (E=1.855, nu=0.325).",
+  "abs_tol": 1e-8,
+  "rel_tol": 1e-6,
+  "cases": [
+    {
+      "name": "uniaxial",
+      "deck": "uniaxial.inp",
+      "gold": "gold/uniaxial.dat",
+      "gold_deck": "gold/gen_gold_uniaxial.inp"
+    },
+    {
+      "name": "shear",
+      "deck": "shear.inp",
+      "gold": "gold/shear.dat",
+      "gold_deck": "gold/gen_gold_shear.inp",
+      "doc": "pins the tensorial shear convention (abq_std<3,false>): S12 = 2*mu*eps12."
+    },
+    {
+      "name": "uniaxial_negative_control",
+      "deck": "uniaxial.inp",
+      "gold": "gold/uniaxial.dat",
+      "constants": [1.9, 0.7],
+      "expect": "fail",
+      "doc": "override the deck's *USER MATERIAL constants with a wrong lambda; the result must NOT match the gold, proving the diff actually discriminates."
+    }
+  ]
+}
