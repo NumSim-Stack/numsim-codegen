@@ -13,16 +13,17 @@ and each test defines its own tolerance parameter set (abs_tol, rel_tol):
     {
       "cases": [
         {"name": "uniaxial", "deck": "uniaxial.inp", "gold": "gold/uniaxial.dat",
-         "gold_deck": "gold/gen_gold_uniaxial.inp", "abs_tol": 1e-8, "rel_tol": 1e-6},
+         "gold_deck": "gold/gen_gold_uniaxial.inp"},
         {"name": "shear", "deck": "shear.inp", "gold": "gold/shear.dat",
-         "gold_deck": "gold/gen_gold_shear.inp", "abs_tol": 1e-8, "rel_tol": 1e-6}
+         "gold_deck": "gold/gen_gold_shear.inp"}
       ]
     }
 
 Per case: `deck` (the @-material input deck), `gold` (committed reference),
 `gold_deck` (the built-in deck that produced the gold — run by --regen-gold), and
-`abs_tol`/`rel_tol` (this test's tolerance parameter set; manifest-level values
-are the fallback).
+optional `abs_tol`/`rel_tol`. Tolerances default to DEFAULT_ABS_TOL /
+DEFAULT_REL_TOL; a manifest-level `abs_tol`/`rel_tol` overrides them for a whole
+material, and a per-case value overrides that.
 
 The CalculiX family generates each material on the fly (compiles `recipe.cpp`
 against numsim::codegen), builds one lib<LIB>.so per material, runs each case deck
@@ -54,6 +55,11 @@ from pathlib import Path
 TESTS_DIR = Path(__file__).resolve().parent
 REPO = TESTS_DIR.parent
 LIB_RE = re.compile(r"@([A-Za-z0-9]+)_NCG_UMAT", re.IGNORECASE)
+
+# Default comparison tolerances. Cases inherit these unless they set their own;
+# a manifest-level "abs_tol"/"rel_tol" overrides these for a whole material.
+DEFAULT_ABS_TOL = 1e-8
+DEFAULT_REL_TOL = 1e-6
 
 
 class Tally:
@@ -193,8 +199,8 @@ def run_calculix_family(root: Path, args: argparse.Namespace) -> Tally:
               f"{'─' * max(0, 44 - len(matdir.name))}")
         manifest = json.loads((matdir / "tests.json").read_text())
         recipe = matdir / manifest.get("recipe", "recipe.cpp")
-        d_abs = manifest.get("abs_tol", 1e-8)
-        d_rel = manifest.get("rel_tol", 1e-6)
+        d_abs = manifest.get("abs_tol", DEFAULT_ABS_TOL)
+        d_rel = manifest.get("rel_tol", DEFAULT_REL_TOL)
 
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)

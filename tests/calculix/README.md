@@ -39,19 +39,20 @@ generated material via its input deck and compare to gold.
 {
   "cases": [
     {"name": "uniaxial", "deck": "uniaxial.inp", "gold": "gold/uniaxial.dat",
-     "gold_deck": "gold/gen_gold_uniaxial.inp", "abs_tol": 1e-8, "rel_tol": 1e-6},
+     "gold_deck": "gold/gen_gold_uniaxial.inp"},
     {"name": "shear", "deck": "shear.inp", "gold": "gold/shear.dat",
-     "gold_deck": "gold/gen_gold_shear.inp", "abs_tol": 1e-8, "rel_tol": 1e-6}
+     "gold_deck": "gold/gen_gold_shear.inp"}
   ]
 }
 ```
 
 Per case: `deck` (the @-material input deck), `gold` (committed reference),
 `gold_deck` (the built-in deck that produced the gold — run by `--regen-gold`),
-and `abs_tol`/`rel_tol` (this test's tolerance parameter set; manifest-level
-values, if given, are the fallback). A declared case that can't run (missing
-deck/gold) is a **failure**, not a silent skip; a run that executes zero cases
-exits nonzero.
+and optional `abs_tol`/`rel_tol`. Tolerances **default** to the harness values
+(`DEFAULT_ABS_TOL=1e-8`, `DEFAULT_REL_TOL=1e-6`); set `abs_tol`/`rel_tol` at the
+manifest level to override for a whole material, or per case to override that. A
+declared case that can't run (missing deck/gold) is a **failure**, not a silent
+skip; a run that executes zero cases exits nonzero.
 
 Adding a material = a new folder with `tests.json` + `recipe.cpp` + decks + gold.
 No harness changes.
