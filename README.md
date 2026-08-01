@@ -27,7 +27,8 @@ boundary using tmech's adaptors (`full`, `voigt`, `abq_std`).
 |--------|--------|--------|
 | `StandaloneCxxTarget` | ✓ Phase A | Single inline header with the generic compute function |
 | `MooseMaterialTarget` | ✓ Phase A | `.h` + `.C` pair: Material class with `validParams`, constructor, `computeQpProperties` |
-| `CalculiXUMATTarget`  | ✓ elastic | `<Model>_umat.cpp`: `extern "C" umat_user_` (CalculiX native ABI) with a tmech `abq_std` Voigt boundary; validated by a real single-element `ccx` run (`examples/calculix/`) |
+| `CalculiXUMATTarget`  | ✓ elastic | `<Model>_umat.cpp`: `extern "C" umat_user_` (CalculiX native ABI) linked INTO ccx; tmech `abq_std` Voigt boundary; validated by a real single-element `ccx` run (`examples/calculix/`) |
+| `CalculiXExternalTarget` | ✓ elastic | `<Model>_ext.cpp` → `lib<MODEL>.so`: CalculiX external behaviour loaded at RUNTIME via `dlopen` (deck `NAME=@<MODEL>_NCG_UMAT`) — **no ccx recompile per material**. Same `abq_std` boundary; thread_local per-thread instance. Real `ccx` run in `examples/calculix/` |
 | `AbaqusUMATTarget`    | planned | Fortran-callable `extern "C"` UMAT with Voigt boundary |
 | `AnsysUSERMATTarget`  | planned | Fortran-callable USERMAT |
 | `LSDynaUMATTarget`    | planned | LS-DYNA convention |

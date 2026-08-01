@@ -30,6 +30,19 @@ extern "C" void umat_user_(
     double *xstateini, double *xstate, double *stre, double *stiff, int *iorien,
     double *pgauss, double *orab, double *pnewdt, int *ipkon, long amat_len);
 
+// ── The emitted external-behaviour ABI (LinearElastic_ext.cpp) — the exact
+// `calculixptr` signature ccx dlsym's and calls. ─────────────────────────────
+extern "C" void NCG_UMAT(
+    char const *amat, int const *iel, int const *iint, int const *NPROPS,
+    double const *MPROPS, double const *STRAN1, double const *STRAN0,
+    double const *beta, double const *F0, double const *voj, double const *F1,
+    double const *vj, int const *ithermal, double const *TEMP1,
+    double const *DTIME, double const *time, double const *ttime,
+    int const *icmd, int const *ielas, int const *mi, int const *NSTATV,
+    double const *STATEV0, double *STATEV1, double *STRESS, double *DDSDDE,
+    int const *iorien, double const *pgauss, double const *orab, double *PNEWDT,
+    int const *ipkon, int size);
+
 namespace {
 
 constexpr double kLambda = 1.3;
@@ -94,6 +107,28 @@ void call_umat(std::array<double, 6> const &emec_in, std::array<double, 6> &stre
              beta, xokl, &voj, xkl, &vj, &ithermal, &t1l, &dtime, time_, &ttime,
              &icmd, &ielas, &mint_, &nstate_, &xstateini, &xstate, stre.data(),
              stiff.data(), &iorien, pgauss, orab, &pnewdt, &ipkon, 80L);
+}
+
+// Call the emitted external behaviour NCG_UMAT for one integration point,
+// exactly as ccx's dlopen path does. Native STANDARD interface: STRAN1=emec
+// tensorial, MPROPS=constants, DDSDDE=stiff(21).
+void call_ext(std::array<double, 6> const &emec_in, std::array<double, 6> &stre,
+              std::array<double, 21> &stiff) {
+  std::array<double, 2> mprops{kLambda, kMu};
+  std::array<double, 6> stran1 = emec_in, stran0{}, beta{};
+  int iel = 1, iint = 1, nprops = -102, icmd = 1, ielas = 0, mi = 1, nstatv = 0,
+      iorien = 0, ipkon = 0, ithermal = 0;
+  double f0[9] = {}, voj = 1.0, f1[9] = {}, vj = 1.0, temp1 = 0.0, dtime = 1.0,
+         time_[2] = {}, ttime = 0.0, statev0 = 0.0, statev1 = 0.0, pgauss[3] = {},
+         orab[7] = {}, pnewdt = 1.0;
+  char amat[81] = "@LINEARELASTIC_NCG_UMAT";
+  stre.fill(0.0);
+  stiff.fill(0.0);
+  NCG_UMAT(amat, &iel, &iint, &nprops, mprops.data(), stran1.data(),
+           stran0.data(), beta.data(), f0, &voj, f1, &vj, &ithermal, &temp1,
+           &dtime, time_, &ttime, &icmd, &ielas, &mi, &nstatv, &statev0,
+           &statev1, stre.data(), stiff.data(), &iorien, pgauss, orab, &pnewdt,
+           &ipkon, 80);
 }
 
 // A spread of strain states: uniaxial, pure shear, and a general symmetric one.
@@ -201,4 +236,46 @@ TEST(CalculiXGate, StiffPackingIsColumnMajorNotRowMajor) {
   EXPECT_TRUE(differs_from_row_major)
       << "column-major and row-major packings are indistinguishable here — "
          "the negative control has no discriminating power";
+}
+
+// ── External behaviour (.so ABI): same boundary, CalculiX external signature ──
+// Proves the emitted NCG_UMAT (the dlopen'd entry) produces the same verified
+// stress/stiff as the compiled-in umat_user_ and the analytic oracle. The real
+// dlopen/@-name path is exercised end-to-end by examples/calculix/.
+
+TEST(CalculiXGate, ExternalUmatStressMatchesIsotropicOracle) {
+  for (auto const &e : sample_strains()) {
+    std::array<double, 6> stre{};
+    std::array<double, 21> stiff{};
+    call_ext(e, stre, stiff);
+    T2 const sigma = isotropic_stress(strain_tensor_from_emec(e));
+    EXPECT_NEAR(stre[0], sigma(0, 0), 1e-12);
+    EXPECT_NEAR(stre[1], sigma(1, 1), 1e-12);
+    EXPECT_NEAR(stre[2], sigma(2, 2), 1e-12);
+    EXPECT_NEAR(stre[3], sigma(0, 1), 1e-12);
+    EXPECT_NEAR(stre[4], sigma(0, 2), 1e-12);
+    EXPECT_NEAR(stre[5], sigma(1, 2), 1e-12);
+  }
+}
+
+TEST(CalculiXGate, ExternalUmatStiffMatchesColumnMajorPackedOracle) {
+  auto const expected = expected_stiff_column_major();
+  std::array<double, 6> stre{};
+  std::array<double, 21> stiff{};
+  call_ext(sample_strains().back(), stre, stiff);
+  for (std::size_t k = 0; k < 21; ++k)
+    EXPECT_NEAR(stiff[k], expected[k], 1e-12) << "stiff mismatch at index " << k;
+}
+
+// The external entry must agree with the compiled-in umat_user_ bit-for-bit
+// (both wrap the same _compute through the same abq_std boundary).
+TEST(CalculiXGate, ExternalMatchesCompiledInUmat) {
+  for (auto const &e : sample_strains()) {
+    std::array<double, 6> s_ext{}, s_in{};
+    std::array<double, 21> k_ext{}, k_in{};
+    call_ext(e, s_ext, k_ext);
+    call_umat(e, s_in, k_in);
+    for (std::size_t i = 0; i < 6; ++i) EXPECT_DOUBLE_EQ(s_ext[i], s_in[i]);
+    for (std::size_t i = 0; i < 21; ++i) EXPECT_DOUBLE_EQ(k_ext[i], k_in[i]);
+  }
 }

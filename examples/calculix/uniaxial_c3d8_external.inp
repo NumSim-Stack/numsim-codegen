@@ -1,0 +1,58 @@
+**
+** Single C3D8 element, uniaxial-strain test of the codegen'd external (.so) material.
+**
+** The material is numsim-codegen's CalculiXUMATTarget output (LinearElastic_umat
+** .cpp), linked into ccx in place of the stock umat_user.f. CalculiX dispatches
+** to umat_user for any *MATERIAL whose NAME begins with `USER`.
+**
+** Lateral faces are fully confined (u_y=0 on y-faces, u_z=0 on z-faces) and the
+** x1 face is pulled by 0.01 on a unit cube, so the strain is homogeneous
+** eps = diag(0.01, 0, 0) — uniaxial strain. For isotropic elasticity with
+** lambda=1.3, mu=0.7 the closed-form stress is
+**   S11 = (lambda + 2 mu) * 0.01 = 2.7 * 0.01 = 0.027
+**   S22 = S33 = lambda * 0.01     = 1.3 * 0.01 = 0.013
+**
+*NODE, NSET=NALL
+1, 0.0, 0.0, 0.0
+2, 1.0, 0.0, 0.0
+3, 1.0, 1.0, 0.0
+4, 0.0, 1.0, 0.0
+5, 0.0, 0.0, 1.0
+6, 1.0, 0.0, 1.0
+7, 1.0, 1.0, 1.0
+8, 0.0, 1.0, 1.0
+*ELEMENT, TYPE=C3D8, ELSET=EALL
+1, 1, 2, 3, 4, 5, 6, 7, 8
+*NSET, NSET=NX0
+1, 4, 5, 8
+*NSET, NSET=NX1
+2, 3, 6, 7
+*NSET, NSET=NY0
+1, 2, 5, 6
+*NSET, NSET=NY1
+3, 4, 7, 8
+*NSET, NSET=NZ0
+1, 2, 3, 4
+*NSET, NSET=NZ1
+5, 6, 7, 8
+**
+** Two constants passed to umat_user via elconloc: lambda, mu (in this order).
+*MATERIAL, NAME=@LINEARELASTIC_NCG_UMAT
+*USER MATERIAL, CONSTANTS=2
+1.3, 0.7
+*SOLID SECTION, ELSET=EALL, MATERIAL=@LINEARELASTIC_NCG_UMAT
+**
+*STEP
+*STATIC
+*BOUNDARY
+NX0, 1, 1, 0.0
+NX1, 1, 1, 0.01
+NY0, 2, 2, 0.0
+NY1, 2, 2, 0.0
+NZ0, 3, 3, 0.0
+NZ1, 3, 3, 0.0
+*EL PRINT, ELSET=EALL
+S, E
+*NODE PRINT, NSET=NALL
+U
+*END STEP

@@ -11,6 +11,7 @@
 // analytic answer and the _compute path (Phase 1 ABI gate).
 
 #include <numsim_codegen/numsim_codegen.h>
+#include <numsim_codegen/targets/calculix_external.h>
 #include <numsim_codegen/targets/calculix_umat.h>
 #include <numsim_codegen/targets/standalone_cxx.h>
 
@@ -71,9 +72,10 @@ auto write_single_file(std::vector<numsim::codegen::EmittedFile> const &files,
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc != 3) {
+  if (argc != 4) {
     std::cerr << "usage: " << argv[0]
-              << " <LinearElastic.h> <LinearElastic_umat.cpp>\n";
+              << " <LinearElastic.h> <LinearElastic_umat.cpp>"
+                 " <LinearElastic_ext.cpp>\n";
     return 1;
   }
 
@@ -86,6 +88,11 @@ int main(int argc, char *argv[]) {
   }
   if (int rc = write_single_file(
           numsim::codegen::CalculiXUMATTarget{}.emit(model), argv[2]);
+      rc != 0) {
+    return rc;
+  }
+  if (int rc = write_single_file(
+          numsim::codegen::CalculiXExternalTarget{}.emit(model), argv[3]);
       rc != 0) {
     return rc;
   }

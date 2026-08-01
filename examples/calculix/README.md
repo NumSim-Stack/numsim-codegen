@@ -27,13 +27,36 @@ adaptor, whose ordering `{11,22,33,12,13,23}` is exactly CalculiX's `emec` /
 * `build_and_run.sh` — fetches + builds SPOOLES and `ccx` from source with the
   generated material linked in, runs the deck, and checks the stress.
 
+## Two ways to run: compiled-in vs. external (dlopen)
+
+There are two CalculiX targets, both reusing the same `abq_std` boundary:
+
+| | `CalculiXUMATTarget` (`calculix`) | `CalculiXExternalTarget` (`calculix_external`) |
+|---|---|---|
+| Output | `<Model>_umat.cpp` (`umat_user_`) | `<Model>_ext.cpp` → `lib<MODEL>.so` (`NCG_UMAT`) |
+| Linkage | compiled **into** ccx | `dlopen`'d at **runtime** |
+| New material | **relink ccx** | just a new `.so` — **no ccx recompile** |
+| Deck name | `NAME=USER<Model>` | `NAME=@<MODEL>_NCG_UMAT` |
+| Build ccx | with the material linked | **once**, with external support |
+
+The external path is preferred for a material library: build ccx once, then emit a
+`.so` per material and select it by name in the deck. It relies on CalculiX's
+external-behaviour mechanism (`external.c`, `-DCALCULIX_EXTERNAL_BEHAVIOURS_SUPPORT`,
+`-ldl`); ccx uppercases the material name, so the target names the library and the
+`NCG_UMAT` symbol accordingly.
+
 ## Run it
 
 ```sh
-# 1. generate the material (part of the calculix_check_driver gate build)
+# generate both materials (part of the calculix_check_driver gate build)
 cmake --build build --target calculix_check_driver
-# 2. build ccx from source with it + run the single-element job
+
+# (A) compiled-in: build ccx from source WITH the material linked + run
 examples/calculix/build_and_run.sh
+
+# (B) external (dlopen): build ccx ONCE with external support, emit lib<MODEL>.so,
+#     run the deck by @-name — no ccx recompile for future materials
+examples/calculix/build_and_run_external.sh
 ```
 
 Prereqs (Debian/Ubuntu): `gcc g++ gfortran make wget perl`, plus

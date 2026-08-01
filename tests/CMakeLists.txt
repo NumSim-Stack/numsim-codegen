@@ -249,20 +249,25 @@ set(GENERATED_ELASTIC_HEADER
     ${CMAKE_CURRENT_BINARY_DIR}/generated/LinearElastic.h)
 set(GENERATED_ELASTIC_UMAT
     ${CMAKE_CURRENT_BINARY_DIR}/generated/LinearElastic_umat.cpp)
+set(GENERATED_ELASTIC_EXT
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/LinearElastic_ext.cpp)
 add_custom_command(
     OUTPUT ${GENERATED_ELASTIC_HEADER} ${GENERATED_ELASTIC_UMAT}
+           ${GENERATED_ELASTIC_EXT}
     COMMAND ${CMAKE_COMMAND} -E make_directory
             ${CMAKE_CURRENT_BINARY_DIR}/generated
     COMMAND $<TARGET_FILE:generate_calculix_check>
             ${GENERATED_ELASTIC_HEADER} ${GENERATED_ELASTIC_UMAT}
+            ${GENERATED_ELASTIC_EXT}
     DEPENDS generate_calculix_check
-    COMMENT "Generating CalculiX UMAT + standalone header via numsim-codegen"
+    COMMENT "Generating CalculiX UMAT (compiled-in + external) + header"
     VERBATIM)
 
 add_executable(calculix_check_driver
     generated/calculix_check_driver.cpp
     ${GENERATED_ELASTIC_HEADER}
-    ${GENERATED_ELASTIC_UMAT})
+    ${GENERATED_ELASTIC_UMAT}
+    ${GENERATED_ELASTIC_EXT})
 target_include_directories(calculix_check_driver
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated
             ${CMAKE_CURRENT_SOURCE_DIR}/support)
