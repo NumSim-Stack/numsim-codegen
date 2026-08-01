@@ -235,7 +235,7 @@ TEST(CalculiXGate, ExternalReadsConstantsEveryCall) {
 // stiff stays all-zero — whereas the icmd=1 path writes nonzero packed entries
 // (e.g. λ+2μ). Assert both to make "untouched" meaningful.
 TEST(CalculiXGate, StressOnlyIcmd3LeavesStiffUntouched) {
-  auto const &e = sample_strains().back();
+  auto const e = sample_strains().back(); // copy: don't bind a ref into a temporary
   T2 const sigma = isotropic_stress(strain_tensor_from_emec(e));
   std::array<double, 6> stre{};
   std::array<double, 21> stiff3{}, stiff1{};
