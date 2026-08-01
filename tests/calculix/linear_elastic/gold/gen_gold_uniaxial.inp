@@ -1,0 +1,49 @@
+**
+** GOLD reference: same single-C3D8 uniaxial-strain test, but with CalculiX's
+** OWN built-in isotropic elasticity (*ELASTIC). E=1.855, nu=0.325 is the exact
+** equivalent of the codegen material's lambda=1.3, mu=0.7:
+**   mu = E/(2(1+nu)) = 0.7 ; lambda = E*nu/((1+nu)(1-2nu)) = 1.3.
+** Run this and the @-material deck through ccx and diff the .dat with
+** compare_dat.py — the codegen material must reproduce ccx's own elasticity.
+**
+*NODE, NSET=NALL
+1, 0.0, 0.0, 0.0
+2, 1.0, 0.0, 0.0
+3, 1.0, 1.0, 0.0
+4, 0.0, 1.0, 0.0
+5, 0.0, 0.0, 1.0
+6, 1.0, 0.0, 1.0
+7, 1.0, 1.0, 1.0
+8, 0.0, 1.0, 1.0
+*ELEMENT, TYPE=C3D8, ELSET=EALL
+1, 1, 2, 3, 4, 5, 6, 7, 8
+*NSET, NSET=NX0
+1, 4, 5, 8
+*NSET, NSET=NX1
+2, 3, 6, 7
+*NSET, NSET=NY0
+1, 2, 5, 6
+*NSET, NSET=NY1
+3, 4, 7, 8
+*NSET, NSET=NZ0
+1, 2, 3, 4
+*NSET, NSET=NZ1
+5, 6, 7, 8
+*MATERIAL, NAME=GOLDELAS
+*ELASTIC
+1.855, 0.325
+*SOLID SECTION, ELSET=EALL, MATERIAL=GOLDELAS
+*STEP
+*STATIC
+*BOUNDARY
+NX0, 1, 1, 0.0
+NX1, 1, 1, 0.01
+NY0, 2, 2, 0.0
+NY1, 2, 2, 0.0
+NZ0, 3, 3, 0.0
+NZ1, 3, 3, 0.0
+*EL PRINT, ELSET=EALL
+S, E
+*NODE PRINT, NSET=NALL
+U
+*END STEP
