@@ -389,6 +389,63 @@ else()
                    "NUMSIM_CODEGEN_FETCH_MATERIALS=OFF")
 endif()
 
+# ─── MOOSE-stub compile gate (#132) ──────────────────────────────────────────
+#
+# MooseMaterialTarget's emitted .h/.C pairs were never compiled anywhere — the
+# string-asserting MooseTargetTest cannot catch emitted code that is not valid
+# C++. This gate generates representative materials (see
+# generated/generate_moose_check.cpp for the recipe list) and compiles every
+# emitted .C as its own TU against the minimal MOOSE API stubs in
+# tests/moose_stub/ (Material, InputParameters, MaterialProperty,
+# RankTwoTensor/RankFourTensor with contiguous-Real dataPointer() storage,
+# libmesh warning brackets). The driver additionally runs one quadrature-point
+# evaluation through the stubs and value-checks the results (issue #12).
+add_executable(generate_moose_check generated/generate_moose_check.cpp)
+target_link_libraries(generate_moose_check
+    PRIVATE numsim::codegen numsim_codegen_warnings)
+
+set(_ncg_moose_gen_dir ${CMAKE_CURRENT_BINARY_DIR}/generated/moose)
+# One entry per recipe emitted by generate_moose_check — keep in sync.
+set(_ncg_moose_units
+    MooseShearCheck
+    MooseTangentCheck
+    MooseSpectralCheck
+    MooseNewtonCheck
+    MooseCoupledCheck)
+set(_ncg_moose_sources "")
+set(_ncg_moose_headers "")
+foreach(_ncg_moose_unit IN LISTS _ncg_moose_units)
+    list(APPEND _ncg_moose_sources ${_ncg_moose_gen_dir}/${_ncg_moose_unit}.C)
+    list(APPEND _ncg_moose_headers ${_ncg_moose_gen_dir}/${_ncg_moose_unit}.h)
+endforeach()
+
+add_custom_command(
+    OUTPUT ${_ncg_moose_sources} ${_ncg_moose_headers}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${_ncg_moose_gen_dir}
+    COMMAND $<TARGET_FILE:generate_moose_check> ${_ncg_moose_gen_dir}
+    DEPENDS generate_moose_check
+    COMMENT "Generating MOOSE materials via MooseMaterialTarget"
+    VERBATIM)
+
+# Every emitted .C is a real compiled TU of this target — that compilation is
+# the gate. numsim::codegen provides tmech + the shipped spectral runtime
+# header (same as the other generated-code drivers); Eigen is SYSTEM for the
+# coupled recipe's dense solve.
+add_executable(moose_check_driver
+    generated/moose_check_driver.cpp
+    ${_ncg_moose_sources}
+    ${_ncg_moose_headers})
+target_include_directories(moose_check_driver PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/moose_stub
+    ${_ncg_moose_gen_dir})
+target_include_directories(moose_check_driver SYSTEM PRIVATE
+    ${eigen3_SOURCE_DIR})
+target_link_libraries(moose_check_driver
+    PRIVATE numsim::codegen numsim_codegen_warnings_light
+            GTest::gtest GTest::gtest_main)
+
+gtest_discover_tests(moose_check_driver)
+
 # ─── Header-purity guard ───────────────────────────────────────────────────
 #
 # Public headers under include/ must never #include heavy template libraries
