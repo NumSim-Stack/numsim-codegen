@@ -193,7 +193,7 @@ TEST(MooseTarget, RejectsStatefulOutput) {
   m.add_output("h_new", eps, roles::History); // is_stateful output
   MooseMaterialTarget target;
   try {
-    (void)target.emit(m);
+    [[maybe_unused]] auto const discarded = target.emit(m);
     FAIL() << "expected emit() to reject the stateful output";
   } catch (std::runtime_error const &e) {
     std::string const msg = e.what();
