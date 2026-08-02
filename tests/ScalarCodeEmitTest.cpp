@@ -188,6 +188,44 @@ TEST(ScalarCodeEmit, NotEqualEmitsStaticCastDouble) {
   EXPECT_NE(rendered.find(" != "), std::string::npos) << "got: " << rendered;
 }
 
+// ─── Negation of a leading-minus operand (issue #136) ─────────────────
+//
+// Reachable TWO ways: (a) direct node construction of a negative literal
+// (the same public factory recipe.h uses for leaves), and (b) — found in
+// the follow-up review — ORDINARY subtraction: at the current cas pin the
+// sub simplifiers lower `0 - rhs` to `make_expression<*_negative>(rhs)`
+// with no already-negative check, so `0 - (-x)` builds
+// negative(negative(x)). Upstream, cas round-7 (001164d) fixed the scalar
+// and t2s domains after our pin; the tensor domain is cas#422. The guard
+// stays regardless (defense-in-depth — emitters must not rely on
+// simplifier invariants). Naive `-` + `-x` emitted an invalid `--x`.
+// Reachability path (b): plain operators, no direct node construction.
+TEST(ScalarCodeEmit, ZeroMinusNegativeParenthesizesViaOperators) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto x = cas::make_expression<cas::scalar>("x");
+  ctx.register_symbol_scalar(x, "x");
+  auto expr = cas::get_scalar_zero() - (-x); // → negative(negative(x))
+  auto result = emit.apply(expr);
+  auto rendered = ctx.render_statements();
+  EXPECT_EQ(result.find("--"), std::string::npos) << "got: " << result;
+  EXPECT_EQ(rendered.find("--"), std::string::npos) << "got: " << rendered;
+}
+
+TEST(ScalarCodeEmit, NegationOfNegativeLiteralParenthesizes) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto c = cas::make_expression<cas::scalar_constant>(-5.0);
+  ASSERT_EQ(emit.apply(c), "-5.0"); // sanity: the literal itself
+  auto n = cas::make_expression<cas::scalar_negative>(c);
+  auto result = emit.apply(n);
+  auto rendered = ctx.render_statements();
+  EXPECT_EQ(result.find("--"), std::string::npos) << "got: " << result;
+  EXPECT_EQ(rendered.find("--"), std::string::npos) << "got: " << rendered;
+  EXPECT_NE(rendered.find("-(-5.0)"), std::string::npos)
+      << "got: " << rendered;
+}
+
 // ─── Piecewise nodes ──────────────────────────────────────────────────
 
 TEST(ScalarCodeEmit, MaxEmitsStdMax) {

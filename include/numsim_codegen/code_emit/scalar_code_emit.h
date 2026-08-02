@@ -104,8 +104,10 @@ public:
     auto inner = apply(v.expr());
     // If the inner result is a single token (named leaf, temp, or literal)
     // emit `-x` inline without allocating a temporary. If it has structure,
-    // wrap and register as a temp.
-    if (is_single_token(inner)) {
+    // wrap and register as a temp. A token with a LEADING '-' (a negative
+    // literal, reachable via a directly-constructed scalar_constant — issue
+    // #136) must be parenthesised: naive concatenation emits `--5.0`.
+    if (is_single_token(inner) && !inner.starts_with('-')) {
       m_result = "-" + inner;
     } else {
       m_result = register_temp(&v, "-(" + inner + ")");
