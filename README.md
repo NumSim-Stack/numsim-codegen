@@ -27,7 +27,7 @@ boundary using tmech's adaptors (`full`, `voigt`, `abq_std`).
 |--------|--------|--------|
 | `StandaloneCxxTarget` | ✓ | Single inline header with the generic compute function |
 | `MooseMaterialTarget` | ✓ | `.h` + `.C` pair: Material class with `validParams`, constructor, `computeQpProperties`, optional `Jacobian_mult` consistent tangent |
-| `NumSimMaterialTarget` | ✓ | numsim-materials rate / return-map material header + JSON config (one scalar rate variable / Newton unknown per material; additional scalar or tensor history state supported) |
+| `NumSimMaterialTarget` | ✓ | numsim-materials material header + JSON config. Two sub-contracts: rate path (exactly one scalar state variable + one evolution equation — the rk_integrator contract); return-map path (one scalar Newton unknown, plus additional scalar or tensor history state via update equations) |
 | `AbaqusUMATTarget`    | planned | Fortran-callable `extern "C"` UMAT with Voigt boundary |
 | `AnsysUSERMATTarget`  | planned | Fortran-callable USERMAT |
 | `LSDynaUMATTarget`    | planned | LS-DYNA convention |
