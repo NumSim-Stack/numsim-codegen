@@ -78,8 +78,18 @@ int main(int argc, char **argv) {
 
   int exit_code = 0;
   for (auto const &entry : numsim::examples::registry()) {
-    std::cout << entry.name << " -> " << target->target_name() << "\n";
     auto model = entry.build();
+    // Capability query BEFORE emit (#137): a recipe outside the target's
+    // scope is reported and skipped, so one unsupported recipe cannot abort
+    // the rest of the catalogue (#135). Deliberately NO try/catch around
+    // emit() — a recipe that passes can_emit but fails to emit is a defect,
+    // and the crash keeps this generator useful as a loud smoke check.
+    if (auto const supported = target->can_emit(model); !supported) {
+      std::cout << entry.name << " -> " << target->target_name()
+                << " SKIPPED (" << supported.error() << ")\n";
+      continue;
+    }
+    std::cout << entry.name << " -> " << target->target_name() << "\n";
     for (auto const &file : target->emit(model)) {
       if (!write_file(out_dir, file)) {
         exit_code = 2;

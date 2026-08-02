@@ -26,6 +26,9 @@ public:
   StandaloneCxxTarget(LinearAlgebraEmitter const &&) = delete;
   [[nodiscard]] auto emit(ConstitutiveModel const &model) const
       -> std::vector<EmittedFile> override;
+  // can_emit (#137): not overridden — this target has no up-front scope
+  // guards (it accepts every recipe shape), so the base's conservative
+  // "try emit" success is exact.
   [[nodiscard]] auto target_name() const -> std::string override;
 
 private:

@@ -28,6 +28,14 @@ class NumSimMaterialTarget : public Target {
 public:
   [[nodiscard]] auto emit(ConstitutiveModel const &model) const
       -> std::vector<EmittedFile> override;
+  // Up-front scope guards as a query, routed per sub-contract exactly like
+  // emit(): the Mode-B residual scope for residual recipes, the rk_integrator
+  // rate scope otherwise. Shares the exact reason strings with the emit()
+  // throws (#137). Success does not guarantee emit() succeeds — emit-time
+  // validation (name collisions, unbound leaves, non-finite defaults) may
+  // still throw.
+  [[nodiscard]] auto can_emit(ConstitutiveModel const &model) const
+      -> std::expected<void, std::string> override;
   [[nodiscard]] auto target_name() const -> std::string override;
 };
 
