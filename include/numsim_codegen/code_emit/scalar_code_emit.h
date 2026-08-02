@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <complex>
+#include <format>
 #include <ranges>
 #include <sstream>
 #include <string>
@@ -61,22 +62,24 @@ public:
   void operator()(cas::scalar_one const &) override { m_result = "1.0"; }
 
   void operator()(cas::scalar_constant const &v) override {
+    // std::format("{}", double) is shortest-round-trip (issue #131): the
+    // emitted literal parses back to the EXACT double. Default ostream
+    // precision (6 significant digits) silently truncated constants —
+    // parameter defaults were already hardened this way in the targets;
+    // this is the general path every embedded constant routes through.
     auto [literal, is_compound] = std::visit(
         [](auto const &val) -> std::pair<std::string, bool> {
           using V = std::decay_t<decltype(val)>;
           if constexpr (std::is_same_v<V, std::complex<double>>) {
-            std::ostringstream os;
-            os << "std::complex<double>(" << val.real() << ", "
-               << val.imag() << ")";
-            return {os.str(), true};
+            return {std::format("std::complex<double>({}, {})", val.real(),
+                                val.imag()),
+                    true};
           } else if constexpr (std::is_same_v<V, cas::rational_t>) {
             std::ostringstream os;
             os << "(" << val.num << ".0 / " << val.den << ".0)";
             return {os.str(), true};
           } else {
-            std::ostringstream os;
-            os << static_cast<double>(val);
-            auto s = os.str();
+            auto s = std::format("{}", static_cast<double>(val));
             if (s.find('.') == std::string::npos &&
                 s.find('e') == std::string::npos &&
                 s.find('E') == std::string::npos) {

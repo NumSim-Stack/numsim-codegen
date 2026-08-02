@@ -7,6 +7,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+
 namespace numsim::codegen {
 
 TEST(ScalarCodeEmit, LeafScalarEmitsName) {
@@ -224,6 +226,25 @@ TEST(ScalarCodeEmit, IfThenElseEmitsTernary) {
   EXPECT_NE(rendered.find(" != 0.0 ? "), std::string::npos)
       << "got: " << rendered;
   EXPECT_NE(rendered.find(" : "), std::string::npos) << "got: " << rendered;
+}
+
+// ─── Literal round-trip (issue #131) ─────────────────────────────────────
+//
+// The emitted literal must parse back to the EXACT double. The previous
+// default-precision ostream formatting truncated to 6 significant digits —
+// a silently wrong physics constant in generated code. Values chosen so a
+// 6-digit emission fails: full-precision mantissas, 1/3, and a magnitude
+// that used to render as 1.23457e+08.
+TEST(ScalarCodeEmit, ConstantLiteralRoundTripsExactly) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  for (double v : {0.1234567890123456, 1.0 / 3.0, 123456789.123456,
+                   3.141592653589793, 1.0 / 7.0}) {
+    auto c = cas::make_expression<cas::scalar_constant>(v);
+    auto const lit = emit.apply(c);
+    EXPECT_EQ(std::strtod(lit.c_str(), nullptr), v)
+        << "emitted literal '" << lit << "' does not round-trip";
+  }
 }
 
 } // namespace numsim::codegen
