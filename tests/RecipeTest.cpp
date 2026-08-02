@@ -242,6 +242,54 @@ TEST(Recipe, EmitComputeFunctionRejectsResidualRecipe) {
   }
 }
 
+// Issue #8: user symbols named like generated identifiers (`t0`, `t1`, …
+// CSE temporaries; `T0`, `T1`, … template parameters) must not be
+// redeclared / shadowed by the generated code.
+TEST(Recipe, UserSymbolsNamedLikeGeneratedIdentifiersDoNotCollide) {
+  ConstitutiveModel m("ReservedNames");
+  auto t0 = m.add_scalar_input("t0");
+  auto t1 = m.add_scalar_input("t1");
+  auto T0 = m.add_tensor_input("T0", 3, 2);
+  m.add_output("y", t0 * t1 + sin(t0));
+  m.add_output("T1", t0 * T0);
+
+  auto src = m.emit_compute_function();
+
+  // No generated temporary may redeclare the inputs.
+  EXPECT_EQ(src.find("auto t0 ="), std::string::npos) << "got:\n" << src;
+  EXPECT_EQ(src.find("auto t1 ="), std::string::npos) << "got:\n" << src;
+  // Template parameters skip the declared T0 (tensor input) and T1 (tensor
+  // output): the two tensor arguments get the next free names T2, T3.
+  EXPECT_EQ(src.find("typename T0"), std::string::npos) << "got:\n" << src;
+  EXPECT_EQ(src.find("typename T1"), std::string::npos) << "got:\n" << src;
+  EXPECT_NE(src.find("template <typename T2, typename T3>"),
+            std::string::npos)
+      << "got:\n" << src;
+  EXPECT_NE(src.find("T2 const &T0"), std::string::npos) << "got:\n" << src;
+  EXPECT_NE(src.find("T3 &T1_out"), std::string::npos) << "got:\n" << src;
+}
+
+TEST(Recipe, GeneratedNamingUnchangedWithoutCollision) {
+  // Skip-only-on-collision guarantee: a recipe with no `tN`/`TN`-shaped
+  // symbols keeps the exact numbering it always had (T0/T1 templates,
+  // temps starting at t0).
+  ConstitutiveModel m("NoCollision");
+  auto k = m.add_parameter("k", 1.5);
+  auto x = m.add_scalar_input("x");
+  auto eps = m.add_tensor_input("eps", 3, 2);
+  m.add_output("y", k * x + sin(x));
+  m.add_output("sigma", k * eps);
+
+  auto src = m.emit_compute_function();
+
+  EXPECT_NE(src.find("template <typename T0, typename T1>"),
+            std::string::npos)
+      << "got:\n" << src;
+  EXPECT_NE(src.find("T0 const &eps"), std::string::npos) << "got:\n" << src;
+  EXPECT_NE(src.find("T1 &sigma_out"), std::string::npos) << "got:\n" << src;
+  EXPECT_NE(src.find("auto t0 ="), std::string::npos) << "got:\n" << src;
+}
+
 // The shared handle-resolution defends against cross-recipe handle use.
 TEST(Recipe, ResidualRejectsForeignHandle) {
   ConstitutiveModel m1("M1");

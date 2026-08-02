@@ -10,6 +10,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace numsim::codegen {
@@ -45,6 +46,14 @@ public:
     assert(expr.is_valid());
     m_named_symbols[&expr.get()] = name;
   }
+
+  // Reserve an identifier so fresh_name() will never produce it (issue #8):
+  // a user symbol named `t0` would otherwise be REDECLARED by the first
+  // generated temporary (`auto t0 = ...;`). Callers seed every declared
+  // name (symbols, outputs + `<name>_out`) before emission. Reserving a
+  // name never changes the numbering of non-colliding temporaries — the
+  // counter only skips over reserved candidates.
+  void reserve_name(std::string name) { m_reserved.insert(std::move(name)); }
 
   // CSE table operations.
   [[nodiscard]] auto find(void const *ptr) const -> std::string const * {
@@ -111,28 +120,40 @@ public:
   // Clear statements and CSE table for a new emission pass. The temporary
   // counter is intentionally NOT reset — that way, if two rendered outputs
   // ever end up in the same scope (e.g. concatenated into one function),
-  // their names cannot collide. Call full_reset() if you genuinely want
-  // the counter zeroed.
+  // their names cannot collide. Reserved names are likewise preserved:
+  // they describe the DECLARED identifiers of the surrounding function
+  // (like the symbol registrations), which stay in scope across the
+  // per-block reset() calls within one emission. Call full_reset() if you
+  // genuinely want the counter zeroed and the reservations dropped.
   void reset() {
     m_statements.clear();
     m_cse_table.clear();
     m_shared_table.clear();
-    // m_counter and m_named_symbols deliberately preserved.
+    // m_counter, m_named_symbols and m_reserved deliberately preserved.
   }
 
   void full_reset() {
     reset();
     m_counter = 0;
     m_named_symbols.clear();
+    m_reserved.clear();
   }
 
 private:
-  auto fresh_name() -> std::string { return "t" + std::to_string(m_counter++); }
+  auto fresh_name() -> std::string {
+    for (;;) {
+      auto name = "t" + std::to_string(m_counter++);
+      if (!m_reserved.contains(name)) {
+        return name;
+      }
+    }
+  }
 
   std::vector<Statement> m_statements;
   std::unordered_map<void const *, std::string> m_cse_table;
   std::unordered_map<std::string, std::string> m_shared_table;
   std::unordered_map<void const *, std::string> m_named_symbols;
+  std::unordered_set<std::string> m_reserved;
   int m_counter = 0;
 };
 
