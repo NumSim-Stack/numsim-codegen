@@ -20,6 +20,16 @@ namespace numsim::codegen {
 inline constexpr std::string_view spectral_runtime_qualifier =
     "numsim::codegen::rt::";
 
+// Include-gating predicate (#139): does the EMITTED body call into the
+// spectral runtime? Keyed on `spectral_runtime_qualifier` (shared with the
+// emitters, see above) so the `#include <numsim_codegen/runtime/spectral.h>`
+// decision tracks actual emitted usage — shared by every target that gates
+// the spectral-runtime include.
+[[nodiscard]] inline auto uses_spectral_runtime(std::string const &body)
+    -> bool {
+  return body.find(spectral_runtime_qualifier) != std::string::npos;
+}
+
 // Emit (once per distinct tensor argument) the shared spectral decomposition
 // that the eigenvalue / eigenprojection / eigenvector emitters read from, and
 // return the temporary's name. `arg` is the already-emitted C++ name of the
