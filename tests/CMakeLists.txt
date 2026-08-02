@@ -337,8 +337,13 @@ if(EXISTS "${NUMSIM_MATERIALS_DIR}/include/numsim-materials/solvers/rk_integrato
                 return()
             endif()
             # At the pin but DIRTY reproduces the same divergence silently.
+            # --untracked-files=no: stray untracked clutter (scratch files,
+            # non-ignored build dirs) doesn't change the headers the build
+            # consumes — warning on it would just train people to ignore
+            # the signal. Only tracked-content modifications count.
             execute_process(
                 COMMAND ${GIT_EXECUTABLE} -C "${_ncg_dir}" status --porcelain
+                        --untracked-files=no
                 OUTPUT_VARIABLE _ncg_dirty
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 ERROR_QUIET RESULT_VARIABLE _ncg_rc)
