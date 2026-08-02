@@ -267,7 +267,7 @@ TEST(ScalarCodeEmit, NonFiniteConstantThrows) {
                    std::numeric_limits<double>::quiet_NaN()}) {
     auto c = cas::make_expression<cas::scalar_constant>(v);
     try {
-      [[maybe_unused]] auto const discarded = emit.apply(c);
+      emit.apply(c); // not [[nodiscard]] — plain discard is warning-free
       ADD_FAILURE() << "expected non-finite constant " << v << " to throw";
     } catch (std::runtime_error const &e) {
       EXPECT_NE(std::string(e.what()).find("non-finite"), std::string::npos)
