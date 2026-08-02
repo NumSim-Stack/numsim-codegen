@@ -693,4 +693,48 @@ TEST(TensorCodeEmit, T2sWithTensorMulMultipliesScalarByTensor) {
 // "forgot to wire" failure mode is now a compile error rather than a
 // runtime throw. See M3 in issue #48 for the rationale.
 
+// ─── Negation of a leading-minus operand (issue #136) ─────────────────
+//
+// The operator layer folds neg(neg(x)) = x, so a nested negative is only
+// reachable by direct node construction — but the emitter must not rely
+// on that unenforced upstream invariant: naive `-` + `-A` concatenation
+// would emit an invalid `--A` (a decrement). The inner negative of a leaf
+// emits the inline single token `-A`; the outer one must parenthesise.
+TEST(TensorCodeEmit, NegationOfLeadingMinusOperandParenthesizes) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  auto inner = cas::make_expression<cas::tensor_negative>(A);
+  auto outer = cas::make_expression<cas::tensor_negative>(inner);
+
+  auto result = emit.apply(outer);
+  auto rendered = ctx.render_statements();
+  EXPECT_EQ(result.find("--"), std::string::npos) << "got: " << result;
+  EXPECT_EQ(rendered.find("--"), std::string::npos) << "got: " << rendered;
+  EXPECT_NE(rendered.find("-(-A)"), std::string::npos) << "got: " << rendered;
+}
+
+// Same guard, tensor_to_scalar domain: neg(neg(trace(A))) — the innermost
+// trace CSEs to a temp `tN`, the middle negative inlines `-tN`, and the
+// outer negative must parenthesise instead of emitting `--tN`.
+TEST(TensorToScalarCodeEmit, NegationOfLeadingMinusOperandParenthesizes) {
+  CodeGenContext ctx;
+  CodeEmitPipeline pipeline(ctx);
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  auto tr = cas::make_expression<cas::tensor_trace>(A);
+  auto inner = cas::make_expression<cas::tensor_to_scalar_negative>(tr);
+  auto outer = cas::make_expression<cas::tensor_to_scalar_negative>(inner);
+
+  auto result = pipeline.t2s().apply(outer);
+  auto rendered = ctx.render_statements();
+  EXPECT_EQ(result.find("--"), std::string::npos) << "got: " << result;
+  EXPECT_EQ(rendered.find("--"), std::string::npos) << "got: " << rendered;
+  EXPECT_NE(rendered.find("-(-"), std::string::npos) << "got: " << rendered;
+}
+
 } // namespace numsim::codegen
