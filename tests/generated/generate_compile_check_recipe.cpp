@@ -13,6 +13,7 @@
 //   6. PiecewiseCheck      — tensor_if_then_else emission vs tmech
 //   7. PiecewiseT2sCheck   — tensor_to_scalar_if_then_else (subterm)
 //   8. TangentCheck        — FD consistent-tangent verification (#90)
+//   9. T2sOutputCheck      — tensor_to_scalar OUTPUT (scalar-from-tensor, #142)
 
 #include <numsim_codegen/numsim_codegen.h>
 
@@ -24,6 +25,7 @@
 #include <numsim_cas/tensor/tensor_std.h>
 #include <numsim_cas/tensor_to_scalar/tensor_dot.h>
 #include <numsim_cas/tensor_to_scalar/tensor_norm.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_operators.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_std.h>
 #include <numsim_cas/tensor_to_scalar/tensor_trace.h>
 
@@ -52,11 +54,11 @@ auto write_single_file(numsim::codegen::ConstitutiveModel const &model,
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc < 9) {
+  if (argc < 10) {
     std::cerr << "usage: " << argv[0]
               << " <CompileCheck.h> <HardeningCheck.h> <NewtonCheck.h>"
                  " <AutocatalyticCheck.h> <CoupledCheck.h> <PiecewiseCheck.h>"
-                 " <PiecewiseT2sCheck.h> <TangentCheck.h>\n";
+                 " <PiecewiseT2sCheck.h> <TangentCheck.h> <T2sOutputCheck.h>\n";
     return 1;
   }
 
@@ -178,9 +180,10 @@ int main(int argc, char *argv[]) {
   //
   // The SIBLING node `tensor_to_scalar_if_then_else` — cond/then/else ALL
   // t2s — was implemented in the same catch-up but had no end-to-end test
-  // (a t2s output is inexpressible: `add_output` takes only scalar/tensor).
-  // A t2s if_then_else is only reachable as a SUBTERM, so we lift it into a
-  // tensor output via `tensor_to_scalar_with_tensor_mul`:
+  // (a t2s output was inexpressible pre-#142: `add_output` took only
+  // scalar/tensor). This recipe keeps the historical SUBTERM shape — the
+  // t2s if_then_else lifted into a tensor output via
+  // `tensor_to_scalar_with_tensor_mul`:
   //   sigma = (trace(eps) != 0 ? trace(eps) : norm(eps)) * eps
   // The condition is itself t2s (`trace(eps)`), exercising the t2s emitter's
   // condition path (NOT the scalar one) — the one subtlety this node has.
@@ -221,6 +224,26 @@ int main(int argc, char *argv[]) {
     model.add_output("stress", sigma, roles::Stress);
     model.add_algorithmic_tangent("dstress_deps", "stress", "eps");
     if (int rc = write_single_file(model, argv[8]); rc != 0) return rc;
+  }
+
+  // ── Recipe 9: tensor_to_scalar OUTPUT (#142) ─────────────────────────
+  //
+  // Scalar-from-tensor outputs (von Mises, dissipation) were inexpressible
+  // before #142 — `add_output` took only scalar/tensor expressions. Two t2s
+  // outputs from one recipe exercise both the plain t2s leaf function and
+  // t2s arithmetic + a t2s std function:
+  //   tr_eps  = trace(eps)          (t2s leaf node)
+  //   vm_like = sqrt(w · (ε : ε))   (scalar·t2s mul under a t2s sqrt)
+  // Both must surface as `double &<name>_out` parameters. The driver checks
+  // hand-computed values on a known strain.
+  {
+    ConstitutiveModel model("T2sOutputCheck");
+    auto w = model.add_parameter("w", 1.5);
+    auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
+    model.add_output("tr_eps", make_expression<tensor_trace>(eps));
+    auto dot = make_expression<tensor_dot>(eps); // ε:ε
+    model.add_output("vm_like", sqrt(w * dot), roles::Dissipation);
+    if (int rc = write_single_file(model, argv[9]); rc != 0) return rc;
   }
 
   return 0;
