@@ -23,15 +23,14 @@
 #include "LinearHardening.h" // generated: dα/dt = K·α (+ scalar output)
 #include "NonlinearDecay.h"  // generated: dα/dt = K·α²
 
-// The tensor-stress end-to-end case is GCC-only. Wiring a tensor input
-// (input_property<tmech::tensor>::wire) instantiates history_property<tensor>'s
-// `static_assert(is_trivially_copyable_v<T>)`, which FAILS under clang-19 because
-// tmech::tensor is trivially copyable under gcc-14 but not clang-19. This is an
-// UPSTREAM numsim-core/tmech incompatibility (it breaks numsim-materials' own
-// linear_elasticity under clang too), not a defect in the generated code — which
-// gcc compiles and runs correctly. Tracked: numsim-core#16. The emit shape itself
-// is verified compiler-independently by NumSimMaterialTargetTest.EmitsTensorStressOutput.
-#if defined(__GNUC__) && !defined(__clang__)
+// issue #140: this block was `#if GCC && !clang` while numsim-core#16
+// (history_property<tensor>'s triviality static_assert failing under clang)
+// was unfixed — which silently hollowed 11 of 17 tests out of the clang CI
+// legs with no skip report. The core pin now includes the numsim-core#17
+// fix (see the _ncg_core_pin comment in tests/CMakeLists.txt), so the gate
+// is stale: all tests compile and run under both compilers. If a future
+// upstream regression re-breaks clang, prefer a loud cmake-level exclusion
+// with a warning over a silent preprocessor compile-out.
 #define NCG_TENSOR_E2E 1
 #include <tmech/tmech.h>
 #include "numsim-materials/solvers/backward_euler.h"
@@ -44,7 +43,6 @@
 #include "J2Voce.h"         // generated: J2 with Voce (saturating) hardening
 #include "J2Swift.h"        // generated: J2 with Swift (power-law) hardening
 #include "J2PathDep.h"      // generated: PATH-DEPENDENT J2 (tensor εᵖ history, #92)
-#endif
 
 #include <gtest/gtest.h>
 
