@@ -188,6 +188,27 @@ TEST(ScalarCodeEmit, NotEqualEmitsStaticCastDouble) {
   EXPECT_NE(rendered.find(" != "), std::string::npos) << "got: " << rendered;
 }
 
+// ─── Negation of a negative literal (issue #136) ──────────────────────
+//
+// The operator layer canonicalises negative constants into
+// scalar_negative(positive), so this shape is only reachable by direct
+// node construction — the same public factory recipe.h uses for leaves.
+// The emitter must not rely on that upstream invariant: naive `-` +
+// `-5.0` concatenation emitted an invalid `--5.0`.
+TEST(ScalarCodeEmit, NegationOfNegativeLiteralParenthesizes) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto c = cas::make_expression<cas::scalar_constant>(-5.0);
+  ASSERT_EQ(emit.apply(c), "-5.0"); // sanity: the literal itself
+  auto n = cas::make_expression<cas::scalar_negative>(c);
+  auto result = emit.apply(n);
+  auto rendered = ctx.render_statements();
+  EXPECT_EQ(result.find("--"), std::string::npos) << "got: " << result;
+  EXPECT_EQ(rendered.find("--"), std::string::npos) << "got: " << rendered;
+  EXPECT_NE(rendered.find("-(-5.0)"), std::string::npos)
+      << "got: " << rendered;
+}
+
 // ─── Piecewise nodes ──────────────────────────────────────────────────
 
 TEST(ScalarCodeEmit, MaxEmitsStdMax) {
