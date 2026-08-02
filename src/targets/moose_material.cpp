@@ -1,6 +1,7 @@
 #include <numsim_codegen/targets/moose_material.h>
 
 #include <numsim_codegen/code_emit/spectral_decompose_emit.h>
+#include <numsim_codegen/passes/symbol_validation_pass.h>
 #include <numsim_codegen/recipe.h>
 
 #include <cmath>
@@ -446,6 +447,26 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name,
 
 auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
     -> std::vector<EmittedFile> {
+  // issue #143: `app_name` lands inside the generated
+  // `registerMooseObject("<app_name>", ...)` string literal. Strictly, only
+  // `"`, `\` and control characters can break the literal — but MOOSE app
+  // names are the app's registered class name, which is identifier-shaped
+  // by construction ("MyApp", "MooseTestApp"). So reuse the same
+  // locale-independent identifier check the model name gets, rather than
+  // merely escaping: an escaped-but-misspelled app name would compile and
+  // then silently never register with the running app. This is therefore
+  // deliberately stricter than literal-safety requires (a space or keyword
+  // would be *safe* in the literal, just never a real MOOSE app name) —
+  // relax to an escape-only policy if a real consumer ever hits it.
+  if (!SymbolValidationPass::is_valid_cxx_identifier(m_app_name)) {
+    throw std::runtime_error(
+        "MooseMaterialTarget: app_name '" + m_app_name +
+        "' is not an identifier. It is embedded in "
+        "registerMooseObject(\"<app_name>\", ...) and must match the MOOSE "
+        "app's registered class name, which is always identifier-shaped "
+        "(e.g. \"MyApp\").");
+  }
+
   // Stateful symbols would need old/new MaterialProperty pair handling
   // that the MOOSE backend doesn't implement yet. Fail loudly rather
   // than silently emit a regular read.
