@@ -144,9 +144,15 @@ selecting the GCC-14 toolchain still fails). The supported clang path is
 clang-19 from the LLVM toolchain repo paired with `libstdc++-14-dev` —
 see `docs/workflow.md` §6.2 and `.github/workflows/build.yml`.
 
-To verify your toolchain: `clang++ --version` should report ≥19, and
-`echo "#include <expected>" | $CXX -std=c++23 -x c++ -E - > /dev/null`
-should succeed.
+To verify your toolchain: `clang++ --version` should report ≥19, and the
+following should compile (note: merely `#include`-ing `<expected>` is NOT
+a valid check — the header preprocesses fine on clang ≤ 18, it just leaves
+`std::expected` undefined):
+
+```bash
+printf '#include <expected>\nstd::expected<int,int> e{1};\n' | \
+  $CXX -std=c++23 -x c++ -fsyntax-only -
+```
 
 ```bash
 git clone https://github.com/NumSim-Stack/numsim-codegen.git
