@@ -27,7 +27,7 @@ boundary using tmech's adaptors (`full`, `voigt`, `abq_std`).
 |--------|--------|--------|
 | `StandaloneCxxTarget` | ✓ | Single inline header with the generic compute function |
 | `MooseMaterialTarget` | ✓ | `.h` + `.C` pair: Material class with `validParams`, constructor, `computeQpProperties`, optional `Jacobian_mult` consistent tangent |
-| `NumSimMaterialTarget` | ✓ | numsim-materials rate / return-map material header + JSON config (single scalar state variable per material for now) |
+| `NumSimMaterialTarget` | ✓ | numsim-materials rate / return-map material header + JSON config (one scalar rate variable / Newton unknown per material; additional scalar or tensor history state supported) |
 | `AbaqusUMATTarget`    | planned | Fortran-callable `extern "C"` UMAT with Voigt boundary |
 | `AnsysUSERMATTarget`  | planned | Fortran-callable USERMAT |
 | `LSDynaUMATTarget`    | planned | LS-DYNA convention |
@@ -51,7 +51,7 @@ Abaqus/ANSYS/LS-DYNA targets.
 ## Example (MOOSE target)
 
 ```cpp
-// Mirrors examples/moose_linear_elastic.cpp (compiled in CI).
+// Adapted from examples/moose_linear_elastic.cpp (compiled in CI).
 #include <numsim_codegen/numsim_codegen.h>
 
 #include <numsim_cas/scalar/scalar_operators.h>
@@ -136,16 +136,17 @@ example pattern is exactly how the tests and examples link
 generated, and the dependency headers (numsim-cas, tmech) are not installed
 alongside — blocked on numsim-cas exporting installable targets.
 
-Clang 18 is **not in the CI matrix** — ubuntu-24.04 defaults to pairing
-it with libstdc++-13, which lacks the C++23 `<expected>` header. The
-workaround of manually installing `libstdc++-14-dev` alongside clang-18
-is untested and unsupported here. The supported clang path is clang-19
-from the LLVM toolchain repo paired with `libstdc++-14-dev` — see
-`docs/workflow.md` §6.2 and `.github/workflows/build.yml`.
+Clang 18 (and older) **cannot build this project at all**: libstdc++'s
+`std::expected` is guarded by `__cpp_concepts >= 202002L`, which clang
+only defines from clang-19 — so `<expected>` stays empty under clang ≤ 18
+*regardless of the libstdc++ version installed* (verified: clang-18
+selecting the GCC-14 toolchain still fails). The supported clang path is
+clang-19 from the LLVM toolchain repo paired with `libstdc++-14-dev` —
+see `docs/workflow.md` §6.2 and `.github/workflows/build.yml`.
 
-To verify your toolchain: `clang++ --version` should report ≥19, and the
-libstdc++ it picks up should be ≥14 (check with
-`echo "#include <expected>" | $CXX -std=c++23 -x c++ -E - > /dev/null`).
+To verify your toolchain: `clang++ --version` should report ≥19, and
+`echo "#include <expected>" | $CXX -std=c++23 -x c++ -E - > /dev/null`
+should succeed.
 
 ```bash
 git clone https://github.com/NumSim-Stack/numsim-codegen.git
