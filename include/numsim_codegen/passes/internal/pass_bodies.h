@@ -381,15 +381,14 @@ inline void AlgorithmicTangentPass::run(PassContext &pctx) {
     // once NewtonSegment carries a strain-coupled (t2s) residual so that
     // ∂R_i/∂ε ≠ 0; with the scalar-residual machinery this loop is a no-op.
     // ∂σ/∂x_i is taken through the diff(tensor, scalar) seam (numsim-cas#275).
-    for (auto const &seg : pctx.newton_segments) {
+    for ([[maybe_unused]] auto const &seg : pctx.newton_segments) {
       // Placeholder typed so this staged block compiles cleanly as a no-op
       // when the macro is flipped on — leaving ONLY the seam (cas::diff in
       // internal/algorithmic_tangent.h) as the actual gap to implement. The
       // scalar variable for seg.state_var_name is resolved via the same
       // tensor/scalar symbol maps used above.
-      cas::expression_holder<cas::scalar_expression> const *x = nullptr;
-      (void)seg;
-      (void)x;
+      [[maybe_unused]] cas::expression_holder<cas::scalar_expression> const *x =
+          nullptr;
       // TODO(3b-1 strain-coupled): build dR_i/dε (diff of a t2s residual
       // w.r.t. ε), dσ/dx_i = detail::diff_tensor_wrt_scalar(*sigma, *x), and
       // accumulate (-1/J_i) * outer(dσ/dx_i, dR_i/dε) into `tangent`.

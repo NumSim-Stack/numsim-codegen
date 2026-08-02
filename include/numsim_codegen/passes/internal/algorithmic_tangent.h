@@ -40,9 +40,11 @@
 
 namespace numsim::codegen::detail {
 
+// Both parameters are [[maybe_unused]]: the capability-detection #else branch
+// below throws without touching them.
 [[nodiscard]] inline auto diff_tensor_wrt_scalar(
-    cas::expression_holder<cas::tensor_expression> const &expr,
-    cas::expression_holder<cas::scalar_expression> const &arg)
+    [[maybe_unused]] cas::expression_holder<cas::tensor_expression> const &expr,
+    [[maybe_unused]] cas::expression_holder<cas::scalar_expression> const &arg)
     -> cas::expression_holder<cas::tensor_expression> {
 // Capability detection. The cas#275 overload — diff(tensor, scalar) — ships as
 // the `tensor_differentiation_wrt_scalar` visitor header; detect its PRESENCE
@@ -55,8 +57,6 @@ namespace numsim::codegen::detail {
     __has_include(<numsim_cas/tensor/visitors/tensor_differentiation_wrt_scalar.h>)
   return cas::diff(expr, arg);
 #else
-  (void)expr;
-  (void)arg;
   throw std::runtime_error(
       "AlgorithmicTangentPass: ∂(tensor)/∂(scalar) is not yet "
       "available — blocked on numsim-cas#275 (add "

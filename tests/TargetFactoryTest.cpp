@@ -38,7 +38,7 @@ TEST(TargetFactory, NamesListDefaultFirstAndAreAllConstructible) {
 
 TEST(TargetFactory, UnknownNameThrowsWithDiagnostic) {
   try {
-    (void)make_target("abaqus");
+    [[maybe_unused]] auto const discarded = make_target("abaqus");
     FAIL() << "expected throw on unknown target";
   } catch (std::runtime_error const &e) {
     std::string const msg(e.what());

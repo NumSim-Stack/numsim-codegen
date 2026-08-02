@@ -114,7 +114,8 @@ TEST(RecipeView, RequireMutableModelThrowsOnConstView) {
   RecipeView view(static_cast<ConstitutiveModel const &>(model));
   try {
     // Expected to throw (const view); the [[nodiscard]] return is never reached.
-    (void)view.require_mutable_model("TestMutatingPass");
+    [[maybe_unused]] auto &discarded =
+        view.require_mutable_model("TestMutatingPass");
     FAIL() << "expected runtime_error when require_mutable on a const view";
   } catch (std::runtime_error const &e) {
     std::string msg(e.what());
@@ -462,7 +463,7 @@ TEST(TensorSpaceConsistencyPass, RegistersAsSecondValidator) {
   auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
   auto eps = model.add_tensor_input("eps", 3, 2, roles::Strain);
   model.add_output("stress", 2 * mu * eps, roles::Stress);
-  EXPECT_NO_THROW((void)model.emit_compute_function());
+  EXPECT_NO_THROW([[maybe_unused]] auto const discarded = model.emit_compute_function());
 }
 
 // ─── CodeEmitPass ────────────────────────────────────────────────────

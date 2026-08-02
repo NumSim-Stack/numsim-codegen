@@ -564,7 +564,7 @@ TEST(NumSimMaterialEndToEnd, J2RadialReturnTangentMatchesNumericalDiff) {
   for (int i = 0; i < 8; ++i) {
     ctx.update();
 
-    const auto eps = read_tensor(ctx, "stepper", "strain");
+    [[maybe_unused]] const auto eps = read_tensor(ctx, "stepper", "strain");
     const T dgamma = ctx.get<T>("J2Return", "dgamma");
     const auto sig = read_tensor(ctx, "J2Return", "stress");
 
@@ -578,7 +578,6 @@ TEST(NumSimMaterialEndToEnd, J2RadialReturnTangentMatchesNumericalDiff) {
     const T dev_sig_norm = std::sqrt(tmech::dcontract(dev_sig, dev_sig));
     EXPECT_NEAR(dev_sig_norm, sy + H * dgamma, 1e-9)
         << "step " << i << ": stress must lie on the yield surface";
-    (void)eps;
 
     // (2) TANGENT — the emitted dσ/dε FD-matches through the real re-solve.
     max_rel = std::max(max_rel, ctx.get<T>("checker", "rel_error"));

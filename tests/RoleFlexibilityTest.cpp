@@ -43,7 +43,7 @@ TEST(RoleFlexibility, MooseRejectsAnyStatefulRoleOnInput) {
 
   MooseMaterialTarget target;
   try {
-    (void)target.emit(m);
+    [[maybe_unused]] auto const discarded = target.emit(m);
     FAIL() << "expected std::runtime_error for stateful input role";
   } catch (std::runtime_error const &e) {
     std::string msg(e.what());
@@ -81,7 +81,7 @@ TEST(RoleFlexibility, RejectsNameCollisionWithCatalogueButMismatchedAttrs) {
            .is_symmetric = false, .expected_rank = 2};
 
   try {
-    (void)m.add_tensor_input("eps", 3, 2, bad);
+    [[maybe_unused]] auto const eps = m.add_tensor_input("eps", 3, 2, bad);
     FAIL() << "expected throw on attribute mismatch with catalogue role";
   } catch (std::runtime_error const &e) {
     std::string msg(e.what());
@@ -139,7 +139,7 @@ TEST(RoleFlexibility, RoleNameSurvivesTemporaryStringSource) {
     std::string local_name = "temporary_role";
     Role transient{.name = local_name, .is_driving = true,
                    .expected_rank = 0};
-    (void)m.add_scalar_input("x", transient);
+    [[maybe_unused]] auto const x = m.add_scalar_input("x", transient);
     local_name = "GARBAGE";  // mutate to detect any aliasing
   }
   auto const *found = m.find_input_by_role(Role{.name = "temporary_role"});

@@ -46,7 +46,8 @@ auto header_of(std::vector<EmittedFile> const &files) -> std::string {
 // assert WHICH guard fired, not merely that *some* runtime_error was thrown.
 auto emit_throw_message(ConstitutiveModel const &m) -> std::string {
   try {
-    (void)NumSimMaterialTarget{}.emit(m); // expected to throw; [[nodiscard]]
+    // Expected to throw; the [[nodiscard]] return is never reached.
+    [[maybe_unused]] auto const discarded = NumSimMaterialTarget{}.emit(m);
   } catch (std::exception const &e) {
     return e.what();
   }
@@ -128,7 +129,7 @@ TEST(NumSimMaterialTarget, RejectsTensorStateMissingEvolution) {
   // guard (the tensor-kind branch is defensive/unreachable via the public API).
   ConstitutiveModel m("TensorState");
   m.add_tensor_state_variable("ep", 3, 2, make_expression<tensor_zero>(3, 2));
-  EXPECT_THROW((void)NumSimMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = NumSimMaterialTarget{}.emit(m), std::runtime_error);
 }
 
 TEST(NumSimMaterialTarget, RejectsMultipleCoupledStates) {
@@ -470,7 +471,7 @@ TEST(NumSimMaterialTarget, RejectsDanglingStateVariable) {
   auto c = m.add_parameter("c", 2.0);
   auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
   auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
-  (void)m.add_tensor_state_variable(
+  [[maybe_unused]] auto const acc = m.add_tensor_state_variable(
       "acc", 3, 2, make_expression<tensor_zero>(3, std::size_t{2})); // no eq
   m.add_scalar_residual_equation(z, z.current - c * trace(eps));
   m.add_output("stress", z.current * eps);
