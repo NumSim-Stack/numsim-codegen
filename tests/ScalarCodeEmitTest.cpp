@@ -7,7 +7,9 @@
 
 #include <gtest/gtest.h>
 
+#include <complex>
 #include <cstdlib>
+#include <limits>
 
 namespace numsim::codegen {
 
@@ -244,6 +246,33 @@ TEST(ScalarCodeEmit, ConstantLiteralRoundTripsExactly) {
     auto const lit = emit.apply(c);
     EXPECT_EQ(std::strtod(lit.c_str(), nullptr), v)
         << "emitted literal '" << lit << "' does not round-trip";
+  }
+}
+
+// NOTE: the emitter's complex-constant branch cannot be tested at the
+// current cas pin — `make_expression<scalar_constant>(std::complex<...>)`
+// throws "complex values are not supported" at construction, so the branch
+// is defensive dead code. It gets the same std::format + non-finite guard
+// treatment so it is correct if cas ever enables complex constants.
+
+// Non-finite constants have no C++ literal spelling — both the old and new
+// formatting emitted invalid text (`inf.0` / `nan.0`) silently. Reject
+// loudly at emit time instead (same policy as the targets' non-finite
+// parameter-default guards).
+TEST(ScalarCodeEmit, NonFiniteConstantThrows) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  for (double v : {std::numeric_limits<double>::infinity(),
+                   -std::numeric_limits<double>::infinity(),
+                   std::numeric_limits<double>::quiet_NaN()}) {
+    auto c = cas::make_expression<cas::scalar_constant>(v);
+    try {
+      [[maybe_unused]] auto const discarded = emit.apply(c);
+      ADD_FAILURE() << "expected non-finite constant " << v << " to throw";
+    } catch (std::runtime_error const &e) {
+      EXPECT_NE(std::string(e.what()).find("non-finite"), std::string::npos)
+          << e.what();
+    }
   }
 }
 
