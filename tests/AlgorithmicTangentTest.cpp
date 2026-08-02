@@ -351,7 +351,7 @@ TEST(AlgorithmicTangent, ScalarStressOutputRejectedAtEmit) {
 // only the exception TYPE would let any of them stand in for the others.
 auto emit_error_message(ConstitutiveModel &m) -> std::string {
   try {
-    (void)m.emit_compute_function();
+    [[maybe_unused]] auto const discarded = m.emit_compute_function();
   } catch (std::runtime_error const &e) {
     return e.what();
   }
