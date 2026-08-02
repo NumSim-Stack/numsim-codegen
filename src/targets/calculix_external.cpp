@@ -29,7 +29,9 @@ constexpr char const *kExternalSignature = R"(extern "C" void NCG_UMAT(
     int const *    /*ithermal*/, double const * /*TEMP1*/, double const * /*DTIME*/,
     double const * /*time*/,   double const * /*ttime*/,  int const *    icmd,
     int const *    /*ielas*/,  int const *    /*mi*/,     int const *    /*NSTATV*/,
-    double const * STATEV0,    double *       STATEV1,    double *       STRESS,
+    [[maybe_unused]] double const * STATEV0,
+    [[maybe_unused]] double *       STATEV1,
+    double *       STRESS,
     double *       DDSDDE,      int const *    /*iorien*/, double const * /*pgauss*/,
     double const * /*orab*/,   double *       /*PNEWDT*/, int const *    /*ipkon*/,
     int            /*size*/))";
@@ -106,12 +108,12 @@ auto CalculiXExternalTarget::emit(ConstitutiveModel const &model) const
   os << "// numsim-materials material (built once per thread) will live, with\n";
   os << "// per-integration-point history flowing through STATEV each call.\n";
   os << "struct ncg_material {\n";
-  os << "  void evaluate(double const *mprops, double const *strain_in,\n";
+  os << "  void evaluate([[maybe_unused]] double const *mprops,\n";
+  os << "                double const *strain_in,\n";
   os << "                double *stress_out, double *tangent_stiff, int icmd) const {\n";
   for (std::size_t k = 0; k < scope.params.size(); ++k) {
     os << "    double const " << scope.params[k] << " = mprops[" << k << "];\n";
   }
-  if (scope.params.empty()) os << "    (void)mprops;\n";
   os << "    tmech::adaptor<double const, 3, 2, tmech::abq_std<3, false>> "
      << scope.strain.name << "_ad(strain_in);\n";
   os << "    tmech::adaptor<double, 3, 2, tmech::abq_std<3, false>> "
@@ -157,9 +159,10 @@ auto CalculiXExternalTarget::emit(ConstitutiveModel const &model) const
   os << "} // namespace\n\n";
 
   // ── (3) the exported CalculiX external entry point ────────────────────────
+  // STATEV0/STATEV1 carry [[maybe_unused]] in kExternalSignature — the
+  // stateless path never reads them, but they stay NAMED for the future
+  // history round-trip.
   os << kExternalSignature << " {\n";
-  os << "  (void)STATEV0;\n";
-  os << "  (void)STATEV1; // stateless: no history round-trip yet\n";
   os << "  thread_state().evaluate(MPROPS, STRAN1, STRESS, DDSDDE, *icmd);\n";
   os << "}\n";
 
