@@ -352,8 +352,15 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
 
   // Register scalar symbols (state→local bare name, params→m_<name>) and tensor
   // symbols (input→local bare name) into an emit context. Shared by the residual
-  // /jacobian render and reused (fresh contexts) per output.
+  // /jacobian render and reused (fresh contexts) per output. Declared names are
+  // reserved so a symbol named like a CSE temporary (`t0`, …) is never
+  // redeclared by the generated locals (issue #8).
+  auto const reserved_names =
+      detail::emission_reserved_names(RecipeView{model});
   auto register_all = [&](CodeGenContext &c) {
+    for (auto const &n : reserved_names) {
+      c.reserve_name(n);
+    }
     for (auto const &[name, expr] : model.scalar_symbol_map()) {
       if (param_names.contains(name)) {
         c.register_symbol_scalar(expr, "m_" + name);
@@ -1004,8 +1011,15 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
   // Emit-name mapping: the state current → a local (bare `cur_name`, bound from
   // m_<state>.get()); parameters → their member `m_<name>`; the rate-leaf guard
   // above guarantees nothing else can appear.
+  // Declared names are reserved in every emit context here so a symbol named
+  // like a CSE temporary (`t0`, …) is never redeclared (issue #8).
+  auto const reserved_names =
+      detail::emission_reserved_names(RecipeView{model});
   CodeGenContext ctx;
   CodeEmitPipeline pipeline(ctx);
+  for (auto const &n : reserved_names) {
+    ctx.reserve_name(n);
+  }
   for (auto const &[name, expr] : model.scalar_symbol_map()) {
     if (param_names.contains(name)) {
       ctx.register_symbol_scalar(expr, "m_" + name);
@@ -1021,6 +1035,9 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
   // Register the scalar symbols (state→local, params→m_<name>) into a fresh
   // emit context — shared by every per-output render below.
   auto register_scalars = [&](CodeGenContext &c) {
+    for (auto const &n : reserved_names) {
+      c.reserve_name(n);
+    }
     for (auto const &[name, expr] : model.scalar_symbol_map()) {
       if (param_names.contains(name)) {
         c.register_symbol_scalar(expr, "m_" + name);

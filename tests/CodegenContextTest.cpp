@@ -61,4 +61,37 @@ TEST(CodegenContext, ResetClearsStatementsAndCseTable) {
   EXPECT_EQ(ctx.find(&dummy), nullptr);
 }
 
+// Issue #8: a user symbol named `t0`/`t1`/… must never be redeclared by a
+// generated temporary. reserve_name() makes fresh_name() skip the reserved
+// candidates while leaving the numbering of non-colliding temps untouched.
+TEST(CodegenContext, FreshNameSkipsReservedNames) {
+  CodeGenContext ctx;
+  ctx.reserve_name("t1");
+  ctx.reserve_name("t2");
+  int a = 0, b = 0, c = 0;
+  EXPECT_EQ(ctx.emit_temporary(&a, "1.0", "double"), "t0");
+  EXPECT_EQ(ctx.emit_temporary(&b, "2.0", "double"), "t3");
+  EXPECT_EQ(ctx.emit_temporary(&c, "3.0", "double"), "t4");
+}
+
+TEST(CodegenContext, ReservationsSurviveReset) {
+  // reset() keeps reservations (like the symbol registrations they guard):
+  // the per-block reset() calls inside one emission must not un-reserve the
+  // function's declared identifiers.
+  CodeGenContext ctx;
+  ctx.reserve_name("t0");
+  int a = 0, b = 0;
+  EXPECT_EQ(ctx.emit_temporary(&a, "1.0", "double"), "t1");
+  ctx.reset();
+  EXPECT_EQ(ctx.emit_temporary(&b, "2.0", "double"), "t2");
+}
+
+TEST(CodegenContext, FullResetClearsReservations) {
+  CodeGenContext ctx;
+  ctx.reserve_name("t0");
+  ctx.full_reset();
+  int a = 0;
+  EXPECT_EQ(ctx.emit_temporary(&a, "1.0", "double"), "t0");
+}
+
 } // namespace numsim::codegen
