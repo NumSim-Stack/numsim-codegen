@@ -94,6 +94,69 @@ TEST(Recipe, MultipleOutputsShareCseAcrossBody) {
       << src;
 }
 
+// ─── #142: tensor_to_scalar outputs (scalar-from-tensor) ─────────────────────
+
+// A t2s expression (trace(ε)) declared as an output is SCALAR-valued: the
+// generated signature carries `double &<name>_out` and the body routes
+// through the t2s emitter (tmech::trace).
+TEST(Recipe, TensorToScalarOutputEmitsScalarSignature) {
+  ConstitutiveModel m("TraceOut");
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("tr_eps", trace(eps));
+
+  ASSERT_EQ(m.outputs().size(), 1u);
+  EXPECT_EQ(m.outputs()[0].kind, OutputDecl::Kind::Scalar);
+
+  auto src = m.emit_compute_function();
+  EXPECT_NE(src.find("double &tr_eps_out"), std::string::npos)
+      << "got:\n" << src;
+  EXPECT_NE(src.find("tmech::trace"), std::string::npos) << "got:\n" << src;
+  EXPECT_NE(src.find("tr_eps_out = "), std::string::npos) << "got:\n" << src;
+}
+
+// Duplicate-name rejection covers the new overload too.
+TEST(Recipe, TensorToScalarOutputRejectsDuplicateName) {
+  ConstitutiveModel m("DupT2s");
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("q", trace(eps));
+  EXPECT_THROW(m.add_output("q", trace(eps)), std::runtime_error);
+  // ...and against an existing symbol name.
+  EXPECT_THROW(m.add_output("eps", trace(eps)), std::runtime_error);
+}
+
+// Role attribute check: a rank-0 role passes; a role expecting rank 2 can
+// never be satisfied by a scalar-valued output and throws at add time.
+TEST(Recipe, TensorToScalarOutputRoleRankCheck) {
+  ConstitutiveModel m("RoleT2s");
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("diss", trace(eps), roles::Dissipation); // expected_rank == 0
+  try {
+    m.add_output("bad", trace(eps), roles::Stress); // expected_rank == 2
+    FAIL() << "expected throw on rank-2 role for a t2s (scalar) output";
+  } catch (std::exception const &e) {
+    EXPECT_NE(std::string(e.what()).find("rank"), std::string::npos)
+        << e.what();
+  }
+  // The rejected output must not have been recorded.
+  EXPECT_EQ(m.outputs().size(), 1u);
+}
+
+// A t2s output referencing an undeclared tensor leaf is caught by
+// SymbolValidationPass at emit time (the same guarantee scalar/tensor
+// outputs have — the new variant alternative must not bypass it).
+TEST(Recipe, TensorToScalarOutputValidatesLeaves) {
+  ConstitutiveModel m("T2sLeaves");
+  auto bogus = cas::make_expression<cas::tensor>("undeclared_eps", 3, 2);
+  m.add_output("tr", trace(bogus));
+  try {
+    m.validate();
+    FAIL() << "expected throw on undeclared tensor leaf in a t2s output";
+  } catch (std::exception const &e) {
+    EXPECT_NE(std::string(e.what()).find("undeclared_eps"), std::string::npos)
+        << e.what();
+  }
+}
+
 // ─── Phase D: implicit residual equations (strain-coupled state) ─────────────
 
 // A scalar state defined by an implicit residual R(z, ε)=0. Unlike a rate, the
