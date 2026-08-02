@@ -346,13 +346,30 @@ TEST(AlgorithmicTangent, ScalarStressOutputRejectedAtEmit) {
   EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
 }
 
+// Emit `m`, expecting a throw, and hand back the diagnostic. The #118 tests
+// below are about WHICH of three failure modes the pass reports, so asserting
+// only the exception TYPE would let any of them stand in for the others.
+auto emit_error_message(ConstitutiveModel &m) -> std::string {
+  try {
+    (void)m.emit_compute_function();
+  } catch (std::runtime_error const &e) {
+    return e.what();
+  }
+  ADD_FAILURE() << "expected emit_compute_function to throw";
+  return {};
+}
+
 TEST(AlgorithmicTangent, UnknownStrainInputThrowsAtEmit) {
   using namespace numsim::cas;
   ConstitutiveModel m("M");
   auto eps = m.add_tensor_input("eps", 3, 2);
   m.add_output("stress", eps);
   m.add_algorithmic_tangent("t", "stress", "not_an_input");
-  EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
+  auto const msg = emit_error_message(m);
+  EXPECT_NE(msg.find("not a declared tensor input"), std::string::npos) << msg;
+  // A plain typo must NOT be reported as one of the sharper #118 diagnoses.
+  EXPECT_EQ(msg.find("STATE VARIABLE"), std::string::npos) << msg;
+  EXPECT_EQ(msg.find("SCALAR"), std::string::npos) << msg;
 }
 
 // #118: a tensor STATE VARIABLE is a registered tensor symbol (so it used to
@@ -366,7 +383,37 @@ TEST(AlgorithmicTangent, StateVariableStrainInputRejectedAtEmit) {
       "h", 3, 2, make_expression<tensor_zero>(std::size_t{3}, std::size_t{2}));
   m.add_output("stress", eps, roles::Stress);
   m.add_algorithmic_tangent("t", "stress", "h"); // "h" is a state var, not input
-  EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
+  auto const msg = emit_error_message(m);
+  EXPECT_NE(msg.find("STATE VARIABLE"), std::string::npos) << msg;
+  EXPECT_NE(msg.find("'h'"), std::string::npos) << msg;
+}
+
+// The `_old` half of the same state-variable pair is registered in
+// `tensor_symbol_map()` too (add_tensor_state_variable emits both handles), so
+// it is the same #118 hole under a different name — cover it explicitly.
+TEST(AlgorithmicTangent, StateVariableOldStrainInputRejectedAtEmit) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  auto h = m.add_tensor_state_variable(
+      "h", 3, 2, make_expression<tensor_zero>(std::size_t{3}, std::size_t{2}));
+  m.add_output("stress", eps, roles::Stress);
+  m.add_algorithmic_tangent("t", "stress", "h_old");
+  auto const msg = emit_error_message(m);
+  EXPECT_NE(msg.find("STATE VARIABLE"), std::string::npos) << msg;
+}
+
+// The third failure mode: the name resolves, but to a SCALAR symbol. Reported
+// distinctly from "undeclared" so the author is not sent hunting for a typo.
+TEST(AlgorithmicTangent, ScalarWrtInputRejectedAtEmit) {
+  using namespace numsim::cas;
+  ConstitutiveModel m("M");
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_scalar_input("temperature");
+  m.add_output("stress", eps, roles::Stress);
+  m.add_algorithmic_tangent("t", "stress", "temperature");
+  auto const msg = emit_error_message(m);
+  EXPECT_NE(msg.find("SCALAR"), std::string::npos) << msg;
 }
 
 // Locks the current rank-4 identity emission (PR #80 review, math finding Q3).
