@@ -1040,8 +1040,8 @@ public:
       std::string stress_name,
       std::string tangent_name) {
     // (1) The plastic-multiplier handle must belong to this model.
-    (void)resolve_scalar_state_var_index_(plastic_multiplier,
-                                          "add_j2_radial_return");
+    [[maybe_unused]] auto const pm_idx = resolve_scalar_state_var_index_(
+        plastic_multiplier, "add_j2_radial_return");
 
     // (2) Recover the placeholder leaf's name — it must be a single bare tensor
     // leaf. collect_tensor on a leaf returns exactly its own name.
