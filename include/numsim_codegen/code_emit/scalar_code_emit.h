@@ -7,6 +7,7 @@
 #include <numsim_cas/scalar/scalar_visitor_typedef.h>
 
 #include <algorithm>
+#include <cmath>
 #include <complex>
 #include <format>
 #include <ranges>
@@ -62,15 +63,31 @@ public:
   void operator()(cas::scalar_one const &) override { m_result = "1.0"; }
 
   void operator()(cas::scalar_constant const &v) override {
-    // std::format("{}", double) is shortest-round-trip (issue #131): the
-    // emitted literal parses back to the EXACT double. Default ostream
-    // precision (6 significant digits) silently truncated constants —
-    // parameter defaults were already hardened this way in the targets;
+    // std::format("{}", double) is shortest-round-trip (issue #131): a
+    // FINITE emitted literal parses back to the EXACT double. Default
+    // ostream precision (6 significant digits) silently truncated constants
+    // — parameter defaults were already hardened this way in the targets;
     // this is the general path every embedded constant routes through.
+    //
+    // Non-finite values have no C++ literal spelling (both the old and new
+    // formatting produced invalid text like `inf.0`), and a NaN/inf baked
+    // into a recipe is a modelling error — reject loudly at emit time, the
+    // same policy the targets apply to non-finite parameter DEFAULTS.
+    auto reject_nonfinite = [](double d, char const *what) {
+      if (!std::isfinite(d)) {
+        throw std::runtime_error(std::format(
+            "ScalarCodeEmit: scalar_constant with non-finite {} value ({}) "
+            "has no valid C++ literal spelling. Non-finite constants in a "
+            "recipe are almost always a construction bug upstream.",
+            what, d));
+      }
+    };
     auto [literal, is_compound] = std::visit(
-        [](auto const &val) -> std::pair<std::string, bool> {
+        [&](auto const &val) -> std::pair<std::string, bool> {
           using V = std::decay_t<decltype(val)>;
           if constexpr (std::is_same_v<V, std::complex<double>>) {
+            reject_nonfinite(val.real(), "complex real");
+            reject_nonfinite(val.imag(), "complex imaginary");
             return {std::format("std::complex<double>({}, {})", val.real(),
                                 val.imag()),
                     true};
@@ -79,6 +96,7 @@ public:
             os << "(" << val.num << ".0 / " << val.den << ".0)";
             return {os.str(), true};
           } else {
+            reject_nonfinite(static_cast<double>(val), "double");
             auto s = std::format("{}", static_cast<double>(val));
             if (s.find('.') == std::string::npos &&
                 s.find('e') == std::string::npos &&
