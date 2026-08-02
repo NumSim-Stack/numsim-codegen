@@ -20,6 +20,7 @@
 #include <expected>
 #include <format>
 #include <optional>
+#include <ostream>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -81,6 +82,109 @@ std::string tensor_cxx_type(std::size_t dim, std::size_t rank) {
   return "tmech::tensor<value_type, " + std::to_string(dim) + ", " +
          std::to_string(rank) + ">";
 }
+
+// ── Helpers shared by the rate and residual emission paths (#139) ──────────
+// Both paths consume the same collected shapes and emit the same boilerplate;
+// keeping them in ONE place means a hardening fix cannot land in one path and
+// silently miss the sibling.
+
+// Declared symbols split into (decls, name-set) — the shape both paths bind.
+struct CollectedSymbols {
+  std::vector<SymbolDecl> decls;
+  std::set<std::string> names;
+};
+
+// Scalar parameters the emitted expressions may reference, skipping the
+// framework time step: the integrator/solver owns discretization, so neither a
+// rate material nor a (rate-independent) residual material ever sees `dt`.
+CollectedSymbols collect_scalar_params(ConstitutiveModel const &model) {
+  CollectedSymbols out;
+  for (auto const &p : model.parameters()) {
+    if (p.is_time_step || p.kind != SymbolDecl::Kind::Scalar) continue;
+    out.decls.push_back(p);
+    out.names.insert(p.name);
+  }
+  return out;
+}
+
+// Tensor inputs (e.g. strain): each is wired from a producer material via a
+// Global-edge input_property, read by the property name `<input-name>` (the
+// producer must publish a property of that name), with a `<name>_source`
+// string parameter naming the producer. The scope guards already rejected
+// scalar inputs on both paths.
+CollectedSymbols collect_tensor_inputs(ConstitutiveModel const &model) {
+  CollectedSymbols out;
+  for (auto const &in : model.inputs()) {
+    out.decls.push_back(in);
+    out.names.insert(in.name);
+  }
+  return out;
+}
+
+// A non-finite default would emit `value_type{nan}`/`{inf}` (no such C++
+// literal) and an invalid JSON number — reject rather than emit broken code.
+void reject_non_finite_default(SymbolDecl const &p) {
+  if (p.default_value.has_value() && !std::isfinite(*p.default_value)) {
+    throw std::runtime_error(
+        "NumSimMaterialTarget: parameter '" + p.name +
+        "' has a non-finite default (" + fmt(*p.default_value) +
+        "); cannot emit as a C++ literal or JSON number.");
+  }
+}
+
+// parameters() schema: every scalar parameter (default → set_default, else
+// is_required), the path's fixed source parameter (`solver_source` /
+// `integrator_source`), and one required `<input>_source` per tensor input.
+void emit_parameters_schema(std::ostream &h,
+                            std::vector<SymbolDecl> const &params,
+                            std::vector<SymbolDecl> const &tensor_inputs,
+                            char const *source_param) {
+  h << "  static input_parameter_controller parameters() {\n";
+  h << "    input_parameter_controller para{base::parameters()};\n";
+  for (auto const &p : params) {
+    if (p.default_value.has_value()) {
+      h << "    para.template insert<value_type>(\"" << p.name
+        << "\").template add<numsim_core::set_default>(value_type{"
+        << fmt(*p.default_value) << "});\n";
+    } else {
+      // Defensive: `add_parameter` always sets a default, so this is currently
+      // unreachable via the public API. Kept (with the JSON-omission sibling
+      // in the config emission) for the day a no-default/required-parameter
+      // API lands.
+      h << "    para.template insert<value_type>(\"" << p.name
+        << "\").template add<numsim_core::is_required>();\n";
+    }
+  }
+  h << "    para.template insert<std::string>(\"" << source_param << "\")\n";
+  h << "        .template add<numsim_core::is_required>();\n";
+  for (auto const &ti : tensor_inputs) {
+    h << "    para.template insert<std::string>(\"" << ti.name << "_source\")\n";
+    h << "        .template add<numsim_core::is_required>();\n";
+  }
+  h << "    return para;\n";
+  h << "  }\n\n";
+}
+
+// Emitted-member uniqueness guard: every generated `m_<base>` member basename
+// must be distinct, else the class gets duplicate members / initializers
+// (uncompilable). The recipe enforces symbol-name uniqueness, but the emitter
+// SYNTHESIZES extra names (fixed members, `out_<output>`, `<input>_source`)
+// that a recipe symbol can still collide with. Both paths claim their names
+// through this one guard so the hazard's message cannot drift.
+class MemberUniquenessGuard {
+public:
+  void claim(std::string const &base) {
+    if (!m_bases.insert(base).second) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: emitted member 'm_" + base +
+          "' would be duplicated — a recipe symbol collides with a synthesized "
+          "member name; rename the offending state/parameter/input/output.");
+    }
+  }
+
+private:
+  std::set<std::string> m_bases;
+};
 
 // First-increment scope: exactly one scalar state variable + one scalar
 // evolution equation `dx/dt = f(x, params)`, and NOTHING this increment can't
@@ -250,22 +354,10 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
   auto const &sv = svs[req.state_variable_idx];
   auto const &cur_name = model.symbols()[sv.current_symbol_idx].name;
 
-  // Scalar parameters the residual / outputs may reference (skip the framework
-  // time step — a residual material is rate-independent in this increment).
-  std::vector<SymbolDecl> params;
-  std::set<std::string> param_names;
-  for (auto const &p : model.parameters()) {
-    if (p.is_time_step || p.kind != SymbolDecl::Kind::Scalar) continue;
-    params.push_back(p);
-    param_names.insert(p.name);
-  }
-
-  std::vector<SymbolDecl> tensor_inputs;
-  std::set<std::string> tensor_input_names;
-  for (auto const &in : model.inputs()) {
-    tensor_inputs.push_back(in);
-    tensor_input_names.insert(in.name);
-  }
+  // Scalar parameters the residual / outputs may reference + the wired tensor
+  // inputs (shared collectors, #139).
+  auto const [params, param_names] = collect_scalar_params(model);
+  auto const [tensor_inputs, tensor_input_names] = collect_tensor_inputs(model);
 
   // #92: internal variables (state vars set by a post-solve update equation).
   // Each carries its own history (scalar or tensor); their `_old` value is bound
@@ -317,12 +409,7 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
   reject_reserved(cur_name, "state variable name");
   for (auto const &p : params) {
     reject_reserved(p.name, "parameter name");
-    if (p.default_value.has_value() && !std::isfinite(*p.default_value)) {
-      throw std::runtime_error(
-          "NumSimMaterialTarget: parameter '" + p.name +
-          "' has a non-finite default (" + fmt(*p.default_value) +
-          "); cannot emit as a C++ literal or JSON number.");
-    }
+    reject_non_finite_default(p);
   }
   // The Newton increment is a compute()-local named `d<state>`; a tensor input
   // OR an internal variable's `_old` local (also bare compute()-locals) named
@@ -642,23 +729,15 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
   // Emitted-member uniqueness guard (same hazard as the rate path: synthesized
   // member names can collide with recipe symbols).
   {
-    std::set<std::string> member_bases;
-    auto claim = [&member_bases](std::string const &base) {
-      if (!member_bases.insert(base).second) {
-        throw std::runtime_error(
-            "NumSimMaterialTarget: emitted member 'm_" + base +
-            "' would be duplicated — a recipe symbol collides with a synthesized "
-            "member name; rename the offending state/parameter/input/output.");
-      }
-    };
-    claim("solver"); // the fixed material_ref member m_solver
-    claim(cur_name);
-    for (auto const &iv : internals) claim(iv.name); // internal-var histories
-    for (auto const &p : params) claim(p.name);
-    for (auto const &o : outputs) claim("out_" + o.name);
+    MemberUniquenessGuard guard;
+    guard.claim("solver"); // the fixed material_ref member m_solver
+    guard.claim(cur_name);
+    for (auto const &iv : internals) guard.claim(iv.name); // internal-var histories
+    for (auto const &p : params) guard.claim(p.name);
+    for (auto const &o : outputs) guard.claim("out_" + o.name);
     for (auto const &ti : tensor_inputs) {
-      claim(ti.name);
-      claim(ti.name + "_source");
+      guard.claim(ti.name);
+      guard.claim(ti.name + "_source");
     }
   }
 
@@ -760,28 +839,9 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     }
   }
 
-  // parameters() schema
-  h << "  static input_parameter_controller parameters() {\n";
-  h << "    input_parameter_controller para{base::parameters()};\n";
-  for (auto const &p : params) {
-    if (p.default_value.has_value()) {
-      h << "    para.template insert<value_type>(\"" << p.name
-        << "\").template add<numsim_core::set_default>(value_type{"
-        << fmt(*p.default_value) << "});\n";
-    } else {
-      h << "    para.template insert<value_type>(\"" << p.name
-        << "\").template add<numsim_core::is_required>();\n";
-    }
-  }
-  h << "    para.template insert<std::string>(\""
-    << contract::solver_source_param << "\")\n";
-  h << "        .template add<numsim_core::is_required>();\n";
-  for (auto const &ti : tensor_inputs) {
-    h << "    para.template insert<std::string>(\"" << ti.name << "_source\")\n";
-    h << "        .template add<numsim_core::is_required>();\n";
-  }
-  h << "    return para;\n";
-  h << "  }\n\n";
+  // parameters() schema (shared writer, #139)
+  emit_parameters_schema(h, params, tensor_inputs,
+                         contract::solver_source_param);
 
   // compute()
   h << "  // Solves R(" << cur_name << ", inputs)=0 for the increment via\n";
@@ -952,27 +1012,11 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
   auto const &eq = model.evolution_equations()[0];
   auto const &cur_name = model.symbols()[sv.current_symbol_idx].name;
 
-  // Scalar parameters the rate may reference (skip the framework time-step:
-  // the integrator owns discretization, so a rate material never sees `dt`).
-  std::vector<SymbolDecl> params;
-  std::set<std::string> param_names;
-  for (auto const &p : model.parameters()) {
-    if (p.is_time_step || p.kind != SymbolDecl::Kind::Scalar) continue;
-    params.push_back(p);
-    param_names.insert(p.name);
-  }
-
-  // Tensor inputs (e.g. strain): each is wired from a producer material via a
-  // Global-edge input_property, read by the property name `<input-name>` (the
-  // producer must publish a property of that name). Each gets a `<name>_source`
-  // string parameter naming the producer. The rate-scope guard already
-  // rejected scalars.
-  std::vector<SymbolDecl> tensor_inputs;
-  std::set<std::string> tensor_input_names;
-  for (auto const &in : model.inputs()) {
-    tensor_inputs.push_back(in);
-    tensor_input_names.insert(in.name);
-  }
+  // Scalar parameters the rate may reference + the wired tensor inputs
+  // (shared collectors, #139 — the rate-scope guard already rejected scalar
+  // inputs).
+  auto const [params, param_names] = collect_scalar_params(model);
+  auto const [tensor_inputs, tensor_input_names] = collect_tensor_inputs(model);
 
   // Reserved-name guard: a state/parameter named like an emitted fixed member
   // (`rate`, `rate_derivative`, `integrator_source`) would collide.
@@ -988,14 +1032,7 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
           "' collides with an emitted member (rate/rate_derivative/"
           "integrator_source); rename it.");
     }
-    // A non-finite default would emit `value_type{nan}`/`{inf}` (no such C++
-    // literal) and an invalid JSON number — reject rather than emit broken code.
-    if (p.default_value.has_value() && !std::isfinite(*p.default_value)) {
-      throw std::runtime_error(
-          "NumSimMaterialTarget: parameter '" + p.name +
-          "' has a non-finite default (" + fmt(*p.default_value) +
-          "); cannot emit as a C++ literal or JSON number.");
-    }
+    reject_non_finite_default(p);
   }
 
   // Rate-leaf guard: every scalar symbol the rate references must be the state
@@ -1180,35 +1217,24 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
   for (auto const &o : outputs)
     if (o.is_tensor) has_tensor = true;
 
-  // Comprehensive emitted-member uniqueness guard. Every generated `m_<base>`
-  // member basename must be distinct, else the class gets duplicate members /
-  // initializers (uncompilable). The recipe enforces symbol-name uniqueness, but
-  // the emitter SYNTHESIZES extra names — `rate`, `rate_derivative`,
-  // `integrator_source`, `out_<output>`, `<input>_source` — that a recipe symbol
-  // can still collide with (a tensor input literally named "rate"; an input
-  // "strain" alongside a parameter "strain_source"; an input named "integrator"
-  // whose "_source" param clashes with the fixed integrator_source). Reject
-  // loudly rather than emit broken C++. (The is_reserved_name checks above still
-  // fire first for state/parameter cases, giving a more specific message.)
+  // Comprehensive emitted-member uniqueness guard: `rate`, `rate_derivative`,
+  // `integrator_source`, `out_<output>`, `<input>_source` are all synthesized
+  // names a recipe symbol can still collide with (a tensor input literally
+  // named "rate"; an input "strain" alongside a parameter "strain_source"; an
+  // input named "integrator" whose "_source" param clashes with the fixed
+  // integrator_source). (The is_reserved_name checks above still fire first
+  // for state/parameter cases, giving a more specific message.)
   {
-    std::set<std::string> member_bases;
-    auto claim = [&member_bases](std::string const &base) {
-      if (!member_bases.insert(base).second) {
-        throw std::runtime_error(
-            "NumSimMaterialTarget: emitted member 'm_" + base +
-            "' would be duplicated — a recipe symbol collides with a synthesized "
-            "member name; rename the offending state/parameter/input/output.");
-      }
-    };
-    claim(contract::rate_property);
-    claim(contract::rate_derivative_property);
-    claim(contract::integrator_source_param);
-    claim(cur_name);
-    for (auto const &p : params) claim(p.name);
-    for (auto const &o : outputs) claim("out_" + o.name);
+    MemberUniquenessGuard guard;
+    guard.claim(contract::rate_property);
+    guard.claim(contract::rate_derivative_property);
+    guard.claim(contract::integrator_source_param);
+    guard.claim(cur_name);
+    for (auto const &p : params) guard.claim(p.name);
+    for (auto const &o : outputs) guard.claim("out_" + o.name);
     for (auto const &ti : tensor_inputs) {
-      claim(ti.name);
-      claim(ti.name + "_source");
+      guard.claim(ti.name);
+      guard.claim(ti.name + "_source");
     }
   }
 
@@ -1296,31 +1322,9 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
     }
   }
 
-  // parameters() schema
-  h << "  static input_parameter_controller parameters() {\n";
-  h << "    input_parameter_controller para{base::parameters()};\n";
-  for (auto const &p : params) {
-    if (p.default_value.has_value()) {
-      h << "    para.template insert<value_type>(\"" << p.name
-        << "\").template add<numsim_core::set_default>(value_type{"
-        << fmt(*p.default_value) << "});\n";
-    } else {
-      // Defensive: `add_parameter` always sets a default, so this is currently
-      // unreachable via the public API. Kept (with the JSON-omission sibling
-      // below) for the day a no-default/required-parameter API lands.
-      h << "    para.template insert<value_type>(\"" << p.name
-        << "\").template add<numsim_core::is_required>();\n";
-    }
-  }
-  h << "    para.template insert<std::string>(\""
-    << contract::integrator_source_param << "\")\n";
-  h << "        .template add<numsim_core::is_required>();\n";
-  for (auto const &ti : tensor_inputs) {
-    h << "    para.template insert<std::string>(\"" << ti.name << "_source\")\n";
-    h << "        .template add<numsim_core::is_required>();\n";
-  }
-  h << "    return para;\n";
-  h << "  }\n\n";
+  // parameters() schema (shared writer, #139)
+  emit_parameters_schema(h, params, tensor_inputs,
+                         contract::integrator_source_param);
 
   // compute()
   h << "  // " << contract::rate_property << " = f(" << cur_name << "); "
