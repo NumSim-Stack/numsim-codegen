@@ -25,40 +25,52 @@ boundary using tmech's adaptors (`full`, `voigt`, `abq_std`).
 
 | Target | Status | Output |
 |--------|--------|--------|
-| `StandaloneCxxTarget` | ✓ Phase A | Single inline header with the generic compute function |
-| `MooseMaterialTarget` | ✓ Phase A | `.h` + `.C` pair: Material class with `validParams`, constructor, `computeQpProperties` |
+| `StandaloneCxxTarget` | ✓ | Single inline header with the generic compute function |
+| `MooseMaterialTarget` | ✓ | `.h` + `.C` pair: Material class with `validParams`, constructor, `computeQpProperties`, optional `Jacobian_mult` consistent tangent |
+| `NumSimMaterialTarget` | ✓ | numsim-materials material header + JSON config. Two sub-contracts: rate path (exactly one scalar state variable + one evolution equation — the rk_integrator contract); return-map path (one scalar Newton unknown, plus additional scalar or tensor history state via update equations) |
 | `AbaqusUMATTarget`    | planned | Fortran-callable `extern "C"` UMAT with Voigt boundary |
 | `AnsysUSERMATTarget`  | planned | Fortran-callable USERMAT |
 | `LSDynaUMATTarget`    | planned | LS-DYNA convention |
 
 ## Status
 
-**Phase A scaffold.** Working: scalar codegen visitor with pointer-based CSE, recipe
-class registry, and a linear-elasticity smoke test. Not yet working: full tensor /
-tensor-to-scalar visitor coverage, MOOSE Material text templating, history / internal
-variables.
+Working today: scalar / tensor / tensor-to-scalar emission with pointer-based
+CSE; semantic roles (open set); scalar and tensor state variables with
+`_old` pairing; backward-Euler time integration lowered to in-function
+Newton solves (scalar and coupled N×N via Eigen); algorithmic (consistent)
+tangents via symbolic differentiation, FD-verified in compile-and-run test
+gates; spectral decomposition lowering (`log`/`exp`/`sqrt` of symmetric
+tensors) with exact tangents including eigenvalue coalescence; an
+end-to-end gate that runs generated materials through the real
+numsim-materials solver.
 
-See [issue #139 in numsim-cas](https://github.com/NumSim-Stack/numsim-cas/issues/139)
-for the umbrella tracking the phase plan.
+Not yet: MOOSE stateful (history) properties, Kuhn-Tucker/inequality
+switches in lowered return maps, tensor-valued Newton unknowns, the
+Abaqus/ANSYS/LS-DYNA targets.
 
 ## Example (MOOSE target)
 
 ```cpp
+// Adapted from examples/moose_linear_elastic.cpp (compiled in CI).
 #include <numsim_codegen/numsim_codegen.h>
-using namespace numsim::cas;
-using namespace numsim::codegen;
+
+#include <numsim_cas/scalar/scalar_operators.h>
+#include <numsim_cas/tensor/tensor_definitions.h>
+#include <numsim_cas/tensor/tensor_operators.h>
 
 int main() {
+  using namespace numsim::cas;
+  using namespace numsim::codegen;
+
   ConstitutiveModel model("LinearElasticShear");
 
-  auto mu = model.add_parameter("mu", 0.5, "Shear modulus");
-  auto eps = model.add_tensor_input("eps", 3, 2, InputRole::Strain);
-  auto sigma = 2 * mu * eps;
-  model.add_output("stress", sigma, OutputRole::Stress);
+  auto mu  = model.add_parameter("mu", 0.5, "Shear modulus");
+  auto eps = model.add_tensor_input("eps", /*dim=*/3, /*rank=*/2, roles::Strain);
+  model.add_output("stress", 2 * mu * eps, roles::Stress);
 
   MooseMaterialTarget target("MyApp");
   for (auto const& file : target.emit(model)) {
-    write_to_disk(file.filename, file.contents);
+    write_to_disk(file.filename, file.contents);  // your I/O
   }
 }
 ```
@@ -79,12 +91,14 @@ asserting numerical results.
 The generated body uses common-subexpression elimination — each unique subterm of the
 DAG is emitted exactly once as `auto tN = ...;`.
 
-## InputRole and OutputRole
+## Semantic roles
 
-Recipe declarations carry semantic tags (`InputRole::Strain`, `OutputRole::Stress`, etc.)
-that backends interpret to wire the recipe to framework-specific inputs and outputs.
-The same recipe works across MOOSE, Abaqus, ANSYS without modification — only the
-target choice changes.
+Recipe declarations carry semantic `Role` tags (`roles::Strain`, `roles::Stress`,
+`roles::ConsistentTangent`, …) that backends interpret to wire the recipe to
+framework-specific inputs and outputs. The role set is open: construct a custom
+`Role{.name = "phase_field", .is_driving = true, .expected_rank = 0}` and backends
+route it by its attributes — no library change needed. The same recipe works across
+targets without modification — only the target choice changes.
 
 ## Multi-recipe generator
 
@@ -104,20 +118,41 @@ includes a comment block describing its Phase A limitations and the
 upstream change needed to lift them. Add a new recipe by appending a
 factory + a registry entry — no other code changes required.
 
+A recipe outside a target's supported scope is reported as
+`SKIPPED (<reason>)` and the run continues. Note: the six shipped recipes
+all target `standalone`/`moose`; none currently fits `numsim_material`'s
+single-scalar-state-variable contract, so that target's worked examples
+live in `tests/generated/generate_numsim_material_check.cpp` instead.
+
 ## Build
 
-CMake 3.20+, C++23, GCC 14 or Clang 19 or MSVC 19.30+.
+CMake 3.25+, C++23, GCC 14 or Clang 19. (MSVC is untested — no Windows CI;
+on paper the code needs ≥ 19.33 for `std::expected`.)
 
-Clang 18 is **not in the CI matrix** — ubuntu-24.04 defaults to pairing
-it with libstdc++-13, which lacks the C++23 `<expected>` header. The
-workaround of manually installing `libstdc++-14-dev` alongside clang-18
-is untested and unsupported here. The supported clang path is clang-19
-from the LLVM toolchain repo paired with `libstdc++-14-dev` — see
-`docs/workflow.md` §6.2 and `.github/workflows/build.yml`.
+Supported consumption is **`add_subdirectory` / FetchContent / CPM** — the
+example pattern is exactly how the tests and examples link
+(`target_link_libraries(app PRIVATE numsim::codegen)`). `cmake --install` +
+`find_package` is **not supported yet**: no CMake package config is
+generated, and the dependency headers (numsim-cas, tmech) are not installed
+alongside — blocked on numsim-cas exporting installable targets.
+
+Clang 18 (and older) **cannot build this project at all**: libstdc++'s
+`std::expected` is guarded by `__cpp_concepts >= 202002L`, which clang
+only defines from clang-19 — so `<expected>` stays empty under clang ≤ 18
+*regardless of the libstdc++ version installed* (verified: clang-18
+selecting the GCC-14 toolchain still fails). The supported clang path is
+clang-19 from the LLVM toolchain repo paired with `libstdc++-14-dev` —
+see `docs/workflow.md` §6.2 and `.github/workflows/build.yml`.
 
 To verify your toolchain: `clang++ --version` should report ≥19, and the
-libstdc++ it picks up should be ≥14 (check with
-`echo "#include <expected>" | $CXX -std=c++23 -x c++ -E - > /dev/null`).
+following should compile (note: merely `#include`-ing `<expected>` is NOT
+a valid check — the header preprocesses fine on clang ≤ 18, it just leaves
+`std::expected` undefined):
+
+```bash
+printf '#include <expected>\nstd::expected<int,int> e{1};\n' | \
+  $CXX -std=c++23 -x c++ -fsyntax-only -
+```
 
 ```bash
 git clone https://github.com/NumSim-Stack/numsim-codegen.git
