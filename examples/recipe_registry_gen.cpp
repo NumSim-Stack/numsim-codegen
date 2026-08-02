@@ -18,6 +18,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -76,15 +77,34 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // issue #135: a target may legitimately reject a recipe outside its
+  // supported scope (e.g. NumSimMaterialTarget on the J2 trial recipe).
+  // Skip it with the target's own explanation and keep going — one
+  // unsupported catalogue entry must not abort the whole generation run.
+  // Exit non-zero only when nothing was generated (or a write failed).
   int exit_code = 0;
+  std::size_t emitted = 0;
   for (auto const &entry : numsim::examples::registry()) {
     std::cout << entry.name << " -> " << target->target_name() << "\n";
     auto model = entry.build();
-    for (auto const &file : target->emit(model)) {
+    std::vector<numsim::codegen::EmittedFile> files;
+    try {
+      files = target->emit(model);
+    } catch (std::exception const &e) {
+      std::cout << "  SKIPPED (" << e.what() << ")\n";
+      continue;
+    }
+    for (auto const &file : files) {
       if (!write_file(out_dir, file)) {
         exit_code = 2;
       }
     }
+    ++emitted;
+  }
+  if (emitted == 0) {
+    std::cerr << "no recipe in the catalogue could be emitted via '"
+              << target_kind << "'\n";
+    return 3;
   }
   return exit_code;
 }
