@@ -5,6 +5,19 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly run so upstream bit-rot (LLVM apt repo, dependency pins, runner
+  # image changes) surfaces between pushes instead of blocking the next PR.
+  schedule:
+    - cron: '17 4 * * 1'
+
+# Least privilege (issue #141): build+test needs read-only checkout only.
+permissions:
+  contents: read
+
+# Cancel superseded PR runs; never cancel main/scheduled runs.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -25,7 +38,9 @@ jobs:
         build_type: [Debug, Release]
 
     steps:
-      - uses: actions/checkout@v4
+      # SHA-pinned (issue #141) — a movable tag on a third-party action is
+      # the one unpinned link in an otherwise SHA-pinned supply chain.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install compiler
         run: |
@@ -58,6 +73,31 @@ jobs:
         run: >
           cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DNUMSIM_CODEGEN_FETCH_MATERIALS=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j$(nproc)
+
+  # ASan+UBSan leg (issue #13): the generator is pointer-keyed CSE over CAS
+  # DAGs — exactly the code class where a lifetime bug is silent aliasing
+  # rather than a crash. gcc-14 Debug, full suite, no recovery: any report
+  # fails the job. Verified green locally before adding (2026-08-02 review).
+  sanitize:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: >
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug
+          -DNUMSIM_CODEGEN_FETCH_MATERIALS=ON
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
       - name: Build
         run: cmake --build build -j$(nproc)
