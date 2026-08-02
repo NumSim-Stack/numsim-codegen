@@ -172,6 +172,39 @@ TEST(MooseTarget, SpectralSourceIncludesRuntimeHeader) {
 }
 
 // A non-spectral material must NOT drag in the spectral header.
+// issue #143: app_name is embedded in the generated
+// `registerMooseObject("<app_name>", ...)` string literal. A quote or
+// backslash would break the literal (malformed generated C++) — reject at
+// emit time with the same identifier check the model name uses.
+TEST(MooseTarget, RejectsNonIdentifierAppName) {
+  auto model = build_linear_elastic_shear();
+  for (auto const &bad :
+       {R"(My"App)", R"(My\App)", "My App", "", "3App", "My;App"}) {
+    MooseMaterialTarget target{std::string(bad)};
+    try {
+      [[maybe_unused]] auto const discarded = target.emit(model);
+      FAIL() << "expected emit() to reject app_name '" << bad << "'";
+    } catch (std::runtime_error const &e) {
+      EXPECT_NE(std::string(e.what()).find("app_name"), std::string::npos)
+          << e.what();
+    }
+  }
+}
+
+TEST(MooseTarget, ValidAppNameStillEmits) {
+  MooseMaterialTarget target{"MooseTestApp"};
+  auto files = target.emit(build_linear_elastic_shear());
+  bool found = false;
+  for (auto const &f : files) {
+    if (f.kind == EmittedFile::Kind::Source) {
+      EXPECT_NE(f.contents.find("registerMooseObject(\"MooseTestApp\""),
+                std::string::npos);
+      found = true;
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
 TEST(MooseTarget, NonSpectralSourceOmitsRuntimeHeader) {
   MooseMaterialTarget target;
   auto files = target.emit(build_linear_elastic_shear());
