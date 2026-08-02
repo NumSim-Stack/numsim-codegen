@@ -324,16 +324,52 @@ inline void AlgorithmicTangentPass::run(PassContext &pctx) {
     return;
   }
 
-  // Resolve a tensor input variable (the strain ε) by name.
-  auto find_tensor_input =
+  // Why a `wrt_input` is unusable as a differentiation variable. Three
+  // genuinely distinct author mistakes that used to collapse into one
+  // nullable-pointer "not found" — a sibling enum rather than an expansion of
+  // `LookupError`, per that enum's documented reuse policy (pass.h). Keeping
+  // them apart is what lets the throw below name the actual mistake instead of
+  // guessing at it.
+  enum class WrtInputError {
+    NotFound,   // no symbol of that name is declared at all
+    NotATensor, // declared, but a scalar — dσ/dε needs a tensor ε
+    NotAnInput  // declared tensor, but a state variable, not a kinematic input
+  };
+
+  // Resolve a tensor input variable (the strain ε) by name. Only a declared
+  // tensor INPUT is a valid differentiation variable: `tensor_symbol_map()` also
+  // holds state-variable current/_old handles, which are NOT kinematic inputs, so
+  // exclude them (else a `wrt_input` naming a tensor state variable would be
+  // silently differentiated against instead of rejected). #118.
+  //
+  // The name → SymbolDecl join goes through `find_tensor_symbol`, the canonical
+  // O(1) `symbol_lookup` entry point — NOT an open-coded scan over `inputs()`.
+  // `SymbolValidationPass` populates the lookup and runs first in the pipeline,
+  // and this pass only ever calls `add_output` (never touches `m_symbols`), so
+  // the indices are live here. The one remaining linear scan is unavoidable:
+  // `SymbolDecl` carries the category but not the expression handle, and there
+  // is no name → expression index.
+  auto resolve_wrt_input =
       [&](std::string const &nm)
-      -> cas::expression_holder<cas::tensor_expression> const * {
+      -> std::expected<cas::expression_holder<cas::tensor_expression> const *,
+                       WrtInputError> {
+    auto const decl = find_tensor_symbol(pctx, nm);
+    if (!decl) {
+      return std::unexpected(decl.error() == LookupError::WrongKind
+                                 ? WrtInputError::NotATensor
+                                 : WrtInputError::NotFound);
+    }
+    if ((*decl)->category != SymbolDecl::Category::Input) {
+      return std::unexpected(WrtInputError::NotAnInput); // #118
+    }
     for (auto const &[name, expr] : model_mut.tensor_symbol_map()) {
       if (name == nm) {
         return &expr;
       }
     }
-    return nullptr;
+    // Defensive: a declared tensor input is registered in both maps by
+    // `add_tensor_input`, so reaching here means the two have drifted apart.
+    return std::unexpected(WrtInputError::NotFound);
   };
 
   // Snapshot the specs before mutating m_outputs (add_output below does not
@@ -365,16 +401,31 @@ inline void AlgorithmicTangentPass::run(PassContext &pctx) {
     }
 
     // Resolve the strain input ε — must be a declared tensor input/symbol.
-    auto const *eps = find_tensor_input(spec.wrt_input);
-    if (eps == nullptr) {
+    auto const eps = resolve_wrt_input(spec.wrt_input);
+    if (!eps) {
+      // Name the actual mistake. The pre-#118 body reported every failure as
+      // "not a declared tensor input", which reads as a typo diagnosis even
+      // when the symbol exists and is simply the wrong sort of thing.
+      auto const *why = [&] {
+        switch (eps.error()) {
+        case WrtInputError::NotATensor:
+          return "which is a declared SCALAR symbol — dσ/dε needs a tensor ε";
+        case WrtInputError::NotAnInput:
+          return "which is a declared tensor STATE VARIABLE, not a kinematic "
+                 "input — a state variable is not a valid differentiation "
+                 "variable for a consistent tangent";
+        case WrtInputError::NotFound:
+          break;
+        }
+        return "which is not a declared tensor input";
+      }();
       throw std::runtime_error(std::format(
-          "AlgorithmicTangentPass: tangent '{}' differentiates w.r.t. '{}', "
-          "which is not a declared tensor input.",
-          spec.name, spec.wrt_input));
+          "AlgorithmicTangentPass: tangent '{}' differentiates w.r.t. '{}', {}.",
+          spec.name, spec.wrt_input, why));
     }
 
     // Explicit term: ∂σ/∂ε (rank-4). Real cas::diff — no upstream dependency.
-    auto tangent = cas::diff(*sigma, *eps);
+    auto tangent = cas::diff(*sigma, **eps);
 
 #ifdef NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR
     // Implicit correction Σ_i (−1/J_i)·(∂σ/∂x_i)·(∂R_i/∂ε). Only meaningful
