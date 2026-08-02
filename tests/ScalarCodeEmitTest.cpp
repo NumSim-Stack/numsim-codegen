@@ -188,13 +188,28 @@ TEST(ScalarCodeEmit, NotEqualEmitsStaticCastDouble) {
   EXPECT_NE(rendered.find(" != "), std::string::npos) << "got: " << rendered;
 }
 
-// ─── Negation of a negative literal (issue #136) ──────────────────────
+// ─── Negation of a leading-minus operand (issue #136) ─────────────────
 //
-// The operator layer canonicalises negative constants into
-// scalar_negative(positive), so this shape is only reachable by direct
-// node construction — the same public factory recipe.h uses for leaves.
-// The emitter must not rely on that upstream invariant: naive `-` +
-// `-5.0` concatenation emitted an invalid `--5.0`.
+// Reachable TWO ways: (a) direct node construction of a negative literal
+// (the same public factory recipe.h uses for leaves), and (b) — found in
+// the follow-up review — ORDINARY subtraction: cas's sub simplifier
+// lowers `0 - rhs` to `make_expression<scalar_negative>(rhs)` with no
+// check that rhs is already negative (scalar_simplifier_sub.cpp,
+// dispatch(scalar_zero)), so `0 - (-x)` builds negative(negative(x)).
+// Naive `-` + `-x` concatenation emitted an invalid `--x`.
+// Reachability path (b): plain operators, no direct node construction.
+TEST(ScalarCodeEmit, ZeroMinusNegativeParenthesizesViaOperators) {
+  CodeGenContext ctx;
+  ScalarCodeEmit emit(ctx);
+  auto x = cas::make_expression<cas::scalar>("x");
+  ctx.register_symbol_scalar(x, "x");
+  auto expr = cas::get_scalar_zero() - (-x); // → negative(negative(x))
+  auto result = emit.apply(expr);
+  auto rendered = ctx.render_statements();
+  EXPECT_EQ(result.find("--"), std::string::npos) << "got: " << result;
+  EXPECT_EQ(rendered.find("--"), std::string::npos) << "got: " << rendered;
+}
+
 TEST(ScalarCodeEmit, NegationOfNegativeLiteralParenthesizes) {
   CodeGenContext ctx;
   ScalarCodeEmit emit(ctx);

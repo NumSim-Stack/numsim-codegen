@@ -695,11 +695,16 @@ TEST(TensorCodeEmit, T2sWithTensorMulMultipliesScalarByTensor) {
 
 // ─── Negation of a leading-minus operand (issue #136) ─────────────────
 //
-// The operator layer folds neg(neg(x)) = x, so a nested negative is only
-// reachable by direct node construction — but the emitter must not rely
-// on that unenforced upstream invariant: naive `-` + `-A` concatenation
+// The unary `-` operator folds neg(neg(x)) = x, but that is NOT the only
+// construction path: cas's sub simplifiers lower `0 - rhs` to
+// `make_expression<*_negative>(rhs)` with no already-negative check
+// (scalar/tensor/t2s `sub_base::dispatch(*_zero)`), so ordinary
+// subtraction can build a nested negative. Naive `-` + `-A` concatenation
 // would emit an invalid `--A` (a decrement). The inner negative of a leaf
 // emits the inline single token `-A`; the outer one must parenthesise.
+// (Direct construction below keeps the tests independent of simplifier
+// details; the operator-level reachability is pinned in
+// ScalarCodeEmitTest.ZeroMinusNegativeParenthesizesViaOperators.)
 TEST(TensorCodeEmit, NegationOfLeadingMinusOperandParenthesizes) {
   CodeGenContext ctx;
   ScalarCodeEmit scalar_emit(ctx);
