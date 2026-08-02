@@ -280,7 +280,7 @@ TEST(Recipe, EmitRejectsOutParamVsInputCollision) {
   auto stress_out = m.add_scalar_input("stress_out");
   m.add_output("stress", 2 * stress_out);
   try {
-    (void)m.emit_compute_function();
+    [[maybe_unused]] auto const discarded = m.emit_compute_function();
     FAIL() << "expected emit to reject the duplicate parameter";
   } catch (std::runtime_error const &e) {
     std::string const msg = e.what();
@@ -300,7 +300,7 @@ TEST(Recipe, EmitRejectsSynthesisedResidualOutParamCollision) {
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   m.add_scalar_evolution_equation(alpha, bad); // rate references the input
   try {
-    (void)m.emit_compute_function();
+    [[maybe_unused]] auto const discarded = m.emit_compute_function();
     FAIL() << "expected emit to reject the duplicate parameter";
   } catch (std::runtime_error const &e) {
     std::string const msg = e.what();
@@ -316,9 +316,10 @@ TEST(Recipe, EmitRejectsTangentOutParamVsInputCollision) {
   m.add_output("stress", 2 * mu * eps, roles::Stress);
   m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
   // Input rendering to the tangent's out-param identifier `dstress_deps_out`.
-  (void)m.add_tensor_input("dstress_deps_out", 3, 4, roles::Other);
+  [[maybe_unused]] auto const clash =
+      m.add_tensor_input("dstress_deps_out", 3, 4, roles::Other);
   try {
-    (void)m.emit_compute_function();
+    [[maybe_unused]] auto const discarded = m.emit_compute_function();
     FAIL() << "expected emit to reject the duplicate parameter";
   } catch (std::runtime_error const &e) {
     std::string const msg = e.what();
@@ -350,7 +351,7 @@ TEST(Recipe, LegitimateResidualSynthesisStillEmits) {
 TEST(Recipe, StateVarWithoutEvolutionAllowsResidualNamedOutput) {
   ConstitutiveModel m("NoEvoResidualName");
   auto x = m.add_scalar_input("x");
-  (void)m.add_scalar_state_variable(
+  [[maybe_unused]] auto const alpha = m.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   m.add_output("alpha_residual", 2 * x); // no synthesis for this state var
   EXPECT_NO_THROW(m.validate());
