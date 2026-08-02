@@ -35,6 +35,7 @@ add_executable(numsim_codegen_tests
     LinearAlgebraEmitterTest.cpp
     NumSimMaterialTargetTest.cpp
     TargetFactoryTest.cpp
+    CanEmitTest.cpp
 )
 
 target_link_libraries(numsim_codegen_tests

@@ -4,11 +4,14 @@
 #include <numsim_codegen/recipe.h>
 
 #include <cmath>
+#include <expected>
 #include <format>
+#include <optional>
 #include <ostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace numsim::codegen {
 
@@ -438,12 +441,17 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name,
   return os.str();
 }
 
-} // anonymous namespace
-
-// ─── Public methods ────────────────────────────────────────────
-
-auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
-    -> std::vector<EmittedFile> {
+// ─── Up-front scope guards ─────────────────────────────────────
+//
+// The recipe-SHAPE preconditions this backend rejects, computed ONCE and used
+// by both can_emit (returned as std::unexpected) and emit (thrown) — one
+// message, two transports, no drift (#137). Returns the first rejection
+// reason, or nullopt when the shape is in scope. Deeper emit-time validation
+// (tensor-rank storage mapping, non-finite parameter defaults, non-constant
+// state initials) is NOT checked here — can_emit success does not guarantee
+// emit success.
+auto scope_rejection(ConstitutiveModel const &model)
+    -> std::optional<std::string> {
   // Stateful symbols would need old/new MaterialProperty pair handling
   // that the MOOSE backend doesn't implement yet. Fail loudly rather
   // than silently emit a regular read.
@@ -455,12 +463,11 @@ auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
   // the output guard, mirror the pattern below.
   for (auto const &i : model.inputs()) {
     if (i.role.is_stateful) {
-      throw std::runtime_error(
-          "MooseMaterialTarget: stateful role '" + i.role.name +
-          "' on input '" + i.name +
-          "' requires the History machinery (old/new MaterialProperty pair, "
-          "stateful initialisation) which is not implemented in this phase. "
-          "See the numsim-codegen Phase B roadmap.");
+      return "MooseMaterialTarget: stateful role '" + i.role.name +
+             "' on input '" + i.name +
+             "' requires the History machinery (old/new MaterialProperty pair, "
+             "stateful initialisation) which is not implemented in this phase. "
+             "See the numsim-codegen Phase B roadmap.";
     }
   }
 
@@ -473,24 +480,22 @@ auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
   // residual/Jacobian-output mode is for external drivers via the
   // standalone target.
   if (!model.evolution_equations().empty() && !model.local_newton_enabled()) {
-    throw std::runtime_error(
-        "MooseMaterialTarget: recipe '" + model.name() +
-        "' has evolution equations but local Newton solving is not enabled. "
-        "Call enable_local_newton() so the generated MOOSE Material solves "
-        "its state variables internally. (The residual/Jacobian-output mode "
-        "is for external drivers — use StandaloneCxxTarget for that.)");
+    return "MooseMaterialTarget: recipe '" + model.name() +
+           "' has evolution equations but local Newton solving is not enabled. "
+           "Call enable_local_newton() so the generated MOOSE Material solves "
+           "its state variables internally. (The residual/Jacobian-output mode "
+           "is for external drivers — use StandaloneCxxTarget for that.)";
   }
   // Phase 5 (issue #37): all consistent tangents map to the single framework
   // `_Jacobian_mult` property — more than one would emit a duplicate member /
   // property. MOOSE has exactly one consistent-tangent slot. (Tangents live in
   // `tangents()`, not `outputs()`, on the pre-pass model the backend sees.)
   if (model.tangents().size() > 1) {
-    throw std::runtime_error(
-        "MooseMaterialTarget: recipe '" + model.name() +
-        "' requests more than one consistent tangent "
-        "(roles::ConsistentTangent)."
-        " MOOSE has a single _Jacobian_mult slot, so only one tangent can be "
-        "wired. Emit additional tangents via StandaloneCxxTarget.");
+    return "MooseMaterialTarget: recipe '" + model.name() +
+           "' requests more than one consistent tangent "
+           "(roles::ConsistentTangent)."
+           " MOOSE has a single _Jacobian_mult slot, so only one tangent can "
+           "be wired. Emit additional tangents via StandaloneCxxTarget.";
   }
   // PR #82 review: when a tangent is wired, the backend emits a hardcoded
   // `_Jacobian_mult` member. A regular output literally named "Jacobian_mult"
@@ -499,13 +504,32 @@ auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
   if (!model.tangents().empty()) {
     for (auto const &o : model.outputs()) {
       if (o.name == "Jacobian_mult") {
-        throw std::runtime_error(
-            "MooseMaterialTarget: recipe '" + model.name() +
-            "' has both a consistent tangent and an output named "
-            "'Jacobian_mult', which collides with the framework consistent-"
-            "tangent member. Rename the output.");
+        return "MooseMaterialTarget: recipe '" + model.name() +
+               "' has both a consistent tangent and an output named "
+               "'Jacobian_mult', which collides with the framework consistent-"
+               "tangent member. Rename the output.";
       }
     }
+  }
+  return std::nullopt;
+}
+
+} // anonymous namespace
+
+// ─── Public methods ────────────────────────────────────────────
+
+auto MooseMaterialTarget::can_emit(ConstitutiveModel const &model) const
+    -> std::expected<void, std::string> {
+  if (auto reason = scope_rejection(model)) {
+    return std::unexpected(std::move(*reason));
+  }
+  return {};
+}
+
+auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
+    -> std::vector<EmittedFile> {
+  if (auto const reason = scope_rejection(model)) {
+    throw std::runtime_error(*reason);
   }
   return {
       EmittedFile{model.name() + ".h", emit_header(model), "include/materials",
