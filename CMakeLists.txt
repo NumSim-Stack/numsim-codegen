@@ -219,14 +219,30 @@ endif()
 # export set, which blocks install(EXPORT) here). When that lands, switch
 # to install(TARGETS ... EXPORT NumSimCodegenTargets) and emit a config file.
 
-include(GNUInstallDirs)
-install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-# Only the STATIC target produces an installable archive. The INTERFACE
-# `numsim_codegen_headers` target has no binary artifact — its headers
-# are already installed via `install(DIRECTORY include/ ...)` above. It
-# will get added to install(TARGETS ... EXPORT ...) once the export-set
-# story lands (see the comment block above).
-install(TARGETS numsim_codegen
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
+# issue #133: the installed tree is NOT consumer-ready — no export set /
+# package config (blocked upstream, see above), and the dependency headers
+# (numsim-cas, tmech) are not installed alongside, so the tree cannot be
+# consumed even by hand. Shipping that unconditionally was worse than not
+# installing: `make install` of a superproject embedding this repo via
+# add_subdirectory also picked these rules up with no opt-out. Gate them
+# behind an explicitly experimental option until the find_package story
+# lands; supported consumption is add_subdirectory / FetchContent / CPM.
+option(NUMSIM_CODEGEN_INSTALL
+    "Install headers + static lib (EXPERIMENTAL: no CMake package config \
+yet; installed headers still require numsim-cas/tmech includes)" OFF)
+
+if(NUMSIM_CODEGEN_INSTALL)
+    include(GNUInstallDirs)
+    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    # Only the STATIC target produces an installable archive. The INTERFACE
+    # `numsim_codegen_headers` target has no binary artifact — its headers
+    # are already installed via `install(DIRECTORY include/ ...)` above. It
+    # will get added to install(TARGETS ... EXPORT ...) once the export-set
+    # story lands (see the comment block above).
+    install(TARGETS numsim_codegen
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+    install(FILES LICENSE
+        DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/doc/numsim-codegen)
+endif()
