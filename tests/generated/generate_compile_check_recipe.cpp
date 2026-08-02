@@ -13,6 +13,8 @@
 //   6. PiecewiseCheck      — tensor_if_then_else emission vs tmech
 //   7. PiecewiseT2sCheck   — tensor_to_scalar_if_then_else (subterm)
 //   8. TangentCheck        — FD consistent-tangent verification (#90)
+//   9. ReservedNamesCheck  — user symbols named t0/t1/T0/T1 vs generated
+//                            temporaries + template parameters (#8)
 
 #include <numsim_codegen/numsim_codegen.h>
 
@@ -52,11 +54,12 @@ auto write_single_file(numsim::codegen::ConstitutiveModel const &model,
 } // namespace
 
 int main(int argc, char *argv[]) {
-  if (argc < 9) {
+  if (argc < 10) {
     std::cerr << "usage: " << argv[0]
               << " <CompileCheck.h> <HardeningCheck.h> <NewtonCheck.h>"
                  " <AutocatalyticCheck.h> <CoupledCheck.h> <PiecewiseCheck.h>"
-                 " <PiecewiseT2sCheck.h> <TangentCheck.h>\n";
+                 " <PiecewiseT2sCheck.h> <TangentCheck.h>"
+                 " <ReservedNamesCheck.h>\n";
     return 1;
   }
 
@@ -221,6 +224,25 @@ int main(int argc, char *argv[]) {
     model.add_output("stress", sigma, roles::Stress);
     model.add_algorithmic_tangent("dstress_deps", "stress", "eps");
     if (int rc = write_single_file(model, argv[8]); rc != 0) return rc;
+  }
+
+  // ── Recipe 9: RESERVED generated names (issue #8) ────────────────────
+  //
+  // Every symbol is deliberately named like a GENERATED identifier: scalar
+  // inputs `t0`/`t1` collide with the CSE temporaries, tensor input `T0`
+  // and tensor output `T1` collide with the template parameters. Before
+  // the fix the emitted header redeclared `t0` (`auto t0 = ...` next to
+  // the parameter) and shadowed `T0` (`template <typename T0>(T0 const
+  // &T0)`) — an uncompilable header. Compiling this header IS the
+  // regression gate; the driver additionally checks the math.
+  {
+    ConstitutiveModel model("ReservedNamesCheck");
+    auto t0 = model.add_scalar_input("t0");
+    auto t1 = model.add_parameter("t1", 2.0);
+    auto T0 = model.add_tensor_input("T0", 3, 2);
+    model.add_output("y", t0 * t1 + sin(t0));
+    model.add_output("T1", (t0 + t1) * T0);
+    if (int rc = write_single_file(model, argv[9]); rc != 0) return rc;
   }
 
   return 0;

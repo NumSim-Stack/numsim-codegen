@@ -520,6 +520,14 @@ inline void CodeEmitPass::run(PassContext &pctx) {
   for (auto const &[name, expr] : model.tensor_symbol_map()) {
     ctx.register_symbol_tensor(expr, name);
   }
+  // Issue #8: reserve every declared identifier (symbols incl. `_old`
+  // entries, outputs + `<name>_out`, tangents) so a user symbol named like
+  // a generated temporary (`t0`, `t1`, …) is never redeclared by the CSE.
+  // Reservations survive the per-block ctx.reset() calls below, exactly
+  // like the symbol registrations they guard.
+  for (auto const &name : detail::emission_reserved_names(model)) {
+    ctx.reserve_name(name);
+  }
 
   // Phase 3a-2: render each Newton segment's residual + Jacobian with
   // LOOP-LOCAL CSE. `ctx.reset()` clears statements + the CSE table but

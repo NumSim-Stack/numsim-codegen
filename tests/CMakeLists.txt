@@ -84,12 +84,17 @@ set(GENERATED_PIECEWISE_T2S_HEADER
 # Verification spine (#90): nonlinear-stress consistent-tangent FD compile-check.
 set(GENERATED_TANGENT_HEADER
     ${CMAKE_CURRENT_BINARY_DIR}/generated/TangentCheck.h)
+# Issue #8: user symbols named like generated identifiers (t0/t1 CSE temps,
+# T0/T1 template parameters) — compiling this header IS the regression gate.
+set(GENERATED_RESERVED_HEADER
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/ReservedNamesCheck.h)
 
 add_custom_command(
     OUTPUT ${GENERATED_HEADER} ${GENERATED_HARDENING_HEADER}
            ${GENERATED_NEWTON_HEADER} ${GENERATED_AUTOCAT_HEADER}
            ${GENERATED_COUPLED_HEADER} ${GENERATED_PIECEWISE_HEADER}
            ${GENERATED_PIECEWISE_T2S_HEADER} ${GENERATED_TANGENT_HEADER}
+           ${GENERATED_RESERVED_HEADER}
     COMMAND ${CMAKE_COMMAND} -E make_directory
             ${CMAKE_CURRENT_BINARY_DIR}/generated
     COMMAND $<TARGET_FILE:generate_compile_check_recipe>
@@ -97,6 +102,7 @@ add_custom_command(
             ${GENERATED_NEWTON_HEADER} ${GENERATED_AUTOCAT_HEADER}
             ${GENERATED_COUPLED_HEADER} ${GENERATED_PIECEWISE_HEADER}
             ${GENERATED_PIECEWISE_T2S_HEADER} ${GENERATED_TANGENT_HEADER}
+            ${GENERATED_RESERVED_HEADER}
     DEPENDS generate_compile_check_recipe
     COMMENT "Generating compile-check headers via numsim-codegen"
     VERBATIM)
@@ -120,7 +126,8 @@ add_executable(compile_check_driver
     ${GENERATED_COUPLED_HEADER}
     ${GENERATED_PIECEWISE_HEADER}
     ${GENERATED_PIECEWISE_T2S_HEADER}
-    ${GENERATED_TANGENT_HEADER})
+    ${GENERATED_TANGENT_HEADER}
+    ${GENERATED_RESERVED_HEADER})
 target_include_directories(compile_check_driver
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated ${eigen3_SOURCE_DIR}
             ${CMAKE_CURRENT_SOURCE_DIR}/support)
