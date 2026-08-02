@@ -14,7 +14,11 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded PR runs; never cancel main/scheduled runs.
+# Cancel superseded PR runs. Non-PR runs (push to main, schedule) share a
+# group with cancel-in-progress off — note GitHub still coalesces QUEUED
+# runs in a group, so rapid successive pushes to main may skip CI for
+# intermediate commits (only the newest queued run executes); acceptable
+# at this repo's merge cadence.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -88,6 +92,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      # Same explicit install as the matrix job — don't assume the runner
+      # image ships g++-14 (it does today; image rotations are exactly the
+      # bit-rot the weekly schedule watches for).
+      - name: Install compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14
 
       - name: Configure
         env:
