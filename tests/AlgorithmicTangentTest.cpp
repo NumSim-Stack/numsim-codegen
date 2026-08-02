@@ -228,13 +228,13 @@ TEST(AlgorithmicTangent, MooseRejectsOutputNamedJacobianMultWithTangent) {
   m.add_output("stress", 2 * mu * eps, roles::Stress);
   m.add_output("Jacobian_mult", 2 * mu * eps); // collides with the member
   m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
-  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(m), std::runtime_error);
   // Without a tangent the same output name is fine (no _Jacobian_mult member).
   ConstitutiveModel ok("NoTan");
   auto mu2 = ok.add_parameter("mu", 0.5);
   auto eps2 = ok.add_tensor_input("eps", 3, 2, roles::Strain);
   ok.add_output("Jacobian_mult", 2 * mu2 * eps2);
-  EXPECT_NO_THROW((void)MooseMaterialTarget{}.emit(ok));
+  EXPECT_NO_THROW([[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(ok));
 }
 
 // MOOSE has a single consistent-tangent slot; more than one tangent is rejected.
@@ -246,7 +246,7 @@ TEST(AlgorithmicTangent, MooseRejectsMultipleTangents) {
   m.add_output("stress", 2 * mu * eps, roles::Stress);
   m.add_algorithmic_tangent("t1", "stress", "eps");
   m.add_algorithmic_tangent("t2", "stress", "eps");
-  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(m), std::runtime_error);
 }
 
 // The RHS expression assigned to `<lhs> = ` in the emitted source, trimmed.
@@ -294,7 +294,7 @@ TEST(AlgorithmicTangent, TangentValueIsScaledRank4IdentityDistinctFromStress) {
 TEST(AlgorithmicTangent, ExplicitTangentEmitsWithoutStub) {
   // σ = 2μ ε is strain-only ⇒ dσ/dε is computed via cas::diff(tensor,tensor).
   // No ∂σ/∂x term is needed, so emit must NOT hit the numsim-cas#275 seam.
-  EXPECT_NO_THROW((void)build_elastic_with_tangent().emit_compute_function());
+  EXPECT_NO_THROW([[maybe_unused]] auto const discarded = build_elastic_with_tangent().emit_compute_function());
 }
 
 TEST(AlgorithmicTangent, RegistersAfterValidationOnlyForElasticRecipe) {
@@ -333,7 +333,7 @@ TEST(AlgorithmicTangent, UnknownStressOutputThrowsAtEmit) {
   auto eps = m.add_tensor_input("eps", 3, 2);
   m.add_output("stress", eps);
   m.add_algorithmic_tangent("t", "does_not_exist", "eps");
-  EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = m.emit_compute_function(), std::runtime_error);
 }
 
 TEST(AlgorithmicTangent, ScalarStressOutputRejectedAtEmit) {
@@ -343,7 +343,7 @@ TEST(AlgorithmicTangent, ScalarStressOutputRejectedAtEmit) {
   auto eps = m.add_tensor_input("eps", 3, 2);
   m.add_output("p", k); // scalar output — dσ/dε needs a tensor σ
   m.add_algorithmic_tangent("t", "p", "eps");
-  EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = m.emit_compute_function(), std::runtime_error);
 }
 
 TEST(AlgorithmicTangent, UnknownStrainInputThrowsAtEmit) {
@@ -352,7 +352,7 @@ TEST(AlgorithmicTangent, UnknownStrainInputThrowsAtEmit) {
   auto eps = m.add_tensor_input("eps", 3, 2);
   m.add_output("stress", eps);
   m.add_algorithmic_tangent("t", "stress", "not_an_input");
-  EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = m.emit_compute_function(), std::runtime_error);
 }
 
 // Locks the current rank-4 identity emission (PR #80 review, math finding Q3).

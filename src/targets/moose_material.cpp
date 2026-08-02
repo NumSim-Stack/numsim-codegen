@@ -179,8 +179,7 @@ auto emit_header(ConstitutiveModel const &model) -> std::string {
     os << "  " << output_member_type(o) << " & _" << o.name << ";\n";
   }
   // Consistent-tangent member → MOOSE's framework `_Jacobian_mult` (Phase 5).
-  for (auto const &t : model.tangents()) {
-    (void)t;
+  for ([[maybe_unused]] auto const &t : model.tangents()) {
     os << "  MaterialProperty<RankFourTensor> & _Jacobian_mult;\n";
   }
 
@@ -417,8 +416,7 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name,
   // Consistent tangent → declare the conventional `Jacobian_mult` property so
   // MOOSE's StressDivergence kernels resolve it (Phase 5). Bare name (no model
   // prefix) — that is the name the kernels look up.
-  for (auto const &t : model.tangents()) {
-    (void)t;
+  for ([[maybe_unused]] auto const &t : model.tangents()) {
     os << ",\n    _Jacobian_mult(declareProperty<RankFourTensor>(\"Jacobian_"
           "mult\"))";
   }

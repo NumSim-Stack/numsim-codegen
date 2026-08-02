@@ -716,7 +716,6 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
     // pulling several outputs is correct, if mildly redundant.) Binding only the
     // first output would leave the others stale when pulled in isolation.
     h << "            \"" << o.name << "\", &" << cls << "::compute)),\n";
-    (void)i;
   }
   h << "        m_" << cur_name
     << "(base::template add_history_output<value_type>(\"" << cur_name

@@ -234,7 +234,7 @@ TEST(Recipe, EmitComputeFunctionRejectsResidualRecipe) {
       "z", cas::make_expression<cas::scalar_constant>(0.0));
   m.add_scalar_residual_equation(z, z.current - c * trace(eps));
   try {
-    (void)m.emit_compute_function();
+    [[maybe_unused]] auto const discarded = m.emit_compute_function();
     FAIL() << "expected throw: residuals unsupported on the self-contained path";
   } catch (std::exception const &e) {
     EXPECT_NE(std::string(e.what()).find("residual"), std::string::npos)
