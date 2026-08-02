@@ -178,12 +178,14 @@ TEST(MooseTarget, SpectralSourceIncludesRuntimeHeader) {
 // emit time with the same identifier check the model name uses.
 TEST(MooseTarget, RejectsNonIdentifierAppName) {
   auto model = build_linear_elastic_shear();
+  // ADD_FAILURE (non-fatal), not FAIL: a regression on an early list entry
+  // must not mask checking of the later ones in the same run.
   for (auto const &bad :
        {R"(My"App)", R"(My\App)", "My App", "", "3App", "My;App"}) {
     MooseMaterialTarget target{std::string(bad)};
     try {
       [[maybe_unused]] auto const discarded = target.emit(model);
-      FAIL() << "expected emit() to reject app_name '" << bad << "'";
+      ADD_FAILURE() << "expected emit() to reject app_name '" << bad << "'";
     } catch (std::runtime_error const &e) {
       EXPECT_NE(std::string(e.what()).find("app_name"), std::string::npos)
           << e.what();
