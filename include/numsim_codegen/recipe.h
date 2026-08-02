@@ -25,7 +25,9 @@
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
 #include <numsim_cas/tensor/tensor_diff.h> // Phase 3b-1: diff(tensor, tensor)
+#include <numsim_cas/tensor/visitors/tensor_substitution.h> // #108 plastic: substitute σ→s_trial in n
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_diff.h> // #108: diff(energy ψ, strain) → stress
+#include <numsim_cas/tensor_to_scalar/visitors/tensor_to_scalar_substitution.h> // #108 plastic: substitute σ→s_trial in yield f
 
 #include <cstddef>
 #include <format>
@@ -967,6 +969,207 @@ public:
                               std::move(strain_name)); // ∂σ/∂ε = ∂²ψ/∂ε²
     } catch (...) {
       m_outputs.pop_back();
+      throw;
+    }
+  }
+
+  // J2 radial-return front-end (#108, isotropic + associative + von-Mises).
+  //
+  // The author writes PHYSICS only:
+  //   `plastic_multiplier` — the scalar state variable Δγ (Newton unknown),
+  //                          from add_scalar_state_variable.
+  //   `trial_stress`       — the elastic-predictor stress s_trial(ε) (e.g.
+  //                          2G·dev(ε)); a tensor expression in the strain
+  //                          input.
+  //   `stress_symbol`      — a BARE stress-placeholder tensor leaf used only
+  //                          to write the yield function. It must NOT be a
+  //                          registered input (it is substituted out of every
+  //                          emitted expression; a registered leaf would emit
+  //                          as an unused parameter). Recovered by name for the
+  //                          differentiation + a leak check.
+  //   `yield`              — the yield function f(σ, Δγ) written against
+  //                          `stress_symbol` (and, via the hardening law, the
+  //                          state Δγ). E.g. f = ‖dev σ‖ − (σy + H·Δγ).
+  //   `return_coeff`       — the return coefficient c (2G for J2).
+  //
+  // and the helper DERIVES the associative radial return, reproducing the
+  // hand-written J2 return-map from physics:
+  //   n(σ)    = ∂f/∂σ                             (associative flow direction)
+  //   n_trial = n(σ)│_{σ = s_trial}               (radial return: n is constant
+  //                                                along the return path)
+  //   R(Δγ)   = f(s_trial, Δγ) − c·Δγ             (scalar consistency residual)
+  //   σ       = s_trial − c·Δγ·n_trial            (return-mapped stress output)
+  //   ∂σ/∂ε                                        (consistent tangent, wired via
+  //                                                add_algorithmic_tangent)
+  //
+  // ⚠ CONTRACT — this is J2 radial return, NOT a general "any yield" reducer.
+  // The reduction `R = f(s_trial) − c·Δγ` and `σ = s_trial − c·Δγ·n` are exact
+  // ONLY when the flow direction `n = ∂f/∂σ` is a UNIT DEVIATOR that stays fixed
+  // along the return path — i.e. an isotropic, associative, von-Mises yield
+  // written with the `‖dev σ‖` measure, and `return_coeff` chosen to match
+  // (`2G` for that measure). The caller owns this — it is NOT auto-checked,
+  // because a symbolic unit-deviator test is unsound in cas (trace(dev X) does
+  // not fold to zero; a numeric probe would bloat this public header). Passing
+  // a yield that violates it produces a SILENTLY WRONG material that a self-FD
+  // tangent check cannot detect (the tangent is consistent with the wrong
+  // stress by construction). Specifically UNSUPPORTED — will mis-emit with no
+  // error:
+  //   * pressure-dependent yields (Drucker-Prager `+α·tr σ`): n not deviatoric;
+  //   * the equivalent-stress form `f = √(3/2)·‖dev σ‖ − σy`: ‖n‖ = √(3/2) ≠ 1,
+  //     so no single `return_coeff` makes both R and σ correct — use `‖dev σ‖`;
+  //   * kinematic hardening / back-stress (evolving n): reduction assumes n_trial
+  //     frozen at trial (P3 below rejects the second tensor input it would need).
+  // The one guard that IS enforced: `n` (hence the yield) may reference no
+  // registered tensor leaf other than the recovered strain (rejects back-stress
+  // and second-measure coupling).
+  //
+  // The strain input (the tangent's `wrt_input`) is recovered as the unique
+  // registered tensor input appearing in `trial_stress`.
+  //
+  // SCOPE (MVP): the plastic branch only — no elastic/plastic KKT switch
+  // (deferred, gated on cas piecewise #241) and no εᵖ tensor history. Also note
+  // `n = dev σ/‖dev σ‖` is singular (0/0 → NaN) at a purely volumetric trial
+  // state; the loading must have a non-zero deviatoric trial stress. This is the
+  // exact shape of the `J2Return` golden; the front-end derives it.
+  void add_j2_radial_return(
+      ScalarStateVariableHandle const &plastic_multiplier,
+      cas::expression_holder<cas::tensor_expression> const &trial_stress,
+      cas::expression_holder<cas::tensor_expression> const &stress_symbol,
+      cas::expression_holder<cas::tensor_to_scalar_expression> const &yield,
+      cas::expression_holder<cas::scalar_expression> const &return_coeff,
+      std::string stress_name,
+      std::string tangent_name) {
+    // (1) The plastic-multiplier handle must belong to this model.
+    [[maybe_unused]] auto const pm_idx = resolve_scalar_state_var_index_(
+        plastic_multiplier, "add_j2_radial_return");
+
+    // (2) Recover the placeholder leaf's name — it must be a single bare tensor
+    // leaf. collect_tensor on a leaf returns exactly its own name.
+    LeafCollector ph;
+    ph.collect_tensor(stress_symbol);
+    if (ph.tensor_names().size() != 1) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': add_j2_radial_return's `stress_symbol` "
+          "must be a single bare tensor leaf (e.g. "
+          "cas::make_expression<cas::tensor>(\"sigma\", dim, 2)) used only to "
+          "write the yield function — not a compound expression.",
+          m_name));
+    }
+    std::string const sigma_name = *ph.tensor_names().begin();
+
+    // The placeholder must be a bare leaf, NOT a registered input: it is
+    // substituted out of every emitted expression, so a registered leaf would
+    // survive only as an unused function parameter.
+    for (auto const &in : m_inputs_cache) {
+      if (in.name == sigma_name) {
+        throw std::runtime_error(std::format(
+            "ConstitutiveModel '{}': add_j2_radial_return's `stress_symbol` "
+            "('{}') is a registered input. The stress placeholder must be a bare "
+            "cas leaf (never add_tensor_input'd) — it is substituted out of the "
+            "residual and stress, and a registered leaf would emit as an unused "
+            "parameter.",
+            m_name, sigma_name));
+      }
+    }
+
+    // (3) The yield must depend on the placeholder, else ∂f/∂σ ≡ 0 (an inert
+    // zero flow direction and a degenerate elastic 'return').
+    LeafCollector fy;
+    fy.collect_t2s(yield);
+    bool yield_depends = false;
+    for (auto const &leaf : fy.tensor_names())
+      if (leaf == sigma_name) {
+        yield_depends = true;
+        break;
+      }
+    if (!yield_depends) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': the yield function passed to "
+          "add_j2_radial_return does not depend on the stress placeholder "
+          "'{}'; ∂f/∂σ would be identically zero (no plastic flow). Write the "
+          "yield in terms of `stress_symbol`.",
+          m_name, sigma_name));
+    }
+
+    // (3b) The yield must reference NO registered tensor input — only the bare
+    // stress placeholder (plus scalars: Δγ, params). A registered tensor leaf in
+    // the yield means a back-stress / second tensor measure (kinematic hardening,
+    // a second strain), whose coupling the frozen-`n_trial` radial-return
+    // reduction does not capture and which the single-`wrt_input` tangent would
+    // silently omit. Reject it loudly rather than emit a wrong material. (The
+    // strain enters legitimately only through `trial_stress`, never the yield.)
+    for (auto const &leaf : fy.tensor_names()) {
+      if (leaf == sigma_name) continue;
+      for (auto const &in : m_inputs_cache) {
+        if (in.name == leaf) {
+          throw std::runtime_error(std::format(
+              "ConstitutiveModel '{}': the yield passed to add_j2_radial_return "
+              "references registered tensor input '{}' besides the stress "
+              "placeholder '{}'. J2 radial return supports only an isotropic "
+              "yield f(σ, Δγ) — a back-stress or second tensor measure (kinematic "
+              "hardening, a second strain) is not reducible this way and its "
+              "coupling would be dropped from the consistent tangent.",
+              m_name, leaf, sigma_name));
+        }
+      }
+    }
+
+    // (4) Recover the strain input: the unique registered tensor input that the
+    // trial stress depends on (the tangent differentiates σ w.r.t. it).
+    LeafCollector ts;
+    ts.collect_tensor(trial_stress);
+    std::string strain_name;
+    for (auto const &leaf : ts.tensor_names()) {
+      for (auto const &in : m_inputs_cache) {
+        if (in.name == leaf) {
+          if (!strain_name.empty() && strain_name != leaf) {
+            throw std::runtime_error(std::format(
+                "ConstitutiveModel '{}': add_j2_radial_return could not "
+                "identify a unique strain input — `trial_stress` depends on more "
+                "than one registered tensor input ('{}' and '{}'). The MVP "
+                "supports a single strain measure.",
+                m_name, strain_name, leaf));
+          }
+          strain_name = leaf;
+        }
+      }
+    }
+    if (strain_name.empty()) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': add_j2_radial_return's `trial_stress` "
+          "references no registered tensor input — the consistent tangent has "
+          "nothing to differentiate against. Build the trial stress from an "
+          "add_tensor_input strain leaf.",
+          m_name));
+    }
+
+    // (5) Derive the return map. n = ∂f/∂σ; evaluate n and f at the trial state
+    // by substituting the placeholder with the trial stress.
+    auto n = cas::diff(yield, stress_symbol);              // ∂f/∂σ (tensor)
+    auto f_trial = cas::substitute(yield, stress_symbol, trial_stress); // t2s
+    auto n_trial = cas::substitute(n, stress_symbol, trial_stress);     // tensor
+    auto dg = plastic_multiplier.current;
+    auto residual = f_trial - return_coeff * dg;           // R(Δγ) = f(s_trial)−c·Δγ
+    auto stress = trial_stress - (return_coeff * dg) * n_trial; // σ = s_trial−c·Δγ·n
+
+    // (6) Commit. Order: residual → stress output → tangent, with rollback so a
+    // late failure (bad tangent name, collision) leaves the model unchanged
+    // (strong exception guarantee). Each add_* validates fully before it
+    // mutates, so at any throw point exactly the earlier-committed pieces are
+    // present — the pops are unconditional (matching add_hyperelastic_potential).
+    add_scalar_residual_equation(plastic_multiplier, std::move(residual),
+                                 "J2 consistency residual (derived)");
+    try {
+      add_output(stress_name, std::move(stress), roles::Stress);
+      try {
+        add_algorithmic_tangent(std::move(tangent_name), std::move(stress_name),
+                                std::move(strain_name)); // ∂σ/∂ε
+      } catch (...) {
+        m_outputs.pop_back();
+        throw;
+      }
+    } catch (...) {
+      m_residual_equations.pop_back();
       throw;
     }
   }

@@ -386,12 +386,14 @@ if(_ncg_materials_inc AND _ncg_core_inc)
         ${CMAKE_CURRENT_BINARY_DIR}/generated/J2Swift.h)
     set(GENERATED_J2PATHDEP_HEADER
         ${CMAKE_CURRENT_BINARY_DIR}/generated/J2PathDep.h)
+    set(GENERATED_J2DERIVED_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/J2ReturnDerived.h)
     add_custom_command(
         OUTPUT ${GENERATED_LINEAR_HEADER} ${GENERATED_NONLINEAR_HEADER}
                ${GENERATED_VISCO_HEADER} ${GENERATED_RETURNMAP_HEADER}
                ${GENERATED_RETURNMAP_CUBIC_HEADER} ${GENERATED_J2_HEADER}
                ${GENERATED_J2_VOCE_HEADER} ${GENERATED_J2_SWIFT_HEADER}
-               ${GENERATED_J2PATHDEP_HEADER}
+               ${GENERATED_J2PATHDEP_HEADER} ${GENERATED_J2DERIVED_HEADER}
         COMMAND ${CMAKE_COMMAND} -E make_directory
                 ${CMAKE_CURRENT_BINARY_DIR}/generated
         COMMAND $<TARGET_FILE:generate_numsim_material_check>
@@ -399,7 +401,7 @@ if(_ncg_materials_inc AND _ncg_core_inc)
                 ${GENERATED_VISCO_HEADER} ${GENERATED_RETURNMAP_HEADER}
                 ${GENERATED_RETURNMAP_CUBIC_HEADER} ${GENERATED_J2_HEADER}
                 ${GENERATED_J2_VOCE_HEADER} ${GENERATED_J2_SWIFT_HEADER}
-                ${GENERATED_J2PATHDEP_HEADER}
+                ${GENERATED_J2PATHDEP_HEADER} ${GENERATED_J2DERIVED_HEADER}
         DEPENDS generate_numsim_material_check
         COMMENT "Generating numsim-materials rate materials via NumSimMaterialTarget"
         VERBATIM)
@@ -410,7 +412,7 @@ if(_ncg_materials_inc AND _ncg_core_inc)
         ${GENERATED_VISCO_HEADER} ${GENERATED_RETURNMAP_HEADER}
         ${GENERATED_RETURNMAP_CUBIC_HEADER} ${GENERATED_J2_HEADER}
         ${GENERATED_J2_VOCE_HEADER} ${GENERATED_J2_SWIFT_HEADER}
-        ${GENERATED_J2PATHDEP_HEADER})
+        ${GENERATED_J2PATHDEP_HEADER} ${GENERATED_J2DERIVED_HEADER})
     # numsim-materials, numsim-core, Eigen and tmech are header-only and included
     # as SYSTEM so their warnings stay silent under the first-party -Werror gate.
     # tmech (via cas's CPM) is needed for the tensor-stress material/test.
