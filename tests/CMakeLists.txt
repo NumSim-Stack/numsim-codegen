@@ -314,19 +314,18 @@ if(EXISTS "${NUMSIM_MATERIALS_DIR}/include/numsim-materials/solvers/rk_integrato
     # at configure time rather than after a confusing test failure.
     find_package(Git QUIET)
     if(Git_FOUND)
-        foreach(_ncg_pair
-                "${NUMSIM_MATERIALS_DIR}|${_ncg_materials_pin}|numsim-materials"
-                "${NUMSIM_CORE_DIR}|${_ncg_core_pin}|numsim-core")
-            string(REPLACE "|" ";" _ncg_parts "${_ncg_pair}")
-            list(GET _ncg_parts 0 _ncg_dir)
-            list(GET _ncg_parts 1 _ncg_pin)
-            list(GET _ncg_parts 2 _ncg_name)
+        # A function keeps the dir/pin/name association structural — no
+        # delimiter-packed strings that a pathological path could desync.
+        function(_ncg_warn_on_pin_drift _ncg_dir _ncg_pin _ncg_name)
             execute_process(
                 COMMAND ${GIT_EXECUTABLE} -C "${_ncg_dir}" rev-parse HEAD
                 OUTPUT_VARIABLE _ncg_head
                 OUTPUT_STRIP_TRAILING_WHITESPACE
                 ERROR_QUIET RESULT_VARIABLE _ncg_rc)
-            if(_ncg_rc EQUAL 0 AND NOT _ncg_head STREQUAL "${_ncg_pin}")
+            if(NOT _ncg_rc EQUAL 0)
+                return() # not a git checkout (tarball, etc.) — nothing to say
+            endif()
+            if(NOT _ncg_head STREQUAL "${_ncg_pin}")
                 message(WARNING
                     "Phase B e2e gate: local ${_ncg_name} checkout is at "
                     "${_ncg_head}, NOT the CI pin ${_ncg_pin}. Local test "
@@ -335,8 +334,25 @@ if(EXISTS "${NUMSIM_MATERIALS_DIR}/include/numsim-materials/solvers/rk_integrato
                     "-DNUMSIM_CORE_DIR= pointing at nonexistent paths plus "
                     "-DNUMSIM_CODEGEN_FETCH_MATERIALS=ON to test the pinned "
                     "contract.")
+                return()
             endif()
-        endforeach()
+            # At the pin but DIRTY reproduces the same divergence silently.
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} -C "${_ncg_dir}" status --porcelain
+                OUTPUT_VARIABLE _ncg_dirty
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET RESULT_VARIABLE _ncg_rc)
+            if(_ncg_rc EQUAL 0 AND NOT _ncg_dirty STREQUAL "")
+                message(WARNING
+                    "Phase B e2e gate: local ${_ncg_name} checkout is at the "
+                    "CI pin but has uncommitted changes — local test results "
+                    "may still diverge from CI (issue #140).")
+            endif()
+        endfunction()
+        _ncg_warn_on_pin_drift("${NUMSIM_MATERIALS_DIR}"
+            "${_ncg_materials_pin}" "numsim-materials")
+        _ncg_warn_on_pin_drift("${NUMSIM_CORE_DIR}"
+            "${_ncg_core_pin}" "numsim-core")
     endif()
 elseif(NUMSIM_CODEGEN_FETCH_MATERIALS)
     # DOWNLOAD_ONLY: fetch sources without running their CMake (header-only use).
