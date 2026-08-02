@@ -4,11 +4,13 @@
 include(FetchContent)
 
 if(NOT TARGET GTest::gtest)
+    # Commit-SHA pin (issue #141): a movable tag would be the one unpinned
+    # fetch in an otherwise SHA-pinned dependency set. SHA = tag v1.14.0.
+    # GIT_SHALLOW dropped — shallow fetch of a raw commit is unreliable.
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG v1.14.0
-        GIT_SHALLOW TRUE
+        GIT_TAG f8d7d77c06936315286eb55f8de22cd23c188571 # v1.14.0
     )
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
@@ -104,11 +106,13 @@ add_custom_command(
 # Phase 3b-2b: the coupled-Newton generated code includes <Eigen/Dense>. The CI
 # runners don't ship libeigen3-dev, so fetch Eigen (header-only — DOWNLOAD_ONLY,
 # no Eigen CMake configure) and expose just its include dir to the driver.
+# Commit-SHA pin (issue #141); SHA = tag 3.4.0. CPM auto-disables shallow
+# clones for commit-hash tags (see the numsim-cas pin comment in the
+# top-level CMakeLists.txt), so no GIT_SHALLOW here.
 CPMAddPackage(
     NAME eigen3
     GITLAB_REPOSITORY libeigen/eigen
-    GIT_TAG 3.4.0
-    GIT_SHALLOW TRUE
+    GIT_TAG 3147391d946bb4b6c68edd901f2add6ac1f31f8c # 3.4.0
     DOWNLOAD_ONLY YES)
 
 add_executable(compile_check_driver
