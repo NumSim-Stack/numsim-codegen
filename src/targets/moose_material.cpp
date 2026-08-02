@@ -342,6 +342,21 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name,
   }
   os << "\n";
 
+  // issue #10: the tmech::adaptor boundary assumes RankTwoTensor /
+  // RankFourTensor store contiguous row-major Real with no members beyond
+  // the data — an assumption about MOOSE internals that could silently
+  // break on a MOOSE upgrade. Emit it as a static_assert into the .C so a
+  // layout change becomes a compile error in the consumer's build, not a
+  // silent miscompute at the quadrature points.
+  os << "// Layout preconditions for the tmech::adaptor boundary — see\n";
+  os << "// numsim-codegen issue #10.\n";
+  os << "static_assert(sizeof(RankTwoTensor) == 9 * sizeof(Real),\n";
+  os << "              \"numsim-codegen assumes RankTwoTensor is contiguous "
+        "3x3 Real storage\");\n";
+  os << "static_assert(sizeof(RankFourTensor) == 81 * sizeof(Real),\n";
+  os << "              \"numsim-codegen assumes RankFourTensor is contiguous "
+        "3x3x3x3 Real storage\");\n\n";
+
   // Embed the Layer 2 compute function as an anonymous-namespace inline
   // function at file scope. Keeps the implementation self-contained in
   // a single .C file without leaking the helper into other TUs.
@@ -444,6 +459,35 @@ auto emit_source(ConstitutiveModel const &model, std::string const &app_name,
 
 auto MooseMaterialTarget::emit(ConstitutiveModel const &model) const
     -> std::vector<EmittedFile> {
+  // issue #7: MOOSE's RankTwoTensor/RankFourTensor are ALWAYS 3D
+  // (LIBMESH_DIM = 3). A dim != 3 recipe would emit tmech::adaptor reads
+  // with dim-2 strides over 3x3 storage — a silent miscompute, not a
+  // compile error. Reject loudly; plane-strain/axisymmetric models must
+  // be authored as dim-3 recipes (embed the 2D state in a 3x3 tensor),
+  // matching how MOOSE's own tensor-mechanics materials treat 2D.
+  auto reject_non_3d = [&](std::size_t dim, std::string const &what,
+                           std::string const &name) {
+    if (dim != 3) {
+      throw std::runtime_error(
+          "MooseMaterialTarget: " + what + " '" + name + "' has dim " +
+          std::to_string(dim) +
+          ", but MOOSE RankTwoTensor/RankFourTensor storage is always 3D "
+          "(LIBMESH_DIM = 3); emitting would silently miscompute at the "
+          "adaptor boundary. Author the recipe with dim = 3 (embed "
+          "plane-strain/axisymmetric states in a 3x3 tensor).");
+    }
+  };
+  for (auto const &i : model.inputs()) {
+    if (i.kind == SymbolDecl::Kind::Tensor) {
+      reject_non_3d(i.dim, "tensor input", i.name);
+    }
+  }
+  for (auto const &o : model.outputs()) {
+    if (o.kind == OutputDecl::Kind::Tensor) {
+      reject_non_3d(o.dim, "tensor output", o.name);
+    }
+  }
+
   // Stateful symbols would need old/new MaterialProperty pair handling
   // that the MOOSE backend doesn't implement yet. Fail loudly rather
   // than silently emit a regular read.
