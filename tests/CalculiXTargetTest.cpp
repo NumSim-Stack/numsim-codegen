@@ -111,7 +111,8 @@ TEST(CalculiXTarget, RejectsMissingConsistentTangent) {
   auto mu = m.add_parameter("mu", 0.5);
   auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
   m.add_output("stress", 2 * mu * eps, roles::Stress); // no add_algorithmic_tangent
-  EXPECT_THROW((void)target.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = target.emit(m),
+               std::runtime_error);
 }
 
 TEST(CalculiXTarget, RejectsScalarInput) {
@@ -123,7 +124,8 @@ TEST(CalculiXTarget, RejectsScalarInput) {
   auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
   m.add_output("stress", 2 * mu * (1 + T) * eps, roles::Stress);
   m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
-  EXPECT_THROW((void)target.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = target.emit(m),
+               std::runtime_error);
 }
 
 TEST(CalculiXTarget, RejectsMultipleTensorInputs) {
@@ -137,7 +139,8 @@ TEST(CalculiXTarget, RejectsMultipleTensorInputs) {
       Role{.name = "plastic_strain", .is_symmetric = true, .expected_rank = 2});
   m.add_output("stress", 2 * mu * (eps - eps_p), roles::Stress);
   m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
-  EXPECT_THROW((void)target.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = target.emit(m),
+               std::runtime_error);
 }
 
 TEST(CalculiXTarget, RejectsMultipleTensorOutputs) {
@@ -149,14 +152,16 @@ TEST(CalculiXTarget, RejectsMultipleTensorOutputs) {
   m.add_output("stress", 2 * mu * eps, roles::Stress);
   m.add_output("extra", 3 * mu * eps, roles::Stress); // second rank-2 output
   m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
-  EXPECT_THROW((void)target.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = target.emit(m),
+               std::runtime_error);
 }
 
 // H3: a non-symmetric tensor input (deformation gradient) must be rejected — the
 // abq_std Voigt boundary is symmetric and would silently drop its skew part.
 TEST(CalculiXTarget, RejectsNonSymmetricTensorInput) {
   CalculiXExternalTarget target;
-  EXPECT_THROW((void)target.emit(build_deformation_gradient_recipe()),
+  EXPECT_THROW([[maybe_unused]] auto const discarded =
+                   target.emit(build_deformation_gradient_recipe()),
                std::runtime_error);
 }
 
@@ -169,14 +174,17 @@ TEST(CalculiXTarget, RejectsStateVariable) {
       m.add_scalar_state_variable("alpha", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(alpha, K * alpha.current);
   m.enable_local_newton();
-  EXPECT_THROW((void)target.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = target.emit(m),
+               std::runtime_error);
 }
 
 // A model name with no alphanumeric characters ("_" is a valid C++ identifier)
 // maps to an empty library name → must throw at emit, not fail inside ccx.
 TEST(CalculiXTarget, RejectsEmptyLibraryName) {
   CalculiXExternalTarget target;
-  EXPECT_THROW((void)target.emit(build_full_elastic("_")), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded =
+                   target.emit(build_full_elastic("_")),
+               std::runtime_error);
 }
 
 } // namespace numsim::codegen
