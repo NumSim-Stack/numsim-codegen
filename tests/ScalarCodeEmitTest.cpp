@@ -192,11 +192,13 @@ TEST(ScalarCodeEmit, NotEqualEmitsStaticCastDouble) {
 //
 // Reachable TWO ways: (a) direct node construction of a negative literal
 // (the same public factory recipe.h uses for leaves), and (b) — found in
-// the follow-up review — ORDINARY subtraction: cas's sub simplifier
-// lowers `0 - rhs` to `make_expression<scalar_negative>(rhs)` with no
-// check that rhs is already negative (scalar_simplifier_sub.cpp,
-// dispatch(scalar_zero)), so `0 - (-x)` builds negative(negative(x)).
-// Naive `-` + `-x` concatenation emitted an invalid `--x`.
+// the follow-up review — ORDINARY subtraction: at the current cas pin the
+// sub simplifiers lower `0 - rhs` to `make_expression<*_negative>(rhs)`
+// with no already-negative check, so `0 - (-x)` builds
+// negative(negative(x)). Upstream, cas round-7 (001164d) fixed the scalar
+// and t2s domains after our pin; the tensor domain is cas#422. The guard
+// stays regardless (defense-in-depth — emitters must not rely on
+// simplifier invariants). Naive `-` + `-x` emitted an invalid `--x`.
 // Reachability path (b): plain operators, no direct node construction.
 TEST(ScalarCodeEmit, ZeroMinusNegativeParenthesizesViaOperators) {
   CodeGenContext ctx;

@@ -696,10 +696,11 @@ TEST(TensorCodeEmit, T2sWithTensorMulMultipliesScalarByTensor) {
 // ─── Negation of a leading-minus operand (issue #136) ─────────────────
 //
 // The unary `-` operator folds neg(neg(x)) = x, but that is NOT the only
-// construction path: cas's sub simplifiers lower `0 - rhs` to
-// `make_expression<*_negative>(rhs)` with no already-negative check
-// (scalar/tensor/t2s `sub_base::dispatch(*_zero)`), so ordinary
-// subtraction can build a nested negative. Naive `-` + `-A` concatenation
+// construction path: at the current cas pin the sub simplifiers lower
+// `0 - rhs` to `make_expression<*_negative>(rhs)` with no already-negative
+// check (`sub_base::dispatch(*_zero)`), so ordinary subtraction can build
+// a nested negative. Upstream: cas round-7 fixed scalar/t2s post-pin; the
+// tensor domain is cas#422. The guard stays as defense-in-depth. Naive `-` + `-A` concatenation
 // would emit an invalid `--A` (a decrement). The inner negative of a leaf
 // emits the inline single token `-A`; the outer one must parenthesise.
 // (Direct construction below keeps the tests independent of simplifier
