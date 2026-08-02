@@ -82,7 +82,7 @@ TEST(NegativePath, MooseRejectsStatefulInput) {
   m.add_output("stress", h, roles::Stress);
   MooseMaterialTarget target;
   try {
-    (void)target.emit(m);
+    [[maybe_unused]] auto const discarded = target.emit(m);
     FAIL() << "expected emit() to reject the stateful input";
   } catch (std::runtime_error const &e) {
     std::string const msg = e.what();
@@ -108,7 +108,7 @@ TEST(NegativePath, MooseRejectsEvolutionWithoutLocalNewton) {
   // so the synthesised residual/Jacobian outputs would never be solved.
   MooseMaterialTarget target;
   try {
-    (void)target.emit(m);
+    [[maybe_unused]] auto const discarded = target.emit(m);
     FAIL() << "expected emit() to reject evolution without local Newton";
   } catch (std::runtime_error const &e) {
     std::string const msg = e.what();
@@ -125,7 +125,7 @@ TEST(NegativePath, MooseRejectsMultipleTangents) {
   m.add_algorithmic_tangent("dstress_deps2", "stress", "eps");
   MooseMaterialTarget target;
   try {
-    (void)target.emit(m);
+    [[maybe_unused]] auto const discarded = target.emit(m);
     FAIL() << "expected emit() to reject more than one consistent tangent";
   } catch (std::runtime_error const &e) {
     std::string const msg = e.what();
@@ -144,7 +144,7 @@ TEST(NegativePath, MooseRejectsJacobianMultOutputCollision) {
   m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
   MooseMaterialTarget target;
   try {
-    (void)target.emit(m);
+    [[maybe_unused]] auto const discarded = target.emit(m);
     FAIL() << "expected emit() to reject the Jacobian_mult output collision";
   } catch (std::runtime_error const &e) {
     std::string const msg = e.what();
@@ -160,7 +160,7 @@ TEST(NegativePath, MooseRejectsUnsupportedTensorRank) {
   m.add_output("y", x, roles::Other);
   MooseMaterialTarget target;
   try {
-    (void)target.emit(m);
+    [[maybe_unused]] auto const discarded = target.emit(m);
     FAIL() << "expected emit() to reject the rank-3 tensor";
   } catch (std::runtime_error const &e) {
     std::string const msg = e.what();
@@ -180,7 +180,7 @@ TEST(NegativePath, DuplicateOutputRejected) {
 
 TEST(NegativePath, DuplicateSymbolRejected) {
   ConstitutiveModel m("DupSym");
-  (void)m.add_scalar_input("x");
+  [[maybe_unused]] auto const x = m.add_scalar_input("x");
   EXPECT_THROW(m.add_scalar_input("x"), std::runtime_error);
   EXPECT_THROW(m.add_parameter("x", 1.0), std::runtime_error);
 }
@@ -194,7 +194,7 @@ TEST(NegativePath, SymbolOutputNameClashRejected) {
   EXPECT_THROW(m.add_scalar_input("shared"), std::runtime_error);
 
   ConstitutiveModel m2("Clash2");
-  (void)m2.add_scalar_input("shared");
+  [[maybe_unused]] auto const shared = m2.add_scalar_input("shared");
   auto y = m2.add_scalar_input("y");
   EXPECT_THROW(m2.add_output("shared", y), std::runtime_error);
 }
