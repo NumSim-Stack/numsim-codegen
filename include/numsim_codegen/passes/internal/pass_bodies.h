@@ -99,6 +99,10 @@ inline void SymbolValidationPass::run(PassContext &pctx) {
                             T,
                             cas::expression_holder<cas::scalar_expression>>) {
             lc.collect_scalar(e);
+          } else if constexpr (
+              std::is_same_v<T, cas::expression_holder<
+                                    cas::tensor_to_scalar_expression>>) {
+            lc.collect_t2s(e); // #142: scalar-from-tensor output
           } else {
             lc.collect_tensor(e);
           }
@@ -580,6 +584,10 @@ inline void CodeEmitPass::run(PassContext &pctx) {
                             T,
                             cas::expression_holder<cas::scalar_expression>>) {
             return pipeline.scalar().apply(e);
+          } else if constexpr (
+              std::is_same_v<T, cas::expression_holder<
+                                    cas::tensor_to_scalar_expression>>) {
+            return pipeline.t2s().apply(e); // #142: scalar-from-tensor output
           } else {
             return pipeline.tensor().apply(e);
           }

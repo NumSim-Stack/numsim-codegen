@@ -267,6 +267,12 @@ struct NewtonOptions {
 };
 
 // Declaration of a computed output that the generated function emits.
+//
+// #142: the expr variant carries a third alternative — a tensor_to_scalar
+// expression (e.g. trace(ε), von-Mises √(1.5·dev:dev)). Such an output is
+// SCALAR-valued (Kind::Scalar, `double &<name>_out` in the signature); only
+// its expression domain differs, so every variant visitor must route it
+// through the t2s emitter/collector rather than the scalar one.
 struct OutputDecl {
   enum class Kind { Scalar, Tensor };
 
@@ -274,7 +280,8 @@ struct OutputDecl {
   Kind kind;
   std::variant<
       cas::expression_holder<cas::scalar_expression>,
-      cas::expression_holder<cas::tensor_expression>>
+      cas::expression_holder<cas::tensor_expression>,
+      cas::expression_holder<cas::tensor_to_scalar_expression>>
       expr;
   std::size_t dim = 0;
   std::size_t rank = 0;
@@ -614,6 +621,30 @@ public:
     assert_output_name_available(name); // PR #78 review #2
     OutputDecl decl{name, OutputDecl::Kind::Tensor, expr, expr.get().dim(),
                     expr.get().rank(), std::move(role)};
+    m_outputs.push_back(std::move(decl));
+  }
+
+  // #142: scalar-from-tensor output — a tensor_to_scalar expression such as
+  // trace(ε), a dissipation density, or a von-Mises measure. The output is
+  // SCALAR-valued (Kind::Scalar, `double &<name>_out` out-parameter); only
+  // the expression domain differs from the plain-scalar overload. A role
+  // carrying a non-scalar expected_rank (e.g. roles::Stress) is rejected
+  // here: this output can never satisfy it, and name-based find_output_by_role
+  // would silently mis-route a rank-2 consumer to a scalar.
+  void add_output(std::string name,
+                  cas::expression_holder<cas::tensor_to_scalar_expression> expr,
+                  Role role = roles::Other) {
+    validate_role_attributes(role);
+    if (role.expected_rank.has_value() && *role.expected_rank != 0) {
+      throw std::runtime_error(std::format(
+          "ConstitutiveModel '{}': output '{}' is a tensor_to_scalar "
+          "expression (scalar-valued) but role '{}' expects rank {}. Use a "
+          "rank-0 role (e.g. roles::Dissipation) or roles::Other.",
+          m_name, name, role.name, *role.expected_rank));
+    }
+    assert_output_name_available(name); // PR #78 review #2
+    OutputDecl decl{name, OutputDecl::Kind::Scalar, expr, 0, 0,
+                    std::move(role)};
     m_outputs.push_back(std::move(decl));
   }
 

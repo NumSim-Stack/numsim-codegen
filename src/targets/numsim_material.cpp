@@ -429,6 +429,20 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
           "' collides with an emitted member, the state, a parameter, a "
           "tensor input, or an internal variable; rename it.");
     }
+    // #142: tensor_to_scalar outputs are Kind::Scalar but hold the t2s
+    // variant alternative — the scalar arm below would std::get the wrong
+    // alternative. Their leaf-scoping + JSON property wiring on this target
+    // is not implemented yet; reject loudly rather than emit a partial
+    // material (never bad_variant_access, never silent drop).
+    if (std::holds_alternative<
+            cas::expression_holder<cas::tensor_to_scalar_expression>>(
+            o.expr)) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: output '" + o.name +
+          "' is a tensor_to_scalar expression, which this target does not "
+          "support yet. Use the standalone / MOOSE targets for "
+          "scalar-from-tensor outputs (#142).");
+    }
     CodeGenContext oc;
     CodeEmitPipeline op(oc);
     register_all(oc);
@@ -1050,6 +1064,19 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
           "NumSimMaterialTarget: output name '" + o.name +
           "' collides with an emitted member, the state, a parameter, or a "
           "tensor input; rename it.");
+    }
+
+    // #142: see the residual-path guard — a tensor_to_scalar output is
+    // Kind::Scalar but holds the t2s alternative; reject loudly rather than
+    // bad_variant_access in the scalar arm below.
+    if (std::holds_alternative<
+            cas::expression_holder<cas::tensor_to_scalar_expression>>(
+            o.expr)) {
+      throw std::runtime_error(
+          "NumSimMaterialTarget: output '" + o.name +
+          "' is a tensor_to_scalar expression, which this target does not "
+          "support yet. Use the standalone / MOOSE targets for "
+          "scalar-from-tensor outputs (#142).");
     }
 
     CodeGenContext oc;
