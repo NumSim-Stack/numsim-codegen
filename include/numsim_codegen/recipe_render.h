@@ -84,6 +84,7 @@ struct RenderedNewtonSegment {
   std::string jacobian_rhs;     // expression for the Jacobian J = dR/dsv
   double tol;
   int max_iter;
+  bool throw_on_failure = false; // issue #85 (true → throw, false → NaN)
 };
 
 // Phase 3b-2b (issue #35): a coupled N>1 Newton system after CodeEmitPass has
@@ -97,6 +98,7 @@ struct RenderedNewtonSystem {
   std::vector<std::vector<std::string>> jacobian_rhs; // N×N, [i][j] = ∂R_i/∂x_j
   double tol;
   int max_iter;
+  bool throw_on_failure = false; // issue #85 (true → throw, false → NaN)
 };
 
 // Render the function-frame source (signature + body + output writes)

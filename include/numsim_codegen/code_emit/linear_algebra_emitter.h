@@ -55,12 +55,20 @@ public:
   // (Fischer-Burmeister: a semismooth Jacobian + merit-function convergence) and
   // 3b-2d (tensor unknowns: block assembly) are EXPECTED to extend this
   // interface — it is not a frozen general "coupled solver" contract.
+  // `converged_flag` (issue #85): a `bool` in the caller's scope that this
+  // step sets `true` when `‖R‖∞ < tol`, so the render frame can detect a
+  // max-iter/singular failure after the loop. The step also `break`s without
+  // setting it when the dense solve is non-finite (singular Jacobian).
+  // `iter_var` / `max_iter` (issue #85): the loop runs `iter_var <= max_iter`,
+  // so the residual of the final update is checked; the step caps the UPDATE at
+  // `max_iter` by `break`ing (post-convergence-check) when `iter_var == max_iter`.
   virtual void emit_newton_step(
       std::ostream &os, std::string const &prefix,
       std::vector<std::string> const &unknowns,
       std::vector<std::string> const &residual_rhs,
       std::vector<std::vector<std::string>> const &jacobian_rhs,
-      double tol) const = 0;
+      double tol, std::string const &converged_flag,
+      std::string const &iter_var, int max_iter) const = 0;
 };
 
 // Eigen implementation — fixed-size `Eigen::Matrix<double,N,·>` + partial-pivot
@@ -82,7 +90,8 @@ public:
       std::vector<std::string> const &unknowns,
       std::vector<std::string> const &residual_rhs,
       std::vector<std::vector<std::string>> const &jacobian_rhs,
-      double tol) const override {
+      double tol, std::string const &converged_flag,
+      std::string const &iter_var, int max_iter) const override {
     auto const n = unknowns.size();
     auto L = [&](char const *s) { return prefix + "_" + s; };
     // Residual vector R (size N).
@@ -101,12 +110,22 @@ public:
       }
     }
     os << ";\n";
-    // Convergence on the residual ∞-norm.
+    // Convergence on the residual ∞-norm (issue #85: record it).
     os << "    if (" << L("r") << ".cwiseAbs().maxCoeff() < " << tol
+       << ") {\n      " << converged_flag << " = true;\n      break;\n    }\n";
+    // issue #85: the loop runs one pass past max_iter to check the final
+    // update's residual (above); cap the UPDATE itself at max_iter.
+    os << "    if (" << iter_var << " == " << max_iter
        << ") {\n      break;\n    }\n";
-    // Solve J·Δx = R and update x -= Δx.
+    // Solve J·Δx = R. issue #85: partialPivLu does NO rank check — on a
+    // singular J it returns garbage (often non-finite). Guard the solution and
+    // break rather than propagate it. (A near-singular-but-finite solution is
+    // NOT caught here — it either fails to converge within max_iter, or, like any
+    // Newton-without-globalization, may reach a spurious root; inherent, not a
+    // guarantee this guard provides.)
     os << "    Eigen::Matrix<double, " << n << ", 1> " << L("dx") << " = "
        << L("J") << ".partialPivLu().solve(" << L("r") << ");\n";
+    os << "    if (!" << L("dx") << ".allFinite()) {\n      break;\n    }\n";
     for (std::size_t i = 0; i < n; ++i) {
       os << "    " << unknowns[i] << " -= " << L("dx") << "(" << i << ");\n";
     }
@@ -120,6 +139,13 @@ public:
 // `cwiseAbs().maxCoeff()`, `arma::solve` vs `partialPivLu().solve`), yet it
 // slots behind the same four methods. NOTE: `arma::solve` links LAPACK/BLAS, a
 // heavier downstream dependency than header-only Eigen.
+//
+// STATUS: opt-in DEMONSTRATOR, kept for a possible future non-Eigen backend.
+// Nothing in the library selects it (Eigen is the default and the only backend
+// any target uses), so its emitted code is exercised by STRING assertions only
+// (LinearAlgebraEmitterTest) — it is never compiled or run. Treat the emitted
+// Armadillo (e.g. the bool-overload `arma::solve(dx, J, r)` below) as
+// plausible-but-unverified until a gated compile test is added.
 class ArmadilloLinearAlgebraEmitter final : public LinearAlgebraEmitter {
 public:
   [[nodiscard]] auto includes() const -> std::vector<std::string> override {
@@ -137,7 +163,8 @@ public:
       std::vector<std::string> const &unknowns,
       std::vector<std::string> const &residual_rhs,
       std::vector<std::vector<std::string>> const &jacobian_rhs,
-      double tol) const override {
+      double tol, std::string const &converged_flag,
+      std::string const &iter_var, int max_iter) const override {
     auto const n = unknowns.size();
     auto L = [&](char const *s) { return prefix + "_" + s; };
     // Residual vector R (size N) — element assignment (Armadillo has no
@@ -154,12 +181,19 @@ public:
            << ") = " << jacobian_rhs[i][j] << ";\n";
       }
     }
-    // Convergence on the residual ∞-norm.
+    // Convergence on the residual ∞-norm (issue #85: record it).
     os << "    if (arma::norm(" << L("r") << ", \"inf\") < " << tol
+       << ") {\n      " << converged_flag << " = true;\n      break;\n    }\n";
+    // issue #85: cap the update at max_iter (see the Eigen sibling).
+    os << "    if (" << iter_var << " == " << max_iter
        << ") {\n      break;\n    }\n";
-    // Solve J·Δx = R and update x -= Δx.
-    os << "    arma::vec::fixed<" << n << "> " << L("dx") << " = arma::solve("
-       << L("J") << ", " << L("r") << ");\n";
+    // Solve J·Δx = R via arma::solve's bool overload, which returns false on a
+    // singular / rank-deficient system (issue #85) — break rather than update
+    // with garbage. A near-singular-but-finite step is caught by the outer
+    // convergence flag (the loop exhausts max_iter).
+    os << "    arma::vec::fixed<" << n << "> " << L("dx") << ";\n";
+    os << "    if (!arma::solve(" << L("dx") << ", " << L("J") << ", " << L("r")
+       << ")) {\n      break;\n    }\n";
     for (std::size_t i = 0; i < n; ++i) {
       os << "    " << unknowns[i] << " -= " << L("dx") << "(" << i << ");\n";
     }
