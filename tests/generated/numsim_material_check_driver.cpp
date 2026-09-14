@@ -13,6 +13,7 @@
 // that the emitted code actually compiles and runs against the solver contract.
 #include <cmath>
 #include <string>
+#include <functional>
 
 #include "numsim-materials/core/material_context.h"
 #include "numsim-materials/core/history_property.h"
@@ -33,8 +34,16 @@
 #if defined(__GNUC__) && !defined(__clang__)
 #define NCG_TENSOR_E2E 1
 #include <tmech/tmech.h>
+#include "numsim-materials/solvers/backward_euler.h"
 #include "numsim-materials/materials/tensor_component_stepper.h"
+#include "numsim-materials/postprocessing/numerical_diff_checker.h"
 #include "Viscoelastic.h" // generated: σ = α·ε (tensor stress from scalar state)
+#include "ReturnMap.h"     // generated: implicit residual R(z,ε)=z−c·tr(ε), σ=z·ε
+#include "ReturnMapCubic.h" // generated: NONLINEAR residual R=z+z³−c·tr(ε)
+#include "J2Return.h"       // generated: J2 deviatoric radial return (golden, #90)
+#include "J2Voce.h"         // generated: J2 with Voce (saturating) hardening
+#include "J2Swift.h"        // generated: J2 with Swift (power-law) hardening
+#include "J2PathDep.h"      // generated: PATH-DEPENDENT J2 (tensor εᵖ history, #92)
 #endif
 
 #include <gtest/gtest.h>
@@ -51,6 +60,12 @@ using Linear = numsim::materials::generated::LinearHardening<policy>;
 using Nonlinear = numsim::materials::generated::NonlinearDecay<policy>;
 #ifdef NCG_TENSOR_E2E
 using Visco = numsim::materials::generated::Viscoelastic<policy>;
+using ReturnMap = numsim::materials::generated::ReturnMap<policy>;
+using ReturnMapCubic = numsim::materials::generated::ReturnMapCubic<policy>;
+using J2Return = numsim::materials::generated::J2Return<policy>;
+using J2Voce = numsim::materials::generated::J2Voce<policy>;
+using J2Swift = numsim::materials::generated::J2Swift<policy>;
+using J2PathDep = numsim::materials::generated::J2PathDep<policy>;
 using tensor2 = tmech::tensor<T, 3, 2>;
 #endif
 
@@ -271,6 +286,497 @@ TEST(NumSimMaterialEndToEnd, TensorStressFromScalarStateAndStrain) {
   EXPECT_NEAR(C(0, 0, 0, 0), alpha, 1e-12);       // P_sym(0,0,0,0)=1
   EXPECT_NEAR(C(0, 1, 0, 1), alpha * 0.5, 1e-12); // minor-symmetric ½
   EXPECT_NEAR(C(0, 0, 1, 1), T{0}, 1e-12);        // off-block zero
+}
+
+// ── Strain-coupled implicit residual (Mode B) ────────────────────────────────
+// Proof the residual emit (material_ref<backward_euler> + solve(eval)) compiles
+// and runs against the REAL backward_euler in caller-driven mode: drive a strain
+// producer + the generated ReturnMap; the material solves R(z,ε)=z−c·tr(ε)=0
+// internally, so z = c·tr(ε) and σ = z·ε.
+TEST(NumSimMaterialEndToEnd, ResidualReturnMapSolvesAgainstBackwardEuler) {
+  ctx_type ctx;
+  param_type p;
+
+  // strain producer: accumulates `increment` into component (0,0) per update.
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.02});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  // caller-driven backward_euler (no "function" → the material drives solve()).
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-12});
+  p.insert<int>("max_iter", 50);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  p.clear();
+  const T c = T{2.0};
+  p.insert<std::string>("name", "ReturnMap");
+  p.insert<T>("c", c);
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<ReturnMap>(p);
+
+  ctx.finalize();
+  ctx.update();
+  ctx.commit();
+
+  const auto eps = read_tensor(ctx, "stepper", "strain");
+  const T tr = eps(0, 0) + eps(1, 1) + eps(2, 2);
+  const T z = ctx.get<T>("ReturnMap", "z");        // solved scalar state
+  const auto sig = read_tensor(ctx, "ReturnMap", "stress");
+
+  EXPECT_NEAR(z, c * tr, 1e-10);                   // R=0 ⇒ z = c·tr(ε)
+  EXPECT_NEAR(sig(0, 0), z * eps(0, 0), 1e-10);    // σ = z·ε
+  EXPECT_NEAR(sig(0, 1), T{0}, 1e-12);             // off-diagonal strain is 0
+}
+
+// Phase 2b: the strain-coupled CONSISTENT TANGENT of the generated ReturnMap,
+// verified numerically through the real backward_euler solve. For σ = z·ε with
+// z solving R = z − c·tr(ε) = 0:
+//   dσ/dε = ∂σ/∂ε + ∂σ/∂z ⊗ dz/dε = z·I⁴ˢ + ε ⊗ (c·I).
+// The second term is the implicit coupling a naive explicit ∂σ/∂ε drops. The
+// load-bearing assertion is the off-block C_{0011} = c·ε₀₀ ≠ 0 — exactly the
+// component the rate-path (strain-only) Viscoelastic tangent above has as ZERO.
+TEST(NumSimMaterialEndToEnd, ResidualReturnMapConsistentTangentHasCouplingTerm) {
+  ctx_type ctx;
+  param_type p;
+
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.02});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-12});
+  p.insert<int>("max_iter", 50);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  p.clear();
+  const T c = T{2.0};
+  p.insert<std::string>("name", "ReturnMap");
+  p.insert<T>("c", c);
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<ReturnMap>(p);
+
+  ctx.finalize();
+  ctx.update();
+  ctx.commit();
+
+  const auto eps = read_tensor(ctx, "stepper", "strain");
+  const T e00 = eps(0, 0);
+  const T z = ctx.get<T>("ReturnMap", "z"); // = c·tr(ε) = c·e00
+
+  using tensor4 = tmech::tensor<T, 3, 4>;
+  auto* cp = dynamic_cast<
+      numsim_core::property<tensor4, numsim::materials::property_traits>*>(
+      ctx.find_property("ReturnMap", "dstress_dstrain"));
+  ASSERT_NE(cp, nullptr);
+  const auto C = cp->get();
+
+  // Coupling term (the whole point): C_{0011} = z·I⁴ˢ_{0011} + ε₀₀·(c·I)_{11}
+  //                                           = 0 + c·e00.  Naive ∂σ/∂ε ⇒ 0.
+  EXPECT_NEAR(C(0, 0, 1, 1), c * e00, 1e-10);
+  EXPECT_GT(std::abs(C(0, 0, 1, 1)), 1e-6) << "coupling term must be nonzero";
+  // Explicit base term (correction vanishes here): C_{0101} = z·I⁴ˢ_{0101} = z·½.
+  EXPECT_NEAR(C(0, 1, 0, 1), z * T{0.5}, 1e-10);
+  // Diagonal: C_{0000} = z·I⁴ˢ_{0000} + c·e00 = z + c·e00.
+  EXPECT_NEAR(C(0, 0, 0, 0), z + c * e00, 1e-10);
+}
+
+// Phase C (#90, roadmap D18): INDEPENDENT verification of the generated
+// consistent tangent. The prior tests pin specific components against a
+// hand-derived closed form; this instead points numsim-materials'
+// `numerical_diff_checker` at the generated ReturnMap material and finite-
+// differences the WHOLE dσ/dε through the real property graph — perturbing the
+// strain, re-solving the Newton (reverting the z history each sample so every
+// perturbation restarts from the same z_old), and comparing every rank-4
+// component against our emitted `dstress_dstrain`. This catches any component
+// the closed-form assertions did not enumerate, and validates the coupling term
+// via the re-solve rather than by construction.
+TEST(NumSimMaterialEndToEnd, ResidualReturnMapTangentMatchesNumericalDiff) {
+  ctx_type ctx;
+  param_type p;
+
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.02});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 50);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "ReturnMap");
+  p.insert<T>("c", T{2.0});
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<ReturnMap>(p);
+
+  // The FD checker: FD-differentiate ReturnMap::stress w.r.t. stepper::strain and
+  // compare to the analytical ReturnMap::dstress_dstrain. Revert the z history
+  // between perturbations so each re-solve starts from the same previous state.
+  p.clear();
+  p.insert<std::string>("name", "checker");
+  p.insert<ctx_type*>("context", &ctx);
+  p.insert<std::string>("output_source", "ReturnMap::stress");
+  p.insert<std::string>("input_source", "stepper::strain");
+  p.insert<std::string>("analytical_source", "ReturnMap::dstress_dstrain");
+  p.insert<std::vector<std::string>>("history_sources", {"ReturnMap::z"});
+  p.insert<T>("epsilon", T{1e-7});
+  ctx.create<numsim::materials::tangent_checker<policy>>(p);
+
+  ctx.finalize();
+
+  // Step through several increments; the tangent must FD-match at every state.
+  T max_rel = 0;
+  for (int i = 0; i < 8; ++i) {
+    ctx.update();
+    max_rel = std::max(max_rel, ctx.get<T>("checker", "rel_error"));
+    ctx.commit();
+  }
+  // Smooth response (z = c·tr(ε), no transitions), so central FD is tight.
+  EXPECT_LT(max_rel, 1e-6) << "generated dσ/dε disagrees with numerical diff";
+}
+
+// NONLINEAR residual R(z,ε) = z + z³ − c·tr(ε), so ∂R/∂z = 1 + 3z². This is the
+// test that VALIDATES THE EMITTED JACOBIAN: with a tight Newton budget and a
+// root z≈0.682 (where ∂R/∂z≈2.4 ≫ 1), a wrong derivative oscillates and the
+// converged residual is NOT ~0 — unlike the linear case where any jacobian
+// reaches the root. We drive c·tr(ε)=1 (strain increment 0.5 on one component).
+TEST(NumSimMaterialEndToEnd, NonlinearResidualValidatesEmittedJacobian) {
+  ctx_type ctx;
+  param_type p;
+
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.5}); // tr(ε) = 0.5 after one update
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  // Tight iteration budget: the correct jacobian (1+3z²) converges in ~6 Newton
+  // steps; a wrong constant jacobian would not reach tol here.
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 12);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  p.clear();
+  const T c = T{2.0};
+  p.insert<std::string>("name", "ReturnMapCubic");
+  p.insert<T>("c", c);
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<ReturnMapCubic>(p);
+
+  ctx.finalize();
+  ctx.update();
+  ctx.commit();
+
+  const auto eps = read_tensor(ctx, "stepper", "strain");
+  const T tr = eps(0, 0) + eps(1, 1) + eps(2, 2);
+  const T z = ctx.get<T>("ReturnMapCubic", "z");
+  const auto sig = read_tensor(ctx, "ReturnMapCubic", "stress");
+
+  // The converged state must satisfy R(z,ε)=0: z + z³ = c·tr(ε). A wrong
+  // emitted ∂R/∂z fails to converge within the budget, so this residual ≠ 0.
+  const T residual = z + z * z * z - c * tr;
+  EXPECT_NEAR(residual, T{0}, 1e-9) << "z=" << z << " (∂R/∂z must be 1+3z²)";
+  // Sanity: the root of z+z³=1 is ≈ 0.6823278.
+  EXPECT_NEAR(z, T{0.6823278038280193}, 1e-6);
+  EXPECT_NEAR(sig(0, 0), z * eps(0, 0), 1e-10); // σ = z·ε
+
+  // Phase 2b: the tangent on the NONLINEAR residual VALIDATES THE DIVISION by
+  // ∂R/∂z. Here ∂R/∂z = 1+3z² ≠ 1, so dz/dε = c·I/(1+3z²) and the coupling term
+  // C_{0011} = ε₀₀·c/(1+3z²). If the emitter dropped the /∂R/∂z factor (which the
+  // LINEAR ReturnMap's ∂R/∂z≡1 cannot detect), C_{0011} would be ε₀₀·c instead —
+  // off by the ~2.4× jacobian here. This is the load-bearing division check.
+  using tensor4 = tmech::tensor<T, 3, 4>;
+  auto* cp = dynamic_cast<
+      numsim_core::property<tensor4, numsim::materials::property_traits>*>(
+      ctx.find_property("ReturnMapCubic", "dstress_dstrain"));
+  ASSERT_NE(cp, nullptr);
+  const auto C = cp->get();
+  const T dRdz = T{1} + T{3} * z * z; // = ∂R/∂z at the converged z
+  EXPECT_GT(dRdz, T{2}) << "must be ≫1 so the division is observable";
+  EXPECT_NEAR(C(0, 0, 1, 1), c * eps(0, 0) / dRdz, 1e-9);
+  // Contrast: without the division it would be c·ε₀₀ — assert we are NOT that.
+  EXPECT_GT(std::abs(C(0, 0, 1, 1) - c * eps(0, 0)), 1e-3)
+      << "tangent must divide by ∂R/∂z, not omit it";
+}
+
+// ── Phase C golden (#90): J2 radial-return consistent tangent ────────────────
+// A REAL, validated plasticity model driven end-to-end through the real solver.
+// σ = s_trial − 2G·Δγ·n with s_trial = 2G·dev(ε), Δγ from R = ‖s_trial‖ − 2G·Δγ
+// − σ_y − H·Δγ = 0 (plastic branch). Two independent checks:
+//   (1) PHYSICS: the updated stress sits on the hardened yield surface,
+//       ‖dev(σ)‖ = σ_y + H·Δγ (the return-map consistency condition);
+//   (2) TANGENT: the emitted consistent tangent dσ/dε — which carries the full
+//       flow-direction structure (P_dev, n⊗n, geometric softening ∝ 1/‖s_trial‖)
+//       — FD-matches numerical differences through the real re-solve.
+// Loading is monotonic so the increment Δγ stays ≥ 0 (backward_euler's clamp
+// never activates) and the state stays on the plastic branch.
+TEST(NumSimMaterialEndToEnd, J2RadialReturnTangentMatchesNumericalDiff) {
+  ctx_type ctx;
+  param_type p;
+
+  const T G = T{80.0}, sy = T{1.0}, H = T{10.0};
+
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.02}); // monotonic uniaxial-ish loading
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 50);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "J2Return");
+  p.insert<T>("G", G);
+  p.insert<T>("sy", sy);
+  p.insert<T>("H", H);
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<J2Return>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "checker");
+  p.insert<ctx_type*>("context", &ctx);
+  p.insert<std::string>("output_source", "J2Return::stress");
+  p.insert<std::string>("input_source", "stepper::strain");
+  p.insert<std::string>("analytical_source", "J2Return::dstress_dstrain");
+  p.insert<std::vector<std::string>>("history_sources", {"J2Return::dgamma"});
+  p.insert<T>("epsilon", T{1e-7});
+  ctx.create<numsim::materials::tangent_checker<policy>>(p);
+
+  ctx.finalize();
+
+  T max_rel = 0;
+  for (int i = 0; i < 8; ++i) {
+    ctx.update();
+
+    [[maybe_unused]] const auto eps = read_tensor(ctx, "stepper", "strain");
+    const T dgamma = ctx.get<T>("J2Return", "dgamma");
+    const auto sig = read_tensor(ctx, "J2Return", "stress");
+
+    // Must be on the plastic branch (Δγ > 0) for this golden to be meaningful.
+    ASSERT_GT(dgamma, T{0}) << "step " << i << ": expected plastic loading";
+
+    // (1) PHYSICS — the returned stress is on the hardened yield surface:
+    //     ‖dev(σ)‖ = σ_y + H·Δγ.
+    auto dev_sig = sig - (sig(0, 0) + sig(1, 1) + sig(2, 2)) / T{3} *
+                             tmech::eye<T, 3, 2>();
+    const T dev_sig_norm = std::sqrt(tmech::dcontract(dev_sig, dev_sig));
+    EXPECT_NEAR(dev_sig_norm, sy + H * dgamma, 1e-9)
+        << "step " << i << ": stress must lie on the yield surface";
+
+    // (2) TANGENT — the emitted dσ/dε FD-matches through the real re-solve.
+    max_rel = std::max(max_rel, ctx.get<T>("checker", "rel_error"));
+    ctx.commit();
+  }
+  EXPECT_LT(max_rel, 1e-6) << "J2 consistent tangent disagrees with numerical diff";
+}
+
+// Same J2 golden with NONLINEAR isotropic hardening. Now σ_y(Δγ) is nonlinear, so
+// ∂R/∂Δγ is Δγ-dependent — the emitted jacobian AND the dΔγ/dε = −∂R/∂ε/∂R/∂Δγ
+// division in the tangent both exercise cas::diff of the hardening law (exp / pow).
+// The FD check would fail if either were wrong. Params are gentle so backward_
+// euler's clamped Newton stays well-conditioned on the plastic branch.
+static void run_nonlinear_j2_golden(
+    const char* mat, param_type mat_params,
+    const std::function<T(T)>& sy_of_dgamma) {
+  ctx_type ctx;
+  param_type p;
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.02});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 100);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+  mat_params.insert<std::string>("name", mat);
+  mat_params.insert<std::string>("solver_source", "solver");
+  mat_params.insert<std::string>("strain_source", "stepper");
+  if (std::string(mat) == "J2Voce")
+    ctx.create<J2Voce>(mat_params);
+  else
+    ctx.create<J2Swift>(mat_params);
+
+  p.clear();
+  p.insert<std::string>("name", "checker");
+  p.insert<ctx_type*>("context", &ctx);
+  p.insert<std::string>("output_source", std::string(mat) + "::stress");
+  p.insert<std::string>("input_source", "stepper::strain");
+  p.insert<std::string>("analytical_source", std::string(mat) + "::dstress_dstrain");
+  p.insert<std::vector<std::string>>("history_sources", {std::string(mat) + "::dgamma"});
+  p.insert<T>("epsilon", T{1e-7});
+  ctx.create<numsim::materials::tangent_checker<policy>>(p);
+  ctx.finalize();
+
+  T max_rel = 0;
+  for (int i = 0; i < 8; ++i) {
+    ctx.update();
+    const T dgamma = ctx.get<T>(mat, "dgamma");
+    const auto sig = read_tensor(ctx, mat, "stress");
+    ASSERT_GT(dgamma, T{0}) << mat << " step " << i << ": expected plastic loading";
+    // PHYSICS: ‖dev(σ)‖ = σ_y(Δγ) (nonlinear hardened yield surface).
+    auto dev_sig = sig - (sig(0, 0) + sig(1, 1) + sig(2, 2)) / T{3} *
+                             tmech::eye<T, 3, 2>();
+    const T dev_sig_norm = std::sqrt(tmech::dcontract(dev_sig, dev_sig));
+    EXPECT_NEAR(dev_sig_norm, sy_of_dgamma(dgamma), 1e-9)
+        << mat << " step " << i << ": stress off the nonlinear yield surface";
+    // TANGENT: FD-match through the real re-solve.
+    max_rel = std::max(max_rel, ctx.get<T>("checker", "rel_error"));
+    ctx.commit();
+  }
+  EXPECT_LT(max_rel, 1e-6) << mat << " nonlinear-hardening tangent disagrees with FD";
+}
+
+TEST(NumSimMaterialEndToEnd, J2VoceHardeningTangentMatchesNumericalDiff) {
+  param_type p;
+  const T sy0 = T{1.0}, Q = T{0.8}, b = T{25.0};
+  p.insert<T>("G", T{80.0});
+  p.insert<T>("sy0", sy0);
+  p.insert<T>("Q", Q);
+  p.insert<T>("b", b);
+  run_nonlinear_j2_golden("J2Voce", p, [=](T dg) {
+    return sy0 + Q * (T{1} - std::exp(-b * dg)); // Voce
+  });
+}
+
+TEST(NumSimMaterialEndToEnd, J2SwiftHardeningTangentMatchesNumericalDiff) {
+  param_type p;
+  const T C = T{2.0}, e0 = T{0.05}, k = T{0.3};
+  p.insert<T>("G", T{80.0});
+  p.insert<T>("C", C);
+  p.insert<T>("e0", e0);
+  p.insert<T>("k", k);
+  run_nonlinear_j2_golden("J2Swift", p, [=](T dg) {
+    return C * std::pow(e0 + dg, k); // Swift power law
+  });
+}
+
+// ── #92 golden: PATH-DEPENDENT J2 (tensor εᵖ history) ────────────────────────
+// The property that single-increment plasticity CANNOT show: plastic strain
+// accumulates under load and is RETAINED on unload (residual plastic strain),
+// and unloading is elastic. εᵖ is carried across steps as tensor history.
+namespace {
+void set_strain00(ctx_type& ctx, tensor2& eps,
+                  const std::unordered_set<const numsim::materials::property_base*>& excl,
+                  T e) {
+  tensor2 E{}; E(0, 0) = e; eps = E;
+  ctx.update_property("J2", "stress", excl);
+}
+} // namespace
+
+TEST(NumSimMaterialEndToEnd, J2PathDependentRetainsPlasticStrainOnUnload) {
+  ctx_type ctx;
+  param_type p;
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0});
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 50);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+  p.clear();
+  p.insert<std::string>("name", "J2");
+  p.insert<T>("G", T{80}); p.insert<T>("sy", T{1.0}); p.insert<T>("H", T{10.0});
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<J2PathDep>(p);
+  ctx.finalize();
+
+  auto& eps = ctx.get_mutable<tensor2>("stepper", "strain");
+  auto* ep = ctx.find_property("stepper", "strain");
+  const std::unordered_set<const numsim::materials::property_base*> excl{ep};
+
+  // Load well into the plastic regime, committing each step so εᵖ accumulates.
+  T peak_epsp = 0;
+  for (T e : {T{0.006}, T{0.010}, T{0.015}, T{0.020}}) {
+    set_strain00(ctx, eps, excl, e);
+    ctx.commit();
+    peak_epsp = ctx.get<tensor2>("J2", "eps_p")(0, 0);
+  }
+  ASSERT_GT(peak_epsp, T{1e-3}) << "should have accumulated plastic strain";
+  const T peak_sig = read_tensor(ctx, "J2", "stress")(0, 0);
+
+  // Unload elastically to a lower strain (still above the reverse-yield point).
+  set_strain00(ctx, eps, excl, T{0.010});
+  ctx.commit();
+  const T unl_epsp = ctx.get<tensor2>("J2", "eps_p")(0, 0);
+  const T unl_sig = read_tensor(ctx, "J2", "stress")(0, 0);
+
+  // εᵖ is RETAINED (elastic unloading — no plastic flow), stress drops.
+  EXPECT_NEAR(unl_epsp, peak_epsp, 1e-12)
+      << "plastic strain must be retained on elastic unloading";
+  EXPECT_LT(unl_sig, peak_sig) << "stress must decrease on unload";
+  // Elastic unload slope: Δσ = 2G·Δε on the driven component's deviatoric part.
+  // (σ00 vs ε00 slope ~ 2G·2/3.) Just assert it moved a lot (elastic, steep).
+  EXPECT_GT(peak_sig - unl_sig, T{0.5}) << "unload must be elastic (steep)";
+}
+
+// FD-verify the consistent tangent of the path-dependent material — the FD
+// checker must revert BOTH histories (α AND εᵖ) so each perturbation is taken at
+// fixed history, matching the analytical tangent (which holds εᵖ_old fixed).
+// NOTE: the emitted tangent is the PLASTIC-branch (algorithmic) tangent; on the
+// elastic branch (backward_euler's max(x,0) clamp gives Δγ=0) it does NOT match
+// the elastic FD tangent — that switch is the Kuhn-Tucker work (#35). So we load
+// solidly into yield (increment ≫ ε_yield) and only check plastic states.
+TEST(NumSimMaterialEndToEnd, J2PathDependentTangentMatchesNumericalDiff) {
+  ctx_type ctx;
+  param_type p;
+  p.insert<std::string>("name", "stepper");
+  p.insert<T>("increment", T{0.01}); // ε_yield ≈ 0.0077 → every step is plastic
+  p.insert<std::vector<std::size_t>>("indices", {0, 0});
+  ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+  p.clear();
+  p.insert<std::string>("name", "solver");
+  p.insert<T>("tolerance", T{1e-13});
+  p.insert<int>("max_iter", 60);
+  ctx.create<numsim::materials::backward_euler<policy>>(p);
+  p.clear();
+  p.insert<std::string>("name", "J2");
+  p.insert<T>("G", T{80}); p.insert<T>("sy", T{1.0}); p.insert<T>("H", T{10.0});
+  p.insert<std::string>("solver_source", "solver");
+  p.insert<std::string>("strain_source", "stepper");
+  ctx.create<J2PathDep>(p);
+  p.clear();
+  p.insert<std::string>("name", "checker");
+  p.insert<ctx_type*>("context", &ctx);
+  p.insert<std::string>("output_source", "J2::stress");
+  p.insert<std::string>("input_source", "stepper::strain");
+  p.insert<std::string>("analytical_source", "J2::dstress_dstrain");
+  // BOTH histories reverted per FD sample — the load-bearing part for a
+  // path-dependent material.
+  p.insert<std::vector<std::string>>("history_sources", {"J2::alpha", "J2::eps_p"});
+  p.insert<T>("epsilon", T{1e-7});
+  ctx.create<numsim::materials::tangent_checker<policy>>(p);
+  ctx.finalize();
+
+  T max_rel = 0;
+  for (int i = 0; i < 6; ++i) {
+    ctx.update();
+    ASSERT_GT(ctx.get<T>("J2", "alpha"), T{0}) << "step " << i << ": expected plastic";
+    max_rel = std::max(max_rel, ctx.get<T>("checker", "rel_error"));
+    ctx.commit();
+  }
+  EXPECT_LT(max_rel, 1e-6) << "path-dependent J2 tangent disagrees with FD";
 }
 
 #endif // NCG_TENSOR_E2E

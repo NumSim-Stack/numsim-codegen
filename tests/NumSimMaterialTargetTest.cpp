@@ -12,6 +12,8 @@
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/scalar/scalar_std.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_functions.h>
+#include <numsim_cas/tensor_to_scalar/tensor_to_scalar_operators.h>
 
 #include <gtest/gtest.h>
 
@@ -44,7 +46,8 @@ auto header_of(std::vector<EmittedFile> const &files) -> std::string {
 // assert WHICH guard fired, not merely that *some* runtime_error was thrown.
 auto emit_throw_message(ConstitutiveModel const &m) -> std::string {
   try {
-    (void)NumSimMaterialTarget{}.emit(m); // expected to throw; [[nodiscard]]
+    // Expected to throw; the [[nodiscard]] return is never reached.
+    [[maybe_unused]] auto const discarded = NumSimMaterialTarget{}.emit(m);
   } catch (std::exception const &e) {
     return e.what();
   }
@@ -126,7 +129,7 @@ TEST(NumSimMaterialTarget, RejectsTensorStateMissingEvolution) {
   // guard (the tensor-kind branch is defensive/unreachable via the public API).
   ConstitutiveModel m("TensorState");
   m.add_tensor_state_variable("ep", 3, 2, make_expression<tensor_zero>(3, 2));
-  EXPECT_THROW((void)NumSimMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = NumSimMaterialTarget{}.emit(m), std::runtime_error);
 }
 
 TEST(NumSimMaterialTarget, RejectsMultipleCoupledStates) {
@@ -327,6 +330,378 @@ TEST(NumSimMaterialTarget, FloatDefaultRoundTrips) {
   EXPECT_NE(src.find("value_type{" + std::format("{}", 1.0 / 3.0) + "}"),
             std::string::npos)
       << src;
+}
+
+// ─── Phase 2a: Mode-B strain-coupled residual emission ───────────────────────
+
+// A return-map recipe R(z, ε) = z − c·tr(ε), σ = z·ε. The state z is solved
+// implicitly by backward_euler; the material drives the Newton loop itself.
+auto build_return_map() -> ConstitutiveModel {
+  ConstitutiveModel m("ReturnMap");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z =
+      m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_output("stress", z.current * eps);
+  return m;
+}
+
+// The emitted residual material conforms to the Mode-B (backward_euler caller-
+// driven) contract: a material_ref<backward_euler>, a solve(eval) call, the
+// residual and its jacobian inside the eval lambda, an owned history state, and
+// the stress output bound to compute().
+TEST(NumSimMaterialTarget, EmitsModeBResidualMaterial) {
+  auto const h = header_of(NumSimMaterialTarget{}.emit(build_return_map()));
+  // Mode-B structural surface.
+  EXPECT_NE(h.find("using solver_type = numsim::materials::backward_euler<Traits>"),
+            std::string::npos) << h;
+  EXPECT_NE(h.find("add_material_ref<solver_type>"), std::string::npos) << h;
+  EXPECT_NE(h.find("m_solver.get().solve(eval)"), std::string::npos) << h;
+  EXPECT_NE(h.find("add_history_output<value_type>(\"z\")"), std::string::npos)
+      << h;
+  // The stress output drives the solve (carries &compute).
+  EXPECT_NE(h.find("\"stress\", &ReturnMap::compute"), std::string::npos) << h;
+  // The eval lambda returns {residual, jacobian}.
+  EXPECT_NE(h.find("return {residual, jacobian};"), std::string::npos) << h;
+  // Pin the RESIDUAL RHS, not just the jacobian — the load-bearing output. A
+  // dropped coupling term or wrong sign must fail here, at the always-run unit
+  // layer (the tensor e2e is gcc-only). R = z − c·tr(ε): the rendered scalar
+  // must reference the state z and the strain trace.
+  EXPECT_NE(h.find("const value_type residual = "), std::string::npos) << h;
+  EXPECT_NE(h.find("tmech::trace(strain)"), std::string::npos) << h;
+  // ∂R/∂z = 1 exactly, rendered "1.0" (terminating ';' so "= 1.5" etc can't
+  // false-match).
+  EXPECT_NE(h.find("const value_type jacobian = 1.0;"), std::string::npos) << h;
+  // State applied as old + increment.
+  EXPECT_NE(h.find("m_z.new_value() = m_z.old_value() + dz"), std::string::npos)
+      << h;
+  // The solver_source param is required.
+  EXPECT_NE(h.find("insert<std::string>(\"solver_source\")"), std::string::npos)
+      << h;
+}
+
+// Review (cpp-pro): two outputs share the single compute() body. Each is
+// rendered in its own CSE context (temps restart at t0), so without a nested
+// scope the second output redeclares `t0` — an uncompilable header the single-
+// output recipe never exercised. Each output must be brace-scoped, and EVERY
+// output must drive the solve (carry &compute), not just the first.
+TEST(NumSimMaterialTarget, MultiOutputResidualScopesCseAndDrivesAll) {
+  ConstitutiveModel m("MultiOut");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z =
+      m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_output("stress", sin(z.current) * eps);  // CSE temp
+  m.add_output("stress2", cos(z.current) * eps); // CSE temp
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+  // Both outputs drive the solve.
+  EXPECT_NE(h.find("\"stress\", &MultiOut::compute"), std::string::npos) << h;
+  EXPECT_NE(h.find("\"stress2\", &MultiOut::compute"), std::string::npos) << h;
+  // The two CSE blocks are brace-scoped (each output writes inside a `{ }`),
+  // so `t0` is private per block — count the opening braces of output blocks.
+  std::size_t braces = 0;
+  for (std::size_t pos = 0;
+       (pos = h.find("\n    {\n", pos)) != std::string::npos; ++pos)
+    ++braces;
+  EXPECT_GE(braces, 2u)
+      << "each output must be brace-scoped to avoid CSE temp collision:\n"
+      << h;
+}
+
+// Review (cpp-pro): a residual must not reference the previous-step state
+// `<state>_old` — it is a declared symbol (so the recipe accepts it) but has no
+// local in the emitted compute(), which would emit an unbound identifier. Guard
+// at emit time.
+// #92: a residual referencing the PREVIOUS-step state is now legitimate (the
+// increment form Δ = z.current − z.previous, e.g. J2's plastic multiplier). The
+// `_old` value is bound as a compute()-local, no longer rejected as unbound.
+TEST(NumSimMaterialTarget, EmitsResidualReferencingOldState) {
+  ConstitutiveModel m("UsesOld");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z =
+      m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  // R = (z − z_old) − c·tr(ε): references the previous-step state.
+  m.add_scalar_residual_equation(z, z.current - z.previous - c * trace(eps));
+  m.add_output("stress", z.current * eps);
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+  // The previous value is bound as a local from the history's old_value().
+  EXPECT_NE(h.find("const value_type z_old = m_z.old_value();"),
+            std::string::npos)
+      << h;
+}
+
+// #92: a TENSOR internal variable (updated by a post-solve equation, not solved)
+// is emitted as tensor history — the capability numsim-core#16 unlocked. This is
+// what makes a return map path-dependent (e.g. J2 plastic strain εᵖ).
+TEST(NumSimMaterialTarget, EmitsTensorInternalVariableHistory) {
+  ConstitutiveModel m("WithInternal");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  auto acc = m.add_tensor_state_variable(
+      "acc", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_tensor_update_equation(acc, acc.previous + z.current * eps); // acc += z·ε
+  m.add_output("stress", z.current * eps);
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+  // tensor history: ctor add_history_output<tensor> + member.
+  EXPECT_NE(h.find("add_history_output<tmech::tensor<value_type, 3, 2>>(\"acc\")"),
+            std::string::npos) << h;
+  EXPECT_NE(h.find("numsim_core::history_property<tmech::tensor<value_type, 3, 2>>& "
+                   "m_acc;"),
+            std::string::npos) << h;
+  // previous value bound + post-solve update emitted.
+  EXPECT_NE(h.find("const auto& acc_old = m_acc.old_value();"),
+            std::string::npos) << h;
+  EXPECT_NE(h.find("m_acc.new_value() = "), std::string::npos) << h;
+  // Pin the update RHS, not just that an assignment exists: acc.new = acc_old +
+  // z·ε. A dropped acc_old, wrong operand, or a collapse to 0 must fail here (the
+  // tensor e2e is gcc-gated — this always-run layer is the only guard).
+  EXPECT_NE(h.find("z * strain"), std::string::npos) << h;   // z·ε term
+  EXPECT_NE(h.find("+ acc_old"), std::string::npos) << h;    // accumulation
+}
+
+// A state variable that is neither solved (residual) nor updated (update
+// equation) is a dangling declaration — rejected loudly.
+TEST(NumSimMaterialTarget, RejectsDanglingStateVariable) {
+  ConstitutiveModel m("Dangling");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  [[maybe_unused]] auto const acc = m.add_tensor_state_variable(
+      "acc", 3, 2, make_expression<tensor_zero>(3, std::size_t{2})); // no eq
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_output("stress", z.current * eps);
+  EXPECT_NE(emit_throw_message(m).find(
+                "neither the Newton unknown (a residual) nor an internal"),
+            std::string::npos);
+}
+
+// #92: a SCALAR internal variable (e.g. accumulated plastic strain p += Δ) — the
+// scalar-update path, distinct from the tensor one above.
+TEST(NumSimMaterialTarget, EmitsScalarInternalVariableHistory) {
+  ConstitutiveModel m("ScalarInternal");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  auto p = m.add_scalar_state_variable("p", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_scalar_update_equation(p, p.previous + z.current); // p += z
+  m.add_output("stress", z.current * eps);
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+  EXPECT_NE(h.find("add_history_output<value_type>(\"p\")"), std::string::npos)
+      << h;
+  EXPECT_NE(h.find("const value_type p_old = m_p.old_value();"),
+            std::string::npos) << h;
+  EXPECT_NE(h.find("m_p.new_value() = "), std::string::npos) << h;
+  EXPECT_NE(h.find("p_old"), std::string::npos) << h; // update reads p_old
+}
+
+// API fail-early (cr#2): a state solved by a residual cannot also be an internal
+// variable, and an internal var carries at most one update equation.
+TEST(NumSimMaterialTarget, RejectsResidualStateGivenUpdateEquation) {
+  ConstitutiveModel m("Both");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  EXPECT_THROW(m.add_scalar_update_equation(z, z.current), std::runtime_error);
+}
+
+TEST(NumSimMaterialTarget, RejectsSecondUpdateEquation) {
+  ConstitutiveModel m("TwoUpdates");
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  auto acc = m.add_tensor_state_variable(
+      "acc", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+  m.add_tensor_update_equation(acc, acc.previous + z.current * eps);
+  EXPECT_THROW(m.add_tensor_update_equation(acc, acc.previous),
+               std::runtime_error);
+}
+
+// #92 (cr#6): an internal variable's POST-UPDATE (current) value is NOT bound —
+// only its `_old`. An output referencing the current value is rejected. This is
+// load-bearing for the tangent (see the emitter comment).
+TEST(NumSimMaterialTarget, RejectsOutputReferencingInternalCurrent) {
+  ConstitutiveModel m("UsesInternalCurrent");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  auto acc = m.add_tensor_state_variable(
+      "acc", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_tensor_update_equation(acc, acc.previous + z.current * eps);
+  m.add_output("bad", acc.current); // references the internal var's CURRENT value
+  EXPECT_NE(emit_throw_message(m).find(
+                "not a declared tensor input or an internal variable's previous"),
+            std::string::npos);
+}
+
+// cpp-pro MED#1: state whose name ends in _old + an internal var whose `_old`
+// local collides with the synthesized `d<state>` increment local.
+TEST(NumSimMaterialTarget, RejectsInternalVarCollidingWithIncrementLocal) {
+  ConstitutiveModel m("IncCol");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto a = m.add_scalar_state_variable("alpha_old",
+                                       make_expression<scalar_constant>(0.0));
+  auto d = m.add_tensor_state_variable(
+      "dalpha", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+  m.add_scalar_residual_equation(a, a.current - c * trace(eps));
+  m.add_tensor_update_equation(d, d.previous + a.current * eps);
+  m.add_output("stress", a.current * eps);
+  EXPECT_NE(emit_throw_message(m).find("Newton-increment local"),
+            std::string::npos);
+}
+
+// cpp-pro MED#2: an internal-variable name colliding with a reserved emit-local.
+TEST(NumSimMaterialTarget, RejectsReservedInternalVarName) {
+  ConstitutiveModel m("ResvInternal");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z = m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  auto ev = m.add_tensor_state_variable(
+      "eval", 3, 2, make_expression<tensor_zero>(3, std::size_t{2}));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  m.add_tensor_update_equation(ev, ev.previous + z.current * eps);
+  m.add_output("stress", z.current * eps);
+  EXPECT_NE(emit_throw_message(m).find("internal-variable name"),
+            std::string::npos);
+}
+
+// Review (cpp-pro / code-reviewer): the emitter synthesizes the fixed member
+// `m_solver` and the compute() locals `eval`/`residual`/`jacobian`. A recipe
+// symbol named like one of these must be rejected with a rename message, not
+// surface as a downstream redefinition.
+TEST(NumSimMaterialTarget, RejectsSolverNameCollisionOnResidualMaterial) {
+  ConstitutiveModel m("SolverClash");
+  auto solver = m.add_parameter("solver", 2.0); // collides with m_solver
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z =
+      m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - solver * trace(eps));
+  m.add_output("stress", z.current * eps);
+  EXPECT_NE(emit_throw_message(m).find("rename"), std::string::npos);
+}
+
+// ...and a state named like a compute() local (`residual`) is rejected too.
+TEST(NumSimMaterialTarget, RejectsResidualLocalNameCollision) {
+  ConstitutiveModel m("LocalClash");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto residual = m.add_scalar_state_variable(
+      "residual", make_expression<scalar_constant>(0.0)); // collides
+  m.add_scalar_residual_equation(residual, residual.current - c * trace(eps));
+  m.add_output("stress", residual.current * eps);
+  EXPECT_NE(emit_throw_message(m).find("rename"), std::string::npos);
+}
+
+// The strain-coupled consistent tangent is a follow-up (PR 2b): an algorithmic
+// tangent on a residual material must be rejected with a message naming PR 2b,
+// not silently dropped.
+// Phase 2b: the strain-coupled consistent tangent dσ/dε for a Mode-B residual
+// material. σ = z·ε, R = z − c·tr(ε) ⇒
+//   dσ/dε = ∂σ/∂ε + ∂σ/∂z ⊗ dz/dε = z·I⁴ˢ + ε ⊗ (c·I),   dz/dε = −∂R/∂ε/∂R/∂z = c·I.
+// The correction term ε⊗(c·I) is what a naive ∂σ/∂ε alone would drop.
+TEST(NumSimMaterialTarget, EmitsConsistentTangentForResidualMaterial) {
+  auto m = build_return_map();
+  m.add_algorithmic_tangent("dstress_dstrain", "stress", "strain");
+  auto const h = header_of(NumSimMaterialTarget{}.emit(m));
+
+  // Emitted as a rank-4 output, bound to compute() like every output.
+  EXPECT_NE(h.find("add_output<tmech::tensor<value_type, 3, 4>>"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("\"dstress_dstrain\", &ReturnMap::compute"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("tmech::tensor<value_type, 3, 4>& m_out_dstress_dstrain;"),
+            std::string::npos)
+      << h;
+
+  // The implicit correction ∂σ/∂z ⊗ dz/dε: ∂σ/∂z = ε (the strain), assembled as
+  // an outer product. Pinning this is the whole point — a dropped coupling term
+  // would still leave a plausible-but-wrong ∂σ/∂ε.
+  EXPECT_NE(h.find("tmech::outer_product<tmech::sequence<1, 2>, "
+                   "tmech::sequence<3, 4>>(strain,"),
+            std::string::npos)
+      << h;
+  // dz/dε = −∂R/∂ε/∂R/∂z carries a negation — pin the sign (a dropped/flipped
+  // sign flips the coupling term, which the compiler-independent layer must
+  // catch, not only the gcc-gated numeric e2e).
+  EXPECT_NE(h.find("-1.0 *"), std::string::npos) << h;
+  // The explicit base term ∂σ/∂ε = z·I⁴ˢ: minor-symmetric identity (BOTH otimesu
+  // AND otimesl — mirroring the rate-path tangent test) scaled by the state z.
+  EXPECT_NE(h.find("tmech::otimesu(tmech::eye<double, 3, 2>()"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("tmech::otimesl(tmech::eye<double, 3, 2>()"),
+            std::string::npos)
+      << h;
+  EXPECT_NE(h.find("z * "), std::string::npos) << h; // the z·I⁴ˢ coefficient
+  EXPECT_NE(h.find("m_out_dstress_dstrain ="), std::string::npos) << h;
+
+  // The tangent is evaluated AFTER the solve (uses the converged z).
+  auto const solve_at = h.find("m_solver.get().solve(eval)");
+  auto const tangent_at = h.find("m_out_dstress_dstrain =");
+  ASSERT_NE(solve_at, std::string::npos);
+  ASSERT_NE(tangent_at, std::string::npos);
+  EXPECT_LT(solve_at, tangent_at) << "tangent must use the converged state";
+}
+
+// A tangent can only differentiate a TENSOR (stress) output.
+TEST(NumSimMaterialTarget, RejectsTangentOfScalarOutputOnResidualMaterial) {
+  auto m = build_return_map();
+  m.add_output("scalar_out", 2.0 * make_expression<scalar>("c"));
+  m.add_algorithmic_tangent("dsc_dstrain", "scalar_out", "strain");
+  EXPECT_NE(emit_throw_message(m).find("is scalar"), std::string::npos);
+}
+
+// wrt_input must be a declared tensor input.
+TEST(NumSimMaterialTarget, RejectsTangentWrtUnknownInputOnResidualMaterial) {
+  auto m = build_return_map();
+  m.add_algorithmic_tangent("dstress_dghost", "stress", "ghost");
+  EXPECT_NE(emit_throw_message(m).find("not a declared tensor input"),
+            std::string::npos);
+}
+
+// The tangent output name shares the emitted-identifier collision surface. A
+// name like "solver" is not a recipe symbol (so the request-time
+// availability check passes) but collides with the emitted m_solver member —
+// caught by the emit-time guard.
+TEST(NumSimMaterialTarget, RejectsTangentNameCollidingWithEmittedMember) {
+  auto m = build_return_map();
+  m.add_algorithmic_tangent("solver", "stress", "strain");
+  EXPECT_NE(emit_throw_message(m).find("collides"), std::string::npos);
+}
+
+// A residual material needs at least one output to anchor compute() (the output
+// pull drives the solve) — reject loudly rather than emit an un-driven solve.
+TEST(NumSimMaterialTarget, RejectsResidualWithoutOutput) {
+  ConstitutiveModel m("NoOutput");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto z =
+      m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps));
+  EXPECT_NE(emit_throw_message(m).find("at least one output"),
+            std::string::npos);
+}
+
+// Scalar inputs into a residual material are a follow-up — rejected for now.
+TEST(NumSimMaterialTarget, RejectsScalarInputOnResidualMaterial) {
+  ConstitutiveModel m("ScalarIn");
+  auto c = m.add_parameter("c", 2.0);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  auto temp = m.add_scalar_input("temperature");
+  auto z =
+      m.add_scalar_state_variable("z", make_expression<scalar_constant>(0.0));
+  m.add_scalar_residual_equation(z, z.current - c * trace(eps) - temp);
+  m.add_output("stress", z.current * eps);
+  EXPECT_NE(emit_throw_message(m).find("scalar input"), std::string::npos);
 }
 
 } // namespace

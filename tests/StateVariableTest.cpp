@@ -247,7 +247,7 @@ TEST(StateVariable, StateVarsOnlyNoOutputsRecipeBuilds) {
   auto zero = cas::make_expression<cas::scalar_constant>(0.0);
   model.add_scalar_state_variable("alpha", zero);
   EXPECT_NO_THROW(model.validate());
-  EXPECT_NO_THROW((void)model.emit_compute_function());
+  EXPECT_NO_THROW([[maybe_unused]] auto const discarded = model.emit_compute_function());
 }
 
 TEST(StateVariable, MixedInputAndStateVarInOutput) {
@@ -264,7 +264,7 @@ TEST(StateVariable, MixedInputAndStateVarInOutput) {
   // sigma = K * (eps + alpha.current) — uses input + parameter +
   // state-var current in one expression.
   model.add_output("sigma", K * (eps + alpha.current));
-  EXPECT_NO_THROW((void)model.emit_compute_function());
+  EXPECT_NO_THROW([[maybe_unused]] auto const discarded = model.emit_compute_function());
 }
 
 // ─── StateVariable carries paired symbol indices (architect Q1) ─────
@@ -330,14 +330,13 @@ TEST(StateVariablePhase22Prep, AlignmentInvariantValidatesScalarAndTensor) {
   // state variables (interleaved with inputs + parameters so indices
   // land at non-trivial offsets) must pass.
   ConstitutiveModel model("M");
-  auto K = model.add_parameter("K", 1.0);
-  (void)model.add_scalar_input("eps_v");
-  auto alpha = model.add_scalar_state_variable(
+  [[maybe_unused]] auto K = model.add_parameter("K", 1.0);
+  [[maybe_unused]] auto const eps_v = model.add_scalar_input("eps_v");
+  [[maybe_unused]] auto alpha = model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
-  (void)K;
-  (void)alpha;
   auto eps_p_init = cas::make_expression<cas::tensor_zero>(3, 2);
-  (void)model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
+  [[maybe_unused]] auto const eps_p =
+      model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
 
   EXPECT_NO_THROW(model.validate());
 
@@ -388,7 +387,7 @@ TEST(StateVariablePhase22Prep, SymbolValidationPassAdvertisesStateVarTags) {
   // Pure-elasticity recipe: only the always-on tag advertised.
   {
     ConstitutiveModel pure_elastic("E");
-    (void)pure_elastic.add_parameter("mu", 0.5);
+    [[maybe_unused]] auto const mu = pure_elastic.add_parameter("mu", 0.5);
     PassContext pctx{RecipeView{pure_elastic}, CodeGenContext{},
                      std::nullopt, {}};
     SymbolValidationPass pass;
@@ -404,7 +403,7 @@ TEST(StateVariablePhase22Prep, SymbolValidationPassAdvertisesStateVarTags) {
   // Recipe with at least one state variable: both tags advertised.
   {
     ConstitutiveModel hardening("H");
-    (void)hardening.add_scalar_state_variable(
+    [[maybe_unused]] auto const alpha = hardening.add_scalar_state_variable(
         "alpha", cas::make_expression<cas::scalar_constant>(0.0));
     PassContext pctx{RecipeView{hardening}, CodeGenContext{},
                      std::nullopt, {}};
@@ -424,10 +423,10 @@ TEST(StateVariablePhase22Prep, SymbolValidationPassAdvertisesStateVarTags) {
     SymbolValidationPass reused;
 
     ConstitutiveModel with_sv("S");
-    (void)with_sv.add_scalar_state_variable(
+    [[maybe_unused]] auto const alpha = with_sv.add_scalar_state_variable(
         "alpha", cas::make_expression<cas::scalar_constant>(0.0));
     ConstitutiveModel pure("P");
-    (void)pure.add_parameter("k", 1.0);
+    [[maybe_unused]] auto const k = pure.add_parameter("k", 1.0);
 
     // First run: state-var recipe → both tags advertised.
     {
@@ -475,10 +474,11 @@ TEST(StateVariablePhase22Prep, FindStateVariableByName) {
   // Item 3 / REVIEW-pr-58.md m3: find_state_variable_by_name resolves
   // a name to its StateVariable record. Returns nullptr on miss.
   ConstitutiveModel model("M");
-  (void)model.add_scalar_state_variable(
+  [[maybe_unused]] auto const alpha = model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   auto eps_p_init = cas::make_expression<cas::tensor_zero>(3, 2);
-  (void)model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
+  [[maybe_unused]] auto const eps_p =
+      model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
 
   PassContext pctx{RecipeView{model}, CodeGenContext{}, std::nullopt, {}};
 
@@ -526,7 +526,7 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionOutOfBoundsIdx) {
   // non-throw is impossible. Negative-substring asserts pin which arm
   // fires (round-2 #8).
   ConstitutiveModel model("M");
-  (void)model.add_scalar_state_variable(
+  [[maybe_unused]] auto const alpha = model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   sv_align_poison::poison_state_var_current_idx(model, 0, 999);
   try {
@@ -545,7 +545,7 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionOutOfBoundsIdx) {
 
 TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionRenamedSymbol) {
   ConstitutiveModel model("M");
-  (void)model.add_scalar_state_variable(
+  [[maybe_unused]] auto const alpha = model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
   sv_align_poison::poison_symbol_name(model, cur_idx, "beta");
@@ -565,7 +565,7 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionRenamedSymbol) {
 
 TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongCategory) {
   ConstitutiveModel model("M");
-  (void)model.add_scalar_state_variable(
+  [[maybe_unused]] auto const alpha = model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
   sv_align_poison::poison_symbol_category(model, cur_idx,
@@ -588,7 +588,7 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongCategory) {
 
 TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongKind) {
   ConstitutiveModel model("M");
-  (void)model.add_scalar_state_variable(
+  [[maybe_unused]] auto const alpha = model.add_scalar_state_variable(
       "alpha", cas::make_expression<cas::scalar_constant>(0.0));
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
   sv_align_poison::poison_symbol_kind(model, cur_idx, SymbolDecl::Kind::Tensor);
@@ -612,7 +612,8 @@ TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongKind) {
 TEST(StateVariablePhase22Prep, AlignmentDetectsCorruptionWrongDim) {
   ConstitutiveModel model("M");
   auto eps_p_init = cas::make_expression<cas::tensor_zero>(3, 2);
-  (void)model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
+  [[maybe_unused]] auto const eps_p =
+      model.add_tensor_state_variable("eps_p", 3, 2, eps_p_init);
   auto const cur_idx = model.state_variables()[0].current_symbol_idx;
   sv_align_poison::poison_symbol_dim(model, cur_idx, 2);
   try {

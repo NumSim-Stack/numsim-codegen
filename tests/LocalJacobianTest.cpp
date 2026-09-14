@@ -243,7 +243,7 @@ TEST(LocalJacobian, EmitDoesNotMutateRecipe) {
   auto const symbols_before = model.symbols().size();
   auto const equations_before = model.evolution_equations().size();
 
-  (void)model.emit_compute_function();
+  [[maybe_unused]] auto const discarded = model.emit_compute_function();
 
   EXPECT_EQ(model.outputs().size(), outputs_before);
   EXPECT_EQ(model.symbols().size(), symbols_before);
@@ -270,8 +270,7 @@ TEST(LocalJacobian, NotRegisteredOnPureElasticityRecipe) {
   // emit_compute_function should NOT register either TIP or LJP →
   // generated source has no `*_jacobian_out` parameter.
   ConstitutiveModel pure("E");
-  auto mu = pure.add_parameter("mu", 0.5);
-  (void)mu;
+  [[maybe_unused]] auto mu = pure.add_parameter("mu", 0.5);
   pure.add_output("dummy", cas::make_expression<cas::scalar_constant>(1.0));
 
   auto const src = pure.emit_compute_function();
