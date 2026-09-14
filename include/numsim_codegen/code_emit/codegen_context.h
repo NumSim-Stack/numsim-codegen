@@ -1,10 +1,10 @@
 #ifndef NUMSIM_CODEGEN_CONTEXT_H
 #define NUMSIM_CODEGEN_CONTEXT_H
 
+#include <numsim_cas/core/expression_holder.h>
 #include <numsim_cas/scalar/scalar_expression.h>
 #include <numsim_cas/tensor/tensor_expression.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_expression.h>
-#include <numsim_cas/core/expression_holder.h>
 
 #include <cassert>
 #include <sstream>
@@ -25,8 +25,8 @@ public:
   // the LHS — tmech expression templates produce types the user cannot
   // spell, so an explicit type field would be more brittle than helpful.
   struct Statement {
-    std::string lhs;       // e.g. "t5"
-    std::string rhs;       // e.g. "lam * t3"
+    std::string lhs; // e.g. "t5"
+    std::string rhs; // e.g. "lam * t3"
   };
 
   // Register a named external symbol (input, parameter, history variable).
@@ -73,9 +73,26 @@ public:
     return name;
   }
 
+  // String-keyed shared temporary. Unlike emit_temporary (keyed by node
+  // pointer), this dedupes by an arbitrary string key, so two DIFFERENT nodes
+  // that need the same derived value share one statement. Used for the shared
+  // spectral decomposition: the eigenvalue node (t2s domain) and the
+  // eigenprojection node (tensor domain) over the same tensor argument are
+  // distinct pointers, but must emit a single `spectral_decompose(A)` — they
+  // key it by the argument's emitted name. Returns the existing temp on a hit.
+  auto emit_shared(std::string const &key, std::string rhs) -> std::string {
+    if (auto it = m_shared_table.find(key); it != m_shared_table.end()) {
+      return it->second;
+    }
+    auto name = fresh_name();
+    m_statements.push_back({name, std::move(rhs)});
+    m_shared_table[key] = name;
+    return name;
+  }
+
   // Render the accumulated statements as a sequence of `auto tN = ...;` lines.
-  [[nodiscard]] auto render_statements(std::string const &indent = "  ") const
-      -> std::string {
+  [[nodiscard]] auto
+  render_statements(std::string const &indent = "  ") const -> std::string {
     std::ostringstream os;
     for (auto const &s : m_statements) {
       os << indent << "auto " << s.lhs << " = " << s.rhs << ";\n";
@@ -99,6 +116,7 @@ public:
   void reset() {
     m_statements.clear();
     m_cse_table.clear();
+    m_shared_table.clear();
     // m_counter and m_named_symbols deliberately preserved.
   }
 
@@ -109,12 +127,11 @@ public:
   }
 
 private:
-  auto fresh_name() -> std::string {
-    return "t" + std::to_string(m_counter++);
-  }
+  auto fresh_name() -> std::string { return "t" + std::to_string(m_counter++); }
 
   std::vector<Statement> m_statements;
   std::unordered_map<void const *, std::string> m_cse_table;
+  std::unordered_map<std::string, std::string> m_shared_table;
   std::unordered_map<void const *, std::string> m_named_symbols;
   int m_counter = 0;
 };

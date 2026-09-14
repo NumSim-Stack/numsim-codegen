@@ -3,14 +3,19 @@
 
 #include <numsim_codegen/code_emit/codegen_context.h>
 #include <numsim_codegen/code_emit/scalar_code_emit.h>
+#include <numsim_codegen/code_emit/spectral_decompose_emit.h>
 
 #include <numsim_cas/basic_functions.h>
 #include <numsim_cas/tensor/identity_tensor.h>
 #include <numsim_cas/tensor/levi_civita_tensor.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
-#include <numsim_cas/tensor/tensor_if_then_else.h>
+#include <numsim_cas/tensor/tensor_if_then_else_scalar.h>
+#include <numsim_cas/tensor/tensor_if_then_else_t2s.h>
 #include <numsim_cas/tensor/tensor_visitor_typedef.h>
+#include <numsim_cas/tensor/wrappers/tensor_eigenprojection.h>
+#include <numsim_cas/tensor/wrappers/tensor_eigenvector.h>
 #include <numsim_cas/tensor/wrappers/tensor_inv.h>
+#include <numsim_cas/tensor/wrappers/tensor_isotropic_function.h>
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_expression.h>
 
 #include <format>
@@ -89,9 +94,9 @@ public:
       m_result = register_temp(&v, os.str());
       return;
     }
-    throw std::runtime_error(std::format(
-        "TensorCodeEmit: identity_tensor of rank {} not supported in Phase A MVP",
-        v.rank()));
+    throw std::runtime_error(std::format("TensorCodeEmit: identity_tensor of "
+                                         "rank {} not supported in Phase A MVP",
+                                         v.rank()));
   }
 
   void operator()(cas::levi_civita_tensor const &v) override {
@@ -160,15 +165,18 @@ public:
   // on the untaken branch (e.g. inv() of a tensor singular only there) still
   // computes and may produce NaN/Inf. Total functions are unaffected. A real
   // fix needs branch bodies lowered into a C++ if/else, not a ternary.
-  void operator()(cas::tensor_if_then_else const &v) override {
+  void operator()(cas::tensor_if_then_else_scalar const &v) override {
     auto cond = m_scalar.apply(v.expr_cond());
-    auto then_branch = apply(v.expr_then());
-    auto else_branch = apply(v.expr_else());
-    std::string const tt = "tmech::tensor<double, " + std::to_string(v.dim()) +
-                           ", " + std::to_string(v.rank()) + ">";
-    m_result = register_temp(
-        &v, "(" + wrap_if_compound(cond) + " != 0.0 ? " + tt + "(" +
-                then_branch + ") : " + tt + "(" + else_branch + "))");
+    emit_if_then_else(&v, cond, v.expr_then(), v.expr_else(), v.dim(),
+                      v.rank());
+  }
+
+  // Same ternary lowering as the scalar-condition sibling, but the condition
+  // is a tensor_to_scalar expression (#241) — emitted via the t2s callback.
+  void operator()(cas::tensor_if_then_else_t2s const &v) override {
+    auto cond = m_t2s_apply(v.expr_cond());
+    emit_if_then_else(&v, cond, v.expr_then(), v.expr_else(), v.dim(),
+                      v.rank());
   }
 
   // ─── Phase A stubs — node types not yet implemented ─────────────
@@ -194,8 +202,8 @@ public:
 
   // Classify the (perm, trace) pair of a cas tensor_space against the
   // four currently-supported projector presets.
-  static auto classify_projector(cas::tensor_space const &sp) noexcept
-      -> ProjectorKind {
+  static auto
+  classify_projector(cas::tensor_space const &sp) noexcept -> ProjectorKind {
     if (std::holds_alternative<cas::Symmetric>(sp.perm) &&
         std::holds_alternative<cas::AnyTraceTag>(sp.trace))
       return ProjectorKind::Sym;
@@ -227,10 +235,10 @@ public:
   // tensor_evaluator does it (tensor_evaluator.h:110).
   //
   // Component formulas (δ is the Kronecker delta, d = dim):
-  //   P_sym_{ijkl}  = ½(δ_ik δ_jl + δ_il δ_jk)  = ½(otimesu(I,I) + otimesl(I,I))
-  //   P_skew_{ijkl} = ½(δ_ik δ_jl − δ_il δ_jk)  = ½(otimesu(I,I) − otimesl(I,I))
-  //   P_vol_{ijkl}  = (1/d) δ_ij δ_kl           = (1/d) otimes(I,I)
-  //   P_dev_{ijkl}  = P_sym − P_vol
+  //   P_sym_{ijkl}  = ½(δ_ik δ_jl + δ_il δ_jk)  = ½(otimesu(I,I) +
+  //   otimesl(I,I)) P_skew_{ijkl} = ½(δ_ik δ_jl − δ_il δ_jk)  = ½(otimesu(I,I)
+  //   − otimesl(I,I)) P_vol_{ijkl}  = (1/d) δ_ij δ_kl           = (1/d)
+  //   otimes(I,I) P_dev_{ijkl}  = P_sym − P_vol
   void operator()(cas::tensor_projector const &v) override {
     const auto r = v.acts_on_rank();
     if (r != 2) {
@@ -261,8 +269,8 @@ public:
       m_result = register_temp(&v, inv_d + " * " + oo);
       return;
     case ProjectorKind::Dev:
-      m_result = register_temp(
-          &v, "0.5 * (" + ou + " + " + ol + ") - " + inv_d + " * " + oo);
+      m_result = register_temp(&v, "0.5 * (" + ou + " + " + ol + ") - " +
+                                       inv_d + " * " + oo);
       return;
     case ProjectorKind::Unknown:
       break;
@@ -334,8 +342,8 @@ public:
   void operator()(cas::inner_product_wrapper const &v) override {
     if (auto fn = projector_short_circuit_fn(v)) {
       auto rhs = apply(v.expr_rhs());
-      m_result = register_temp(&v, std::string{"tmech::"} + fn + "(" + rhs +
-                                       ")");
+      m_result =
+          register_temp(&v, std::string{"tmech::"} + fn + "(" + rhs + ")");
       return;
     }
     auto lhs = apply(v.expr_lhs());
@@ -434,8 +442,8 @@ public:
   void operator()(cas::tensor_to_scalar_with_tensor_mul const &v) override {
     auto lhs = apply(v.expr_lhs());
     auto rhs = m_t2s_apply(v.expr_rhs());
-    m_result = register_temp(
-        &v, wrap_if_compound(rhs) + " * " + wrap_if_compound(lhs));
+    m_result = register_temp(&v, wrap_if_compound(rhs) + " * " +
+                                     wrap_if_compound(lhs));
   }
 
   // tensor_inv → tmech::inv(...). Rank-2 only in this phase.
@@ -466,7 +474,84 @@ public:
     m_result = register_temp(&v, "tmech::inv(" + wrap_if_compound(inner) + ")");
   }
 
+  // ─── Spectral nodes (#325/#326) ──────────────────────────────────
+  // Each reads the shared ascending eigendecomposition of its tensor argument
+  // (one `spectral_decompose(A)` per distinct A, interned by argument name).
+
+  // E_i(A) = n_i ⊗ n_i, the i-th eigenprojection (i in ascending eigenvalue
+  // order).
+  //
+  // WELL-POSED ONLY AWAY FROM DEGENERACY. At a repeated eigenvalue the
+  // per-index n_i (hence E_i) is an arbitrary choice within the degenerate
+  // subspace, so a bare E_i/n_i output there is basis-dependent and can
+  // disagree with the evaluator across tmech versions (see runtime/spectral.h's
+  // tmech-version invariant). The FE-safe outputs are the basis-INVARIANT
+  // combinations — the isotropic value Σf(λ)E and the tangent
+  // Σ[f;λ_i,λ_j]E_i⊙E_j — which is what differentiation actually emits; the
+  // sums are well defined at coalescence.
+  void operator()(cas::tensor_eigenprojection const &v) override {
+    auto const vec = eigenvector_ref(v.expr(), v.index());
+    m_result = register_temp(&v, "tmech::otimes(" + vec + ", " + vec + ")");
+  }
+
+  // n_i(A), the i-th eigenvector (rank-1). Same degeneracy caveat as
+  // eigenprojection above.
+  void operator()(cas::tensor_eigenvector const &v) override {
+    m_result = register_temp(&v, eigenvector_ref(v.expr(), v.index()));
+  }
+
+  // f(A) = Σ_i f(λ_i) E_i, the primal isotropic tensor function value, with
+  // E_i = n_i ⊗ n_i. f ∈ {log, exp, sqrt} maps directly to the std function of
+  // the same name applied to each eigenvalue.
+  void operator()(cas::tensor_isotropic_function const &v) override {
+    auto const decomp = decomposition_of(v.expr());
+    std::string const fn = "std::" + std::string(cas::name(v.kind()));
+    std::string acc;
+    for (std::size_t i = 0; i < v.dim(); ++i) {
+      auto const idx = std::to_string(i);
+      auto const vi = decomp + ".eigenvectors[" + idx + "]";
+      if (i != 0) {
+        acc += " + ";
+      }
+      acc += fn + "(" + decomp + ".eigenvalues[" + idx + "]) * tmech::otimes(" +
+             vi + ", " + vi + ")";
+    }
+    m_result = register_temp(&v, acc);
+  }
+
 private:
+  // Emit (once per argument) the shared decomposition of `arg` and return the
+  // temporary's name. All spectral quantities over `arg` reuse it.
+  auto
+  decomposition_of(cas::expression_holder<cas::tensor_expression> const &arg)
+      -> std::string {
+    auto const a = apply(arg);
+    return emit_shared_decomposition(m_ctx, a, arg.get().dim());
+  }
+
+  // C++ expression for the i-th ascending eigenvector of `arg`.
+  auto
+  eigenvector_ref(cas::expression_holder<cas::tensor_expression> const &arg,
+                  std::size_t index) -> std::string {
+    return decomposition_of(arg) + ".eigenvectors[" + std::to_string(index) +
+           "]";
+  }
+
+  // Ternary lowering shared by the scalar- and t2s-condition if_then_else.
+  void emit_if_then_else(
+      void const *ptr, std::string const &cond,
+      cas::expression_holder<cas::tensor_expression> const &then_expr,
+      cas::expression_holder<cas::tensor_expression> const &else_expr,
+      std::size_t dim, std::size_t rank) {
+    auto then_branch = apply(then_expr);
+    auto else_branch = apply(else_expr);
+    std::string const tt = "tmech::tensor<double, " + std::to_string(dim) +
+                           ", " + std::to_string(rank) + ">";
+    m_result = register_temp(ptr, "(" + wrap_if_compound(cond) + " != 0.0 ? " +
+                                      tt + "(" + then_branch + ") : " + tt +
+                                      "(" + else_branch + "))");
+  }
+
   auto register_temp(void const *ptr, std::string rhs) -> std::string {
     if (auto *existing = m_ctx.find(ptr)) {
       return *existing;
@@ -475,8 +560,7 @@ private:
   }
 
   static auto is_single_token(std::string const &s) -> bool {
-    return s.find(' ') == std::string::npos &&
-           s.find('(') == std::string::npos;
+    return s.find(' ') == std::string::npos && s.find('(') == std::string::npos;
   }
 
   static auto wrap_if_compound(std::string const &s) -> std::string {
@@ -499,8 +583,8 @@ private:
   }
 
   // Render `tmech::sequence<lo, lo+1, ..., hi>` (1-based, inclusive).
-  static auto contiguous_sequence_str(std::size_t lo, std::size_t hi)
-      -> std::string {
+  static auto contiguous_sequence_str(std::size_t lo,
+                                      std::size_t hi) -> std::string {
     std::ostringstream os;
     os << "tmech::sequence<";
     for (std::size_t k = lo; k <= hi; ++k) {
@@ -518,8 +602,9 @@ private:
   //
   // M2 (#48): the (perm, trace) → kind mapping lives in
   // `classify_projector`; we just map the kind to a unary op name here.
-  static auto projector_short_circuit_fn(cas::inner_product_wrapper const &v)
-      -> const char * {
+  static auto
+  projector_short_circuit_fn(cas::inner_product_wrapper const &v) -> const
+      char * {
     if (v.indices_lhs() != cas::sequence{3, 4} ||
         v.indices_rhs() != cas::sequence{1, 2}) {
       return nullptr;
@@ -535,11 +620,16 @@ private:
       return nullptr;
     }
     switch (classify_projector(proj.space())) {
-    case ProjectorKind::Sym:  return "sym";
-    case ProjectorKind::Skew: return "skew";
-    case ProjectorKind::Vol:  return "vol";
-    case ProjectorKind::Dev:  return "dev";
-    case ProjectorKind::Unknown: return nullptr;
+    case ProjectorKind::Sym:
+      return "sym";
+    case ProjectorKind::Skew:
+      return "skew";
+    case ProjectorKind::Vol:
+      return "vol";
+    case ProjectorKind::Dev:
+      return "dev";
+    case ProjectorKind::Unknown:
+      return nullptr;
     }
     return nullptr; // unreachable but quiets non-exhaustive-switch warnings.
   }

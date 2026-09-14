@@ -130,7 +130,7 @@ else()
     CPMAddPackage(
         NAME numsim_cas
         GITHUB_REPOSITORY NumSim-Stack/numsim-cas
-        GIT_TAG f3e799e757a42c4123c62d5a92df8a54b99c7968
+        GIT_TAG 56da0907b1021edcd80ac5dfde6771665222c112
         SYSTEM YES
         EXCLUDE_FROM_ALL YES
         OPTIONS
@@ -169,6 +169,13 @@ target_include_directories(numsim_codegen_headers
 )
 target_link_libraries(numsim_codegen_headers INTERFACE NumSim_CAS)
 target_compile_features(numsim_codegen_headers INTERFACE cxx_std_23)
+
+# NOTE: the ∂(tensor)/∂(scalar) seam (detail::diff_tensor_wrt_scalar, cas#275)
+# self-detects the overload via __has_include of the CAS visitor header — see
+# include/numsim_codegen/passes/internal/algorithmic_tangent.h. No compile
+# definition is set here: an unconditional macro would make that inline
+# function's body differ between TUs that do and don't see it (an ODR hazard),
+# and would also lie if the pin ever drifted to a CAS without the overload.
 
 add_library(numsim_codegen STATIC
     src/targets/standalone_cxx.cpp

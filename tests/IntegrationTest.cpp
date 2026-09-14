@@ -71,7 +71,7 @@ TEST(Integration, StandaloneEmitsAllPhaseOutputsConsistently) {
   // function parameter. validate() already guarantees no undeclared
   // leaves; emitting without throwing confirms the residual + Jacobian
   // synthesis didn't introduce a dangling symbol.
-  EXPECT_NO_THROW((void)m.emit_compute_function());
+  EXPECT_NO_THROW([[maybe_unused]] auto const discarded = m.emit_compute_function());
 }
 
 TEST(Integration, MixedRecipeOutputOrderingIsStable) {
@@ -211,8 +211,9 @@ TEST(Integration, CanonicalArgumentsOrderAndRoles) {
 TEST(Integration, CanonicalArgumentsClassifiesNonNewtonCurrentStateAsRead) {
   using namespace numsim::cas;
   ConstitutiveModel m("M");
-  (void)m.add_parameter("K", 1.0);
-  (void)m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  [[maybe_unused]] auto const K = m.add_parameter("K", 1.0);
+  [[maybe_unused]] auto const a_sv =
+      m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
   m.add_output("out", make_expression<scalar_constant>(1.0));
   // No enable_local_newton() and no evolution equation → `a` is a plain
   // current state read, `a_old` the previous-step read.
@@ -293,9 +294,9 @@ TEST(Integration, MooseRejectsEvolutionRecipeWithoutLocalNewton) {
   auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
   m.add_scalar_evolution_equation(a, K * a.current);
   // deliberately NOT calling enable_local_newton()
-  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(m), std::runtime_error);
   // Standalone accepts it (external-driver mode) — same recipe, no throw.
-  EXPECT_NO_THROW((void)StandaloneCxxTarget{}.emit(m));
+  EXPECT_NO_THROW([[maybe_unused]] auto const discarded = StandaloneCxxTarget{}.emit(m));
 }
 
 // #3: non-constant initial value → MOOSE emit fails loudly (rather than
@@ -309,7 +310,7 @@ TEST(Integration, MooseRejectsNonConstantStateVarInitial) {
       "c", K * make_expression<scalar_constant>(0.5));
   m.add_scalar_evolution_equation(c, K * c.current);
   m.enable_local_newton();
-  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(m), std::runtime_error);
 }
 
 // #2: output name clashing with a state variable is rejected at build time
@@ -321,8 +322,8 @@ TEST(Integration, OutputStateVarNameClashThrowsEitherOrder) {
   // Forward: state var first, then output.
   {
     ConstitutiveModel m("M");
-    (void)m.add_scalar_state_variable("alpha",
-                                      make_expression<scalar_constant>(0.0));
+    [[maybe_unused]] auto const alpha = m.add_scalar_state_variable(
+        "alpha", make_expression<scalar_constant>(0.0));
     EXPECT_THROW(
         m.add_output("alpha", make_expression<scalar_constant>(1.0)),
         std::runtime_error);
@@ -340,7 +341,7 @@ TEST(Integration, OutputStateVarNameClashThrowsEitherOrder) {
   {
     ConstitutiveModel m("M");
     m.add_output("beta", make_expression<scalar_constant>(1.0));
-    EXPECT_THROW((void)m.add_parameter("beta", 1.0), std::runtime_error);
+    EXPECT_THROW([[maybe_unused]] auto const discarded = m.add_parameter("beta", 1.0), std::runtime_error);
   }
 }
 
@@ -396,11 +397,11 @@ TEST(Integration, MooseEscapesParameterDocString) {
 TEST(Integration, MooseRejectsNonFiniteParameterDefault) {
   ConstitutiveModel m("M");
   m.add_parameter("bad", std::numeric_limits<double>::quiet_NaN());
-  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(m), std::runtime_error);
 
   ConstitutiveModel m2("M2");
   m2.add_parameter("worse", std::numeric_limits<double>::infinity());
-  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m2), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(m2), std::runtime_error);
 }
 
 } // namespace numsim::codegen

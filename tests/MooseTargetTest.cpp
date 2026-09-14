@@ -3,6 +3,7 @@
 #include <numsim_cas/scalar/scalar_operators.h>
 #include <numsim_cas/scalar/scalar_std.h>
 #include <numsim_cas/tensor/tensor_definitions.h>
+#include <numsim_cas/tensor/tensor_isotropic_functions.h>
 #include <numsim_cas/tensor/tensor_operators.h>
 
 #include <gtest/gtest.h>
@@ -15,6 +16,15 @@ auto build_linear_elastic_shear() -> ConstitutiveModel {
   auto mu = m.add_parameter("mu", 0.5, "Shear modulus");
   auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
   m.add_output("stress", 2 * mu * eps, roles::Stress);
+  return m;
+}
+
+// Minimal spectral material — stress = log(C) — to exercise the MOOSE target's
+// spectral-runtime include wiring without pulling in the full Hencky recipe.
+auto build_spectral_stress() -> ConstitutiveModel {
+  ConstitutiveModel m("SpectralLog");
+  auto C = m.add_tensor_input("C", 3, 2, roles::Strain);
+  m.add_output("stress", log(C), roles::Stress);
   return m;
 }
 } // namespace
@@ -58,7 +68,8 @@ TEST(MooseTarget, SourceRegistersMooseObject) {
 
   EXPECT_NE(source.find("registerMooseObject(\"MyApp\", LinearElasticShear);"),
             std::string::npos)
-      << "got:\n" << source;
+      << "got:\n"
+      << source;
 }
 
 TEST(MooseTarget, SourceContainsValidParamsBody) {
@@ -69,8 +80,9 @@ TEST(MooseTarget, SourceContainsValidParamsBody) {
 
   EXPECT_NE(source.find("params.addParam<Real>(\"mu\", 0.5"),
             std::string::npos);
-  EXPECT_NE(source.find("params.addRequiredParam<MaterialPropertyName>(\"eps\""),
-            std::string::npos);
+  EXPECT_NE(
+      source.find("params.addRequiredParam<MaterialPropertyName>(\"eps\""),
+      std::string::npos);
 }
 
 TEST(MooseTarget, SourceConstructorInitializesMembers) {
@@ -82,11 +94,11 @@ TEST(MooseTarget, SourceConstructorInitializesMembers) {
   EXPECT_NE(source.find("_mu(getParam<Real>(\"mu\"))"), std::string::npos);
   EXPECT_NE(source.find("_eps(getMaterialProperty<RankTwoTensor>(\"eps\"))"),
             std::string::npos);
-  EXPECT_NE(source.find(
-                "_stress(declareProperty<RankTwoTensor>"
-                "(\"LinearElasticShear_stress\"))"),
+  EXPECT_NE(source.find("_stress(declareProperty<RankTwoTensor>"
+                        "(\"LinearElasticShear_stress\"))"),
             std::string::npos)
-      << "got:\n" << source;
+      << "got:\n"
+      << source;
 }
 
 TEST(MooseTarget, ComputeQpUsesAdaptorAndCallsLayer2) {
@@ -97,8 +109,7 @@ TEST(MooseTarget, ComputeQpUsesAdaptorAndCallsLayer2) {
 
   // tmech::adaptor wraps MOOSE's RankTwoTensor data pointer (read side).
   EXPECT_NE(
-      source.find(
-          "tmech::adaptor<double const, 3, 2, tmech::full<3>> eps_ad("),
+      source.find("tmech::adaptor<double const, 3, 2, tmech::full<3>> eps_ad("),
       std::string::npos)
       << "got:\n"
       << source;
@@ -137,6 +148,39 @@ TEST(StandaloneCxxTarget, EmitsSingleHeader) {
   EXPECT_EQ(files[0].filename, "LinearElasticShear.h");
   EXPECT_NE(files[0].contents.find("LinearElasticShear_compute"),
             std::string::npos);
+}
+
+} // namespace numsim::codegen
+
+namespace numsim::codegen {
+
+// Spectral materials pull the shipped tmech-only runtime header into the .C
+// source, keyed on actual emitted usage (#105 slice 1).
+TEST(MooseTarget, SpectralSourceIncludesRuntimeHeader) {
+  MooseMaterialTarget target;
+  auto files = target.emit(build_spectral_stress());
+  std::string source;
+  for (auto const &f : files)
+    if (f.kind == EmittedFile::Kind::Source)
+      source = f.contents;
+  ASSERT_FALSE(source.empty());
+  EXPECT_NE(source.find("#include <numsim_codegen/runtime/spectral.h>"),
+            std::string::npos)
+      << source;
+  EXPECT_NE(source.find("numsim::codegen::rt::spectral_decompose"),
+            std::string::npos);
+}
+
+// A non-spectral material must NOT drag in the spectral header.
+TEST(MooseTarget, NonSpectralSourceOmitsRuntimeHeader) {
+  MooseMaterialTarget target;
+  auto files = target.emit(build_linear_elastic_shear());
+  for (auto const &f : files) {
+    if (f.kind == EmittedFile::Kind::Source) {
+      EXPECT_EQ(f.contents.find("numsim_codegen/runtime/spectral.h"),
+                std::string::npos);
+    }
+  }
 }
 
 } // namespace numsim::codegen

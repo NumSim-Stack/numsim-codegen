@@ -228,13 +228,13 @@ TEST(AlgorithmicTangent, MooseRejectsOutputNamedJacobianMultWithTangent) {
   m.add_output("stress", 2 * mu * eps, roles::Stress);
   m.add_output("Jacobian_mult", 2 * mu * eps); // collides with the member
   m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
-  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(m), std::runtime_error);
   // Without a tangent the same output name is fine (no _Jacobian_mult member).
   ConstitutiveModel ok("NoTan");
   auto mu2 = ok.add_parameter("mu", 0.5);
   auto eps2 = ok.add_tensor_input("eps", 3, 2, roles::Strain);
   ok.add_output("Jacobian_mult", 2 * mu2 * eps2);
-  EXPECT_NO_THROW((void)MooseMaterialTarget{}.emit(ok));
+  EXPECT_NO_THROW([[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(ok));
 }
 
 // MOOSE has a single consistent-tangent slot; more than one tangent is rejected.
@@ -246,7 +246,7 @@ TEST(AlgorithmicTangent, MooseRejectsMultipleTangents) {
   m.add_output("stress", 2 * mu * eps, roles::Stress);
   m.add_algorithmic_tangent("t1", "stress", "eps");
   m.add_algorithmic_tangent("t2", "stress", "eps");
-  EXPECT_THROW((void)MooseMaterialTarget{}.emit(m), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(m), std::runtime_error);
 }
 
 // The RHS expression assigned to `<lhs> = ` in the emitted source, trimmed.
@@ -294,7 +294,7 @@ TEST(AlgorithmicTangent, TangentValueIsScaledRank4IdentityDistinctFromStress) {
 TEST(AlgorithmicTangent, ExplicitTangentEmitsWithoutStub) {
   // σ = 2μ ε is strain-only ⇒ dσ/dε is computed via cas::diff(tensor,tensor).
   // No ∂σ/∂x term is needed, so emit must NOT hit the numsim-cas#275 seam.
-  EXPECT_NO_THROW((void)build_elastic_with_tangent().emit_compute_function());
+  EXPECT_NO_THROW([[maybe_unused]] auto const discarded = build_elastic_with_tangent().emit_compute_function());
 }
 
 TEST(AlgorithmicTangent, RegistersAfterValidationOnlyForElasticRecipe) {
@@ -333,7 +333,7 @@ TEST(AlgorithmicTangent, UnknownStressOutputThrowsAtEmit) {
   auto eps = m.add_tensor_input("eps", 3, 2);
   m.add_output("stress", eps);
   m.add_algorithmic_tangent("t", "does_not_exist", "eps");
-  EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = m.emit_compute_function(), std::runtime_error);
 }
 
 TEST(AlgorithmicTangent, ScalarStressOutputRejectedAtEmit) {
@@ -343,7 +343,7 @@ TEST(AlgorithmicTangent, ScalarStressOutputRejectedAtEmit) {
   auto eps = m.add_tensor_input("eps", 3, 2);
   m.add_output("p", k); // scalar output — dσ/dε needs a tensor σ
   m.add_algorithmic_tangent("t", "p", "eps");
-  EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = m.emit_compute_function(), std::runtime_error);
 }
 
 TEST(AlgorithmicTangent, UnknownStrainInputThrowsAtEmit) {
@@ -352,7 +352,7 @@ TEST(AlgorithmicTangent, UnknownStrainInputThrowsAtEmit) {
   auto eps = m.add_tensor_input("eps", 3, 2);
   m.add_output("stress", eps);
   m.add_algorithmic_tangent("t", "stress", "not_an_input");
-  EXPECT_THROW((void)m.emit_compute_function(), std::runtime_error);
+  EXPECT_THROW([[maybe_unused]] auto const discarded = m.emit_compute_function(), std::runtime_error);
 }
 
 // Locks the current rank-4 identity emission (PR #80 review, math finding Q3).
@@ -393,19 +393,45 @@ TEST(AlgorithmicTangent, PlainInputTangentStaysNonSymmetrized) {
   EXPECT_EQ(src.find("tmech::otimesl"), std::string::npos) << src;
 }
 
-// Pins the scaffold's flip-on point: the ∂σ/∂x seam throws a precise
-// numsim-cas#275 diagnostic until the upstream diff(tensor, scalar) lands.
-TEST(AlgorithmicTangent, DiffTensorWrtScalarSeamThrowsUntilCas275) {
+// Flip-on point (PR 2b): cas#275 — diff(tensor_expression, scalar_expression) —
+// is in the pin, and the seam is enabled via
+// NUMSIM_CODEGEN_HAVE_DIFF_TENSOR_WRT_SCALAR. The seam now RETURNS the real
+// ∂(tensor)/∂(scalar), including the scalar-coefficient product-rule term the
+// stub could not compute: ∂(x·ε)/∂x = ε.
+TEST(AlgorithmicTangent, DiffTensorWrtScalarSeamComputesProductRuleTerm) {
   using namespace numsim::cas;
   auto eps = make_expression<tensor>("eps", 3, std::size_t{2});
   auto x = make_expression<scalar>("x");
-  try {
-    (void)detail::diff_tensor_wrt_scalar(eps, x);
-    FAIL() << "expected the diff(tensor,scalar) seam to throw";
-  } catch (std::runtime_error const &e) {
-    EXPECT_NE(std::string(e.what()).find("numsim-cas#275"), std::string::npos)
-        << e.what();
-  }
+
+  auto d = detail::diff_tensor_wrt_scalar(x * eps, x); // ∂(x·ε)/∂x = ε
+  ASSERT_TRUE(d.is_valid());
+
+  CodeGenContext ctx;
+  CodeEmitPipeline p(ctx);
+  ctx.register_symbol_tensor(eps, "eps");
+  ctx.register_symbol_scalar(x, "x");
+  ctx.reset();
+  // Product rule: 1·ε + x·0 = ε. The stub threw here; the flip must render ε.
+  EXPECT_EQ(p.tensor().apply(d), "eps");
+
+  // Non-trivial coefficient: ∂((x·x)·ε)/∂x = 2x·ε. This exercises the
+  // scalar-coefficient product-rule term that a degenerate ∂(x·ε)/∂x (factor 1)
+  // does not — a diff that returned ε instead of 2x·ε would pass the check above
+  // but fail here.
+  auto d2 = detail::diff_tensor_wrt_scalar((x * x) * eps, x);
+  ASSERT_TRUE(d2.is_valid());
+  CodeGenContext ctx2;
+  CodeEmitPipeline p2(ctx2);
+  ctx2.register_symbol_tensor(eps, "eps");
+  ctx2.register_symbol_scalar(x, "x");
+  ctx2.reset();
+  auto const r2 = p2.tensor().apply(d2);
+  // 2x·ε needs CSE temps, so apply() returns a temp ref and the real work is in
+  // the rendered statements. The whole program is the statements + final expr.
+  auto const prog2 = ctx2.render_statements() + r2;
+  EXPECT_NE(prog2, "eps") << prog2;                        // NOT the trivial term
+  EXPECT_NE(prog2.find("x"), std::string::npos) << prog2;  // carries the 2x factor
+  EXPECT_NE(prog2.find("eps"), std::string::npos) << prog2;
 }
 
 // Round-2 review (test-quality MAJOR-5): the pass running ALONGSIDE local Newton

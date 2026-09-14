@@ -35,8 +35,7 @@ TEST(TimeIntegration, AddScalarEvolutionEquationRegistersDtAndEquation) {
   ConstitutiveModel model("H");
   auto zero = cas::make_expression<cas::scalar_constant>(0.0);
   auto alpha = model.add_scalar_state_variable("alpha", zero);
-  auto K = model.add_parameter("K", 1.0);
-  (void)K;
+  [[maybe_unused]] auto K = model.add_parameter("K", 1.0);
 
   // Before: no dt symbol, no evolution equations.
   EXPECT_TRUE(model.evolution_equations().empty());
@@ -70,10 +69,10 @@ TEST(TimeIntegration, AddScalarEvolutionEquationReusesExistingDt) {
   // the evolution-equation auto-register MUST NOT add a duplicate
   // (which would throw via assert_symbol_name_available).
   ConstitutiveModel model("H");
-  auto user_dt = model.add_parameter("dt", 0.001, "user-supplied dt");
+  [[maybe_unused]] auto user_dt =
+      model.add_parameter("dt", 0.001, "user-supplied dt");
   auto zero = cas::make_expression<cas::scalar_constant>(0.0);
   auto alpha = model.add_scalar_state_variable("alpha", zero);
-  (void)user_dt;
 
   auto lambda = cas::make_expression<cas::scalar_constant>(0.5);
   EXPECT_NO_THROW(
@@ -93,7 +92,8 @@ TEST(TimeIntegration, AddEvolutionEquationRejectsManuallyConstructedHandle) {
   // against accidental hand-rolled Handles.
   ConstitutiveModel model("M");
   auto zero = cas::make_expression<cas::scalar_constant>(0.0);
-  (void)model.add_scalar_state_variable("alpha", zero);
+  [[maybe_unused]] auto const alpha =
+      model.add_scalar_state_variable("alpha", zero);
 
   auto beta = cas::make_expression<cas::scalar>("beta_unrelated");
   ConstitutiveModel::ScalarStateVariableHandle foreign{beta, beta};
@@ -118,7 +118,8 @@ TEST(TimeIntegration, AddEvolutionEquationRejectsHandleFromDifferentModel) {
   ConstitutiveModel model_b("B");
   auto zero = cas::make_expression<cas::scalar_constant>(0.0);
   auto alpha_a = model_a.add_scalar_state_variable("alpha", zero);
-  (void)model_b.add_scalar_state_variable("alpha", zero);
+  [[maybe_unused]] auto const alpha_b =
+      model_b.add_scalar_state_variable("alpha", zero);
 
   auto rate = cas::make_expression<cas::scalar_constant>(0.5);
   try {
@@ -186,7 +187,7 @@ TEST(TimeIntegration, PassPreconditionFailsOnPureElasticity) {
   // from SymbolValidationPass → TimeIntegrationPass's precondition
   // fails at PassManager::run() time.
   ConstitutiveModel pure("E");
-  (void)pure.add_parameter("mu", 0.5);
+  [[maybe_unused]] auto const mu = pure.add_parameter("mu", 0.5);
 
   PassContext pctx{RecipeView{pure}, CodeGenContext{}, std::nullopt, {}};
   PassManager pm;
@@ -249,8 +250,7 @@ TEST(TimeIntegration, EmitOnPureElasticityRecipeIsUnchanged) {
   // valid output (the TimeIntegrationPass is NOT registered in this
   // path, so the precondition graph is satisfied).
   ConstitutiveModel pure("E");
-  auto mu = pure.add_parameter("mu", 0.5);
-  (void)mu;
+  [[maybe_unused]] auto mu = pure.add_parameter("mu", 0.5);
   pure.add_output("dummy", cas::make_expression<cas::scalar_constant>(1.0));
   EXPECT_NO_THROW({
     auto src = pure.emit_compute_function();
@@ -277,7 +277,7 @@ TEST(TimeIntegration, EmitDoesNotMutateRecipe) {
   auto const symbols_before = model.symbols().size();
   auto const equations_before = model.evolution_equations().size();
 
-  (void)model.emit_compute_function();
+  [[maybe_unused]] auto const discarded = model.emit_compute_function();
 
   EXPECT_EQ(model.outputs().size(), outputs_before)
       << "emit must not mutate the user's recipe (outputs grew)";
