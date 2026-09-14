@@ -61,7 +61,8 @@ TEST(CalculiXTarget, EmitsSingleSourceFileNamedExt) {
 
 TEST(CalculiXTarget, ExposesNcgUmatAndAbqStdBoundary) {
   CalculiXExternalTarget target;
-  auto const &src = target.emit(build_full_elastic())[0].contents;
+  auto const files = target.emit(build_full_elastic());
+  auto const &src = files[0].contents;
   EXPECT_NE(src.find("extern \"C\" void NCG_UMAT("), std::string::npos) << src;
   EXPECT_NE(src.find("LinearElastic_compute("), std::string::npos);
   // abq_std ordering {11,22,33,12,13,23}; no plain voigt, no ×2 engineering shear.
@@ -71,7 +72,8 @@ TEST(CalculiXTarget, ExposesNcgUmatAndAbqStdBoundary) {
 
 TEST(CalculiXTarget, PacksStiffColumnMajorUpper) {
   CalculiXExternalTarget target;
-  auto const &src = target.emit(build_full_elastic())[0].contents;
+  auto const files = target.emit(build_full_elastic());
+  auto const &src = files[0].contents;
   EXPECT_NE(src.find("stiff[i + j * (j + 1) / 2]"), std::string::npos);
   EXPECT_NE(src.find("!= 3"), std::string::npos); // icmd stress-only guard
 }
@@ -80,7 +82,8 @@ TEST(CalculiXTarget, PacksStiffColumnMajorUpper) {
 // thread_local evaluator must be stateless — the regression for the cache bug.
 TEST(CalculiXTarget, ReadsConstantsPerCallNotCached) {
   CalculiXExternalTarget target;
-  auto const &src = target.emit(build_full_elastic())[0].contents;
+  auto const files = target.emit(build_full_elastic());
+  auto const &src = files[0].contents;
   EXPECT_NE(src.find("double const lambda = mprops[0];"), std::string::npos);
   EXPECT_NE(src.find("thread_local ncg_material const"), std::string::npos);
   EXPECT_EQ(src.find(".emplace(mprops)"), std::string::npos)
@@ -91,7 +94,8 @@ TEST(CalculiXTarget, ReadsConstantsPerCallNotCached) {
 // first '_' splits LIB from FUNC. "J2_Plastic" → libJ2PLASTIC.so / @J2PLASTIC_...
 TEST(CalculiXTarget, DeckNameIsUppercasedAlnum) {
   CalculiXExternalTarget target;
-  auto const &src = target.emit(build_full_elastic("J2_Plastic"))[0].contents;
+  auto const files = target.emit(build_full_elastic("J2_Plastic"));
+  auto const &src = files[0].contents;
   EXPECT_NE(src.find("libJ2PLASTIC.so"), std::string::npos) << src;
   EXPECT_NE(src.find("@J2PLASTIC_NCG_UMAT"), std::string::npos) << src;
 }
