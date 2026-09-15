@@ -1,16 +1,10 @@
-// CalculiX end-to-end gate driver.
-//
-// Two layers of verification, no external dependencies:
-//   Recipe: FD-verify the emitted consistent tangent through the StandaloneCxx
-//     `LinearElastic_compute`, and anchor the stress to the closed-form
-//     isotropic law.
-//   ABI: call the emitted external `NCG_UMAT` exactly as CalculiX would (via its
-//     external/dlopen ABI) for a single 3D integration point, and check the
-//     returned stre(6)/stiff(21) against an INDEPENDENT isotropic oracle —
-//     proving the Voigt boundary and the column-major stiff packing before `ccx`
-//     is ever built. A packing-order negative control confirms the oracle
-//     discriminates; the real dlopen/@-name path is exercised end-to-end by
-//     examples/calculix/.
+// CalculiX end-to-end gate driver. Two layers, no external dependencies:
+//   Recipe: FD-verify the emitted tangent through LinearElastic_compute and
+//     anchor the stress to the closed-form isotropic law.
+//   ABI: call the emitted NCG_UMAT as ccx would, and check stre(6)/stiff(21)
+//     against an INDEPENDENT oracle — pinning the Voigt boundary and the
+//     column-major packing before ccx is built. A negative control confirms the
+//     oracle discriminates order, not just values.
 
 #include "LinearElastic.h" // StandaloneCxx: LinearElastic_compute(...)
 
@@ -45,8 +39,7 @@ constexpr double kMu = 0.7;
 using T2 = tmech::tensor<double, 3, 2>;
 using T4 = tmech::tensor<double, 3, 4>;
 
-// Build the full symmetric strain tensor from a CalculiX emec(6) laid out in
-// abq_std order {11,22,33,12,13,23} (tensorial shear — no ×0.5).
+// Symmetric strain tensor from emec(6), abq_std order, tensorial shear.
 auto strain_tensor_from_emec(std::array<double, 6> const &e) -> T2 {
   T2 eps;
   eps(0, 0) = e[0];
@@ -68,9 +61,8 @@ auto isotropic_stress(T2 const &eps) -> T2 {
   return isotropic_stress(eps, kLambda, kMu);
 }
 
-// Independent closed-form isotropic tangent packed into CalculiX's stiff(21):
-// symmetric 6×6 (engineering) in column-major upper-triangular order,
-// k = i + j*(j+1)/2 for 0-based i<=j. Built WITHOUT touching the emitted code.
+// Independent isotropic tangent packed into stiff(21): column-major upper,
+// k = i + j*(j+1)/2. Built WITHOUT touching the emitted code.
 auto expected_stiff_column_major() -> std::array<double, 21> {
   // Engineering 6×6 isotropic D matrix (abq_std order {11,22,33,12,13,23}).
   double const a = kLambda + 2.0 * kMu; // diagonal normal
@@ -84,9 +76,7 @@ auto expected_stiff_column_major() -> std::array<double, 21> {
   return s;
 }
 
-// Call the emitted external behaviour NCG_UMAT for one integration point,
-// exactly as ccx's dlopen path does. Native STANDARD interface: STRAN1=emec
-// tensorial, MPROPS=constants, DDSDDE=stiff(21).
+// Call NCG_UMAT for one integration point as ccx's dlopen path does.
 void call_ext(std::array<double, 6> const &emec_in, std::array<double, 6> &stre,
               std::array<double, 21> &stiff, double lambda = kLambda,
               double mu = kMu, int icmd_val = 1) {
@@ -174,8 +164,7 @@ TEST(CalculiXGate, ExternalUmatStressMatchesIsotropicOracle) {
 
 TEST(CalculiXGate, ExternalUmatStiffMatchesColumnMajorPackedOracle) {
   auto const expected = expected_stiff_column_major();
-  // The tangent is strain-independent for linear elasticity; check on a
-  // general state so every column participates.
+  // Strain-independent here; use a general state so every column participates.
   std::array<double, 6> stre{};
   std::array<double, 21> stiff{};
   call_ext(sample_strains().back(), stre, stiff);
@@ -183,10 +172,8 @@ TEST(CalculiXGate, ExternalUmatStiffMatchesColumnMajorPackedOracle) {
     EXPECT_NEAR(stiff[k], expected[k], 1e-12) << "stiff mismatch at index " << k;
 }
 
-// Negative control: the packing ORDER is observable. Row-major-upper packing of
-// the same symmetric D differs from column-major-upper (e.g. index 2 holds
-// D(0,2)=λ vs D(1,1)=λ+2μ). The emitted stiff must match column-major, NOT
-// row-major — so the oracle genuinely pins the order, not just the value set.
+// Negative control: packing ORDER is observable — index 2 holds D(0,2)=λ
+// column-major vs D(1,1)=λ+2μ row-major. stiff must match column-major only.
 TEST(CalculiXGate, StiffPackingIsColumnMajorNotRowMajor) {
   double const a = kLambda + 2.0 * kMu, b = kLambda;
   double D[6][6] = {{a, b, b, 0, 0, 0}, {b, a, b, 0, 0, 0},
@@ -213,10 +200,9 @@ TEST(CalculiXGate, StiffPackingIsColumnMajorNotRowMajor) {
          "the negative control has no discriminating power";
 }
 
-// Regression (review CRITICAL): the external plugin must read MPROPS on EVERY
-// call. The earlier thread_local material cached the first call's constants, so
-// a second call on the same thread with different λ/μ silently returned the
-// first answer. Two back-to-back calls with different constants must both be
+// Regression: MPROPS must be read on EVERY call. The thread_local material once
+// cached the first call's constants, so a second call with different λ/μ
+// silently returned the first answer. Two back-to-back calls must both be
 // correct. (CalculiX legitimately varies the constants by temperature.)
 TEST(CalculiXGate, ExternalReadsConstantsEveryCall) {
   std::array<double, 6> const e{{0.01, 0.0, 0.0, 0.0, 0.0, 0.0}};

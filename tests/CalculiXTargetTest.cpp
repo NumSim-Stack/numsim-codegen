@@ -15,8 +15,7 @@ namespace numsim::codegen {
 
 namespace {
 
-// Full isotropic linear elasticity σ = λ·tr(ε)·I + 2μ·ε with the consistent
-// tangent — the supported (stateless) shape.
+// Isotropic linear elasticity with its tangent: the supported stateless shape.
 auto build_full_elastic(std::string name = "LinearElastic") -> ConstitutiveModel {
   using namespace numsim::cas;
   ConstitutiveModel m(std::move(name));
@@ -33,9 +32,7 @@ auto build_full_elastic(std::string name = "LinearElastic") -> ConstitutiveModel
   return m;
 }
 
-// A recipe whose driving tensor input is a NON-symmetric deformation gradient F
-// (roles::DeformationGradient) — the abq_std boundary would silently truncate
-// its antisymmetric part, so the target must reject it.
+// A non-symmetric F input: abq_std would silently truncate its skew part.
 auto build_deformation_gradient_recipe() -> ConstitutiveModel {
   using namespace numsim::cas;
   ConstitutiveModel m("DefGrad");
@@ -78,8 +75,7 @@ TEST(CalculiXTarget, PacksStiffColumnMajorUpper) {
   EXPECT_NE(src.find("!= 3"), std::string::npos); // icmd stress-only guard
 }
 
-// Constants must be read from MPROPS INSIDE evaluate() (per call), and the
-// thread_local evaluator must be stateless — the regression for the cache bug.
+// Constants read from MPROPS per call, evaluator stateless: the cache-bug gate.
 TEST(CalculiXTarget, ReadsConstantsPerCallNotCached) {
   CalculiXExternalTarget target;
   auto const files = target.emit(build_full_elastic());
@@ -90,8 +86,7 @@ TEST(CalculiXTarget, ReadsConstantsPerCallNotCached) {
       << "constants must not be cached from the first call";
 }
 
-// library_name: ccx uppercases the deck name; underscores are dropped so the
-// first '_' splits LIB from FUNC. "J2_Plastic" → libJ2PLASTIC.so / @J2PLASTIC_...
+// ccx uppercases the deck name and drops '_': "J2_Plastic" -> libJ2PLASTIC.so.
 TEST(CalculiXTarget, DeckNameIsUppercasedAlnum) {
   CalculiXExternalTarget target;
   auto const files = target.emit(build_full_elastic("J2_Plastic"));
@@ -160,8 +155,7 @@ TEST(CalculiXTarget, RejectsMultipleTensorOutputs) {
                std::runtime_error);
 }
 
-// H3: a non-symmetric tensor input (deformation gradient) must be rejected — the
-// abq_std Voigt boundary is symmetric and would silently drop its skew part.
+// H3: a non-symmetric input must be rejected, not silently stripped of skew.
 TEST(CalculiXTarget, RejectsNonSymmetricTensorInput) {
   CalculiXExternalTarget target;
   EXPECT_THROW([[maybe_unused]] auto const discarded =
@@ -182,8 +176,8 @@ TEST(CalculiXTarget, RejectsStateVariable) {
                std::runtime_error);
 }
 
-// A model name with no alphanumeric characters ("_" is a valid C++ identifier)
-// maps to an empty library name → must throw at emit, not fail inside ccx.
+// A name with no alphanumerics gives an empty library name: throw at emit, not
+// inside ccx.
 TEST(CalculiXTarget, RejectsEmptyLibraryName) {
   CalculiXExternalTarget target;
   EXPECT_THROW([[maybe_unused]] auto const discarded =
