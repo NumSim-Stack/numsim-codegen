@@ -1,14 +1,8 @@
-// Generator for the CalculiX end-to-end gate. CMake runs this at build time
-// with two destination paths:
-//   argv[1] = LinearElastic.h       (StandaloneCxx: full dense _compute)
-//   argv[2] = LinearElastic_ext.cpp (CalculiXExternal: NCG_UMAT .so plugin)
-//
-// Both are emitted from the SAME recipe — full isotropic linear elasticity in
-// Lamé form, σ = λ·tr(ε)·I + 2μ·ε, with the consistent tangent
-// C = λ·I⊗I + 2μ·I_sym emitted via add_algorithmic_tangent. The driver
-// (calculix_check_driver.cpp) FD-verifies the tangent through the standalone
-// header and checks the external NCG_UMAT boundary against an independent
-// isotropic oracle.
+// Generator for the CalculiX end-to-end gate; CMake runs it at build time:
+//   argv[1] = LinearElastic.h       (StandaloneCxx)
+//   argv[2] = LinearElastic_ext.cpp (CalculiXExternal plugin)
+// Both come from the SAME isotropic-elastic recipe. calculix_check_driver.cpp
+// FD-verifies the tangent and checks NCG_UMAT against an independent oracle.
 
 #include <numsim_codegen/numsim_codegen.h>
 #include <numsim_codegen/targets/calculix_external.h>
@@ -26,10 +20,8 @@
 
 namespace {
 
-// Full isotropic linear elasticity, Lamé form:
-//   σ = λ·tr(ε)·I + 2μ·ε
-// Constants are declared λ then μ, which is the order CalculiX reads them from
-// `*USER MATERIAL, CONSTANTS=2` into MPROPS[0], MPROPS[1].
+// Isotropic linear elasticity, Lamé form. λ is declared before μ: that is the
+// order ccx reads *USER MATERIAL, CONSTANTS=2 into MPROPS[0], MPROPS[1].
 auto build_linear_elastic() -> numsim::codegen::ConstitutiveModel {
   using namespace numsim::cas;
   using namespace numsim::codegen;
@@ -37,9 +29,8 @@ auto build_linear_elastic() -> numsim::codegen::ConstitutiveModel {
   ConstitutiveModel m("LinearElastic");
   auto lambda = m.add_parameter("lambda", 1.0, "First Lame parameter");
   auto mu = m.add_parameter("mu", 0.5, "Shear modulus (second Lame parameter)");
-  // roles::Strain marks eps symmetric, so cas::diff yields the minor-symmetric
-  // rank-4 identity — the tangent is minor-symmetric, as a stress-strain
-  // tangent must be (and as CalculiX's stiff packing assumes).
+  // roles::Strain makes eps symmetric, so diff yields a minor-symmetric tangent,
+  // which is what the stiff packing assumes.
   auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
 
   auto I = make_expression<identity_tensor>(std::size_t{3}, std::size_t{2});

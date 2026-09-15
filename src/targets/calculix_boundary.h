@@ -1,11 +1,10 @@
 #ifndef NUMSIM_CODEGEN_SRC_TARGETS_CALCULIX_BOUNDARY_H
 #define NUMSIM_CODEGEN_SRC_TARGETS_CALCULIX_BOUNDARY_H
 
-// Shared boundary logic for the two CalculiX targets (calculix_umat.cpp linked
-// into ccx, calculix_external.cpp loaded via dlopen). Both encode ONE contract —
-// the stateless-elastic scope rules and the CalculiX `stiff(21)` packing — so it
-// lives here rather than being copy-pasted (review: arch #2). The lifecycle
-// (extern "C" umat_user_ vs the external plugin) stays per-target.
+// Shared by both CalculiX targets (linked-in umat_user_ and the dlopen'd
+// plugin): the stateless-elastic scope rules and the `stiff(21)` packing are one
+// contract, so they live here rather than being copy-pasted. The lifecycle stays
+// per-target.
 
 #include <numsim_codegen/recipe.h>
 
@@ -32,10 +31,8 @@ struct CalculiXScope {
   CalculiXTensorArg tangent;       // the one rank-4 consistent tangent
 };
 
-// Scan the canonical argument list (the same post-emit order the generated
-// signature uses — issue #77) and enforce the stateless-elastic scope. `label`
-// prefixes diagnostics (the calling target's name). Throws std::runtime_error
-// on any violation; returns the collected variables otherwise.
+// Scan the canonical argument list (post-emit order, issue #77) and enforce the
+// stateless-elastic scope. `label` prefixes diagnostics. Throws on violation.
 [[nodiscard]] inline auto
 scan_calculix_scope(ConstitutiveModel const &model, char const *label)
     -> CalculiXScope {
@@ -51,9 +48,8 @@ scan_calculix_scope(ConstitutiveModel const &model, char const *label)
         "variables, scalar inputs and rate/implicit forms are a follow-up.");
   };
 
-  // is_symmetric of a declared tensor input / output (roles::Strain, Stress are
-  // symmetric; roles::DeformationGradient is NOT — abq_std is a symmetric
-  // 6-component adaptor, so a non-symmetric leaf would be silently truncated).
+  // abq_std is a symmetric 6-component adaptor, so a non-symmetric leaf (e.g.
+  // roles::DeformationGradient) would be silently truncated.
   auto input_is_symmetric = [&](std::string const &name) {
     for (auto const &s : model.inputs())
       if (s.name == name) return s.role.is_symmetric;
@@ -126,13 +122,10 @@ scan_calculix_scope(ConstitutiveModel const &model, char const *label)
   return scope;
 }
 
-// Emit the pack of a row-major 6x6 (`d6_name`) into CalculiX's symmetric
-// stiff(21): column-major upper-triangular, k = i + j*(j+1)/2 (0-based i<=j),
-// symmetrized. The consistent tangent is assumed MAJOR-symmetric (D_IJ==D_JI);
-// for a material whose tangent is not (e.g. non-associative plasticity) the
-// antisymmetric part is silently averaged away — revisit when that lands.
-// `stiff_ptr` is the destination array expression, `icmd_expr` the (int) icmd
-// value expression (ccx passes icmd==3 to request stress only).
+// Pack a 6x6 (`d6_name`) into stiff(21): column-major upper triangle,
+// k = i + j*(j+1)/2 (0-based i<=j), symmetrized as umat_abaqus.f:335-355 does.
+// An asymmetric tangent (non-associative plasticity) loses its antisymmetric
+// part — stiff(21) has no room for it. ccx passes icmd==3 for stress only.
 inline void emit_stiff21_packing(std::ostream &os, std::string const &d6_name,
                                  std::string const &stiff_ptr,
                                  std::string const &icmd_expr,
