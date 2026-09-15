@@ -28,6 +28,7 @@ boundary using tmech's adaptors (`full`, `voigt`, `abq_std`).
 | `StandaloneCxxTarget` | ✓ | Single inline header with the generic compute function |
 | `MooseMaterialTarget` | ✓ | `.h` + `.C` pair: Material class with `validParams`, constructor, `computeQpProperties`, optional `Jacobian_mult` consistent tangent |
 | `NumSimMaterialTarget` | ✓ | numsim-materials material header + JSON config. Two sub-contracts: rate path (exactly one scalar state variable + one evolution equation — the rk_integrator contract); return-map path (one scalar Newton unknown, plus additional scalar or tensor history state via update equations) |
+| `CalculiXExternalTarget` (`calculix`) | ✓ elastic | `<Model>_ext.cpp` → `lib<MODEL>.so`: CalculiX external behaviour loaded at RUNTIME via `dlopen` (deck `NAME=@<MODEL>_NCG_UMAT`) — build ccx **once**, then **no recompile per material**. tmech `abq_std` Voigt boundary (native `emec`/`stre`/`stiff(21)`); per-thread evaluator. CI: ABI gate vs. an independent oracle (`tests/generated/calculix_check_driver.cpp`). Real-ccx golden-file validation lives in the `tests/calculix/` harness (issue #128) |
 | `AbaqusUMATTarget`    | planned | Fortran-callable `extern "C"` UMAT with Voigt boundary |
 | `AnsysUSERMATTarget`  | planned | Fortran-callable USERMAT |
 | `LSDynaUMATTarget`    | planned | LS-DYNA convention |
