@@ -13,6 +13,7 @@
 #include "NewtonCheck.h"
 #include "PiecewiseCheck.h"
 #include "PiecewiseT2sCheck.h"
+#include "T2sOutputCheck.h"
 #include "TangentCheck.h"
 #include "numerical_tangent_verifier.h"
 #include <array>
@@ -285,6 +286,41 @@ TEST(CompileCheckGenerated, PiecewiseT2sSelectsBranchAndCompilesVsTmech) {
     EXPECT_NEAR(sigma(1, 0), norm * 0.5, 1e-12);
     EXPECT_NEAR(sigma(0, 0), 0.0, 1e-12);
   }
+}
+
+// #142: tensor_to_scalar OUTPUTS. The T2sOutputCheck recipe declares two
+// scalar-from-tensor outputs — tr_eps = trace(eps) and
+// vm_like = sqrt(w·(ε:ε)) — which pre-#142 were inexpressible (add_output
+// took only scalar/tensor). Both must surface as `double &<name>_out`
+// out-parameters (that they do is proven by the call compiling) and carry
+// the hand-computed values.
+TEST(CompileCheckGenerated, TensorToScalarOutputsMatchHandComputedValues) {
+  double const w = 1.5;
+  tmech::tensor<double, 3, 2> eps; // zero-initialised
+  eps(0, 0) = 1.0;
+  eps(1, 1) = 2.0;
+  eps(2, 2) = -0.5;
+  eps(0, 1) = eps(1, 0) = 0.25;
+
+  double tr_out = 0.0;
+  double vm_out = 0.0;
+  // Generated signature: (w, eps, tr_eps_out, vm_like_out).
+  T2sOutputCheck_compute(w, eps, tr_out, vm_out);
+
+  // tr = 1.0 + 2.0 - 0.5 = 2.5
+  EXPECT_NEAR(tr_out, 2.5, 1e-12);
+
+  // vm_like = sqrt(w * eps:eps), eps:eps = 1 + 4 + 0.25 + 2*0.25^2 = 5.375
+  double const dot = 1.0 + 4.0 + 0.25 + 2.0 * 0.25 * 0.25;
+  EXPECT_NEAR(vm_out, std::sqrt(w * dot), 1e-12);
+}
+
+TEST(CompileCheckGenerated, TensorToScalarOutputsOnZeroStrain) {
+  tmech::tensor<double, 3, 2> eps; // zero-initialised
+  double tr_out = 1.0, vm_out = 1.0;
+  T2sOutputCheck_compute(1.5, eps, tr_out, vm_out);
+  EXPECT_NEAR(tr_out, 0.0, 1e-12);
+  EXPECT_NEAR(vm_out, 0.0, 1e-12);
 }
 
 // Verification spine (numsim-codegen#90, item 1). SCOPE: this verifies the

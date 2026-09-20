@@ -193,6 +193,22 @@ TEST(NumSimMaterialTarget, EmitsTensorStressOutput) {
   EXPECT_NE(h.find("void update_stress() {"), std::string::npos) << h;
 }
 
+// #142: a tensor_to_scalar output (scalar-from-tensor, e.g. trace(strain)) is
+// expressible on the recipe but this target's output wiring does not support
+// it yet — the guard must reject LOUDLY (never bad_variant_access, never a
+// silently dropped output).
+TEST(NumSimMaterialTarget, RejectsTensorToScalarOutput) {
+  ConstitutiveModel m("WithT2sOutput");
+  auto K = m.add_parameter("K", -1.0);
+  auto a = m.add_scalar_state_variable("a", make_expression<scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(a, K * a.current);
+  auto eps = m.add_tensor_input("strain", 3, 2, roles::Strain);
+  m.add_output("tr_strain", trace(eps));
+  auto const msg = emit_throw_message(m);
+  EXPECT_NE(msg.find("tensor_to_scalar"), std::string::npos) << msg;
+  EXPECT_NE(msg.find("tr_strain"), std::string::npos) << msg;
+}
+
 // A tensor input named like a synthesized member must be rejected (it would
 // emit a duplicate `m_rate` member). The recipe permits the name (it isn't a
 // recipe-reserved word); the emitter's uniqueness guard catches it.
