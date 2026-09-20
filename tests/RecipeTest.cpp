@@ -260,4 +260,101 @@ TEST(Recipe, ResidualRejectsForeignHandle) {
   }
 }
 
+// ─── Derived-name collisions (issue #79) ────────────────────────────────
+//
+// The lowering passes synthesise `<sv>_residual` / `<sv>_jacobian` outputs and
+// the renderer appends `_out` to every output / solved-state parameter, so a
+// parameter's final identifier is only knowable AFTER passes run. A user
+// declaration that renders to the same identifier as another parameter would
+// emit duplicate C++ parameters. This is detected at emit time against the
+// actual rendered argument list (sound — no false positives, whatever lowering
+// path produced the names). (`<sv>_old` clashes are caught earlier, at add
+// time — see StateVariableTest — because the paired symbol is registered
+// eagerly.)
+
+// An input whose name equals another output's out-parameter identifier collides.
+TEST(Recipe, EmitRejectsOutParamVsInputCollision) {
+  ConstitutiveModel m("OutParamClash");
+  // Output `stress` emits the out-param `stress_out`; an input literally named
+  // `stress_out` renders to the same identifier.
+  auto stress_out = m.add_scalar_input("stress_out");
+  m.add_output("stress", 2 * stress_out);
+  try {
+    [[maybe_unused]] auto const discarded = m.emit_compute_function();
+    FAIL() << "expected emit to reject the duplicate parameter";
+  } catch (std::runtime_error const &e) {
+    std::string const msg = e.what();
+    EXPECT_NE(msg.find("stress_out"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("two"), std::string::npos) << msg;
+  }
+}
+
+// An input colliding with the SYNTHESISED residual output's out-parameter
+// (`<sv>_residual_out`) — the two-hop name the pristine-recipe guard missed.
+TEST(Recipe, EmitRejectsSynthesisedResidualOutParamCollision) {
+  ConstitutiveModel m("ResidualOutClash");
+  // `alpha` carries a rate → TimeIntegrationPass synthesises output
+  // `alpha_residual` → renderer emits out-param `alpha_residual_out`.
+  auto bad = m.add_scalar_input("alpha_residual_out");
+  auto alpha = m.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(alpha, bad); // rate references the input
+  try {
+    [[maybe_unused]] auto const discarded = m.emit_compute_function();
+    FAIL() << "expected emit to reject the duplicate parameter";
+  } catch (std::runtime_error const &e) {
+    std::string const msg = e.what();
+    EXPECT_NE(msg.find("alpha_residual_out"), std::string::npos) << msg;
+  }
+}
+
+// A tangent's out-parameter (`<tangent>_out`) colliding with an input.
+TEST(Recipe, EmitRejectsTangentOutParamVsInputCollision) {
+  ConstitutiveModel m("TangentOutClash");
+  auto mu = m.add_parameter("mu", 0.5);
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  m.add_algorithmic_tangent("dstress_deps", "stress", "eps");
+  // Input rendering to the tangent's out-param identifier `dstress_deps_out`.
+  [[maybe_unused]] auto const clash =
+      m.add_tensor_input("dstress_deps_out", 3, 4, roles::Other);
+  try {
+    [[maybe_unused]] auto const discarded = m.emit_compute_function();
+    FAIL() << "expected emit to reject the duplicate parameter";
+  } catch (std::runtime_error const &e) {
+    std::string const msg = e.what();
+    EXPECT_NE(msg.find("dstress_deps_out"), std::string::npos) << msg;
+  }
+}
+
+// Regression: the check must NOT reject the passes' OWN synthesis. A normal
+// external-driver evolution recipe legitimately produces `alpha_residual` /
+// `alpha_jacobian` outputs — emit must succeed and emit their out-params.
+TEST(Recipe, LegitimateResidualSynthesisStillEmits) {
+  ConstitutiveModel m("LegitResidual");
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("stress", eps, roles::Stress);
+  auto alpha = m.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  m.add_scalar_evolution_equation(
+      alpha, cas::make_expression<cas::scalar_constant>(0.5));
+  std::string src;
+  EXPECT_NO_THROW(src = m.emit_compute_function());
+  EXPECT_NE(src.find("alpha_residual_out"), std::string::npos) << src;
+  EXPECT_NE(src.find("alpha_jacobian_out"), std::string::npos) << src;
+}
+
+// Regression (no false positive): a state variable WITHOUT an evolution
+// equation never synthesises `<sv>_residual`, so an output named
+// `<sv>_residual` is a legitimate, collision-free name. validate() must not
+// reject it (the old pristine-recipe guard wrongly did).
+TEST(Recipe, StateVarWithoutEvolutionAllowsResidualNamedOutput) {
+  ConstitutiveModel m("NoEvoResidualName");
+  auto x = m.add_scalar_input("x");
+  [[maybe_unused]] auto const alpha = m.add_scalar_state_variable(
+      "alpha", cas::make_expression<cas::scalar_constant>(0.0));
+  m.add_output("alpha_residual", 2 * x); // no synthesis for this state var
+  EXPECT_NO_THROW(m.validate());
+}
+
 } // namespace numsim::codegen
