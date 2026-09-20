@@ -183,4 +183,23 @@ TEST(MooseTarget, NonSpectralSourceOmitsRuntimeHeader) {
   }
 }
 
+// issue #15: a stateful OUTPUT (roles::History or any is_stateful role) was
+// previously accepted silently and emitted a plain (non-stateful)
+// MaterialProperty write — semantically wrong (no old/new pair, no stateful
+// init). emit() must now reject it, symmetric with the stateful-input guard.
+TEST(MooseTarget, RejectsStatefulOutput) {
+  ConstitutiveModel m("StatefulOut");
+  auto eps = m.add_tensor_input("eps", 3, 2, roles::Strain);
+  m.add_output("h_new", eps, roles::History); // is_stateful output
+  MooseMaterialTarget target;
+  try {
+    [[maybe_unused]] auto const discarded = target.emit(m);
+    FAIL() << "expected emit() to reject the stateful output";
+  } catch (std::runtime_error const &e) {
+    std::string const msg = e.what();
+    EXPECT_NE(msg.find("stateful"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("output 'h_new'"), std::string::npos) << msg;
+  }
+}
+
 } // namespace numsim::codegen
