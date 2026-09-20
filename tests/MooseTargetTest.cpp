@@ -172,6 +172,40 @@ TEST(MooseTarget, SpectralSourceIncludesRuntimeHeader) {
 }
 
 // A non-spectral material must NOT drag in the spectral header.
+// issue #7: RankTwoTensor is always 3D; a dim-2 recipe must be rejected
+// loudly instead of silently miscomputing through the adaptor boundary.
+TEST(MooseTarget, RejectsNonThreeDimensionalTensors) {
+  ConstitutiveModel m("PlaneStrain2D");
+  auto mu = m.add_parameter("mu", 0.5, "Shear modulus");
+  auto eps = m.add_tensor_input("eps", 2, 2, roles::Strain);
+  m.add_output("stress", 2 * mu * eps, roles::Stress);
+  MooseMaterialTarget target;
+  try {
+    [[maybe_unused]] auto const discarded = target.emit(m);
+    ADD_FAILURE() << "expected emit() to reject the dim-2 tensor input";
+  } catch (std::runtime_error const &e) {
+    std::string const msg = e.what();
+    EXPECT_NE(msg.find("dim 2"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("LIBMESH_DIM"), std::string::npos) << msg;
+  }
+}
+
+// issue #10: the storage-layout assumption behind the tmech::adaptor
+// boundary must be a compile-time check in the consumer's build.
+TEST(MooseTarget, SourceEmitsLayoutStaticAsserts) {
+  MooseMaterialTarget target;
+  auto files = target.emit(build_linear_elastic_shear());
+  auto const &source = files[1].contents;
+  EXPECT_NE(source.find("static_assert(sizeof(RankTwoTensor) == 9 * "
+                        "sizeof(Real)"),
+            std::string::npos)
+      << source;
+  EXPECT_NE(source.find("static_assert(sizeof(RankFourTensor) == 81 * "
+                        "sizeof(Real)"),
+            std::string::npos)
+      << source;
+}
+
 TEST(MooseTarget, NonSpectralSourceOmitsRuntimeHeader) {
   MooseMaterialTarget target;
   auto files = target.emit(build_linear_elastic_shear());

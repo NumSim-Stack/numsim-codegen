@@ -187,11 +187,20 @@ TEST(AlgorithmicTangent, TangentDimFollowsStrainDimNotHardcoded3) {
     }
   }
   EXPECT_TRUE(found);
-  auto const source = MooseMaterialTarget{}.emit(m).at(1).contents;
-  EXPECT_NE(source.find("tmech::adaptor<double, 2, 4, tmech::full<2>> "
-                        "Jacobian_mult_ad"),
-            std::string::npos)
-      << source;
+  // issue #7: the MOOSE half of this test previously asserted a dim-2
+  // adaptor over Jacobian_mult — but RankTwoTensor/RankFourTensor are
+  // unconditionally 3D (LIBMESH_DIM = 3), so a full<2> adaptor over that
+  // storage reads the wrong elements: the "propagated" dim made the
+  // miscompute deterministic, not correct. Dim propagation stays pinned
+  // above at the canonical_arguments level (the Layer-2 / standalone path
+  // genuinely supports dim 2); the MOOSE backend must now REJECT dim != 3.
+  try {
+    [[maybe_unused]] auto const discarded = MooseMaterialTarget{}.emit(m);
+    ADD_FAILURE() << "expected MooseMaterialTarget to reject the dim-2 recipe";
+  } catch (std::runtime_error const &e) {
+    EXPECT_NE(std::string(e.what()).find("LIBMESH_DIM"), std::string::npos)
+        << e.what();
+  }
 }
 
 // Round-2 review (coverage): the tangent through the MOOSE backend ALONGSIDE a
