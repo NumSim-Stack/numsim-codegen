@@ -5,10 +5,36 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Weekly run so upstream bit-rot (LLVM apt repo, dependency pins, runner
+  # image changes) surfaces between pushes instead of blocking the next PR.
+  schedule:
+    - cron: '17 4 * * 1'
+
+# Least privilege (issue #141): build+test needs read-only checkout only.
+permissions:
+  contents: read
+
+# Cancel superseded PR runs. Non-PR runs (push to main, schedule) share a
+# group with cancel-in-progress off — note GitHub still coalesces QUEUED
+# runs in a group, so rapid successive pushes to main may skip CI for
+# intermediate commits (only the newest queued run executes); acceptable
+# at this repo's merge cadence.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# CPM source cache (issue #27): CPM re-clones numsim-cas (+ tmech, Eigen,
+# the Phase-B sibling pins) on every run without it. The cache key hashes
+# the two files that carry every pin, so a pin bump naturally misses.
+# Sources only — build artifacts are not cached. gtest goes through plain
+# FetchContent into the build dir and is not covered.
+env:
+  CPM_SOURCE_CACHE: /home/runner/.cache/CPM
 
 jobs:
   build:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -25,7 +51,16 @@ jobs:
         build_type: [Debug, Release]
 
     steps:
-      - uses: actions/checkout@v4
+      # SHA-pinned (issue #141) — a movable tag on a third-party action is
+      # the one unpinned link in an otherwise SHA-pinned supply chain.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Cache CPM sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/runner/.cache/CPM
+          key: cpm-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'tests/CMakeLists.txt') }}
+          restore-keys: cpm-${{ runner.os }}-
 
       - name: Install compiler
         run: |
@@ -58,6 +93,47 @@ jobs:
         run: >
           cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DNUMSIM_CODEGEN_FETCH_MATERIALS=ON
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -j$(nproc)
+
+  # ASan+UBSan leg (issue #13): the generator is pointer-keyed CSE over CAS
+  # DAGs — exactly the code class where a lifetime bug is silent aliasing
+  # rather than a crash. gcc-14 Debug, full suite, no recovery: any report
+  # fails the job. Verified green locally before adding (2026-08-02 review).
+  sanitize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Cache CPM sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /home/runner/.cache/CPM
+          key: cpm-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'tests/CMakeLists.txt') }}
+          restore-keys: cpm-${{ runner.os }}-
+
+      # Same explicit install as the matrix job — don't assume the runner
+      # image ships g++-14 (it does today; image rotations are exactly the
+      # bit-rot the weekly schedule watches for).
+      - name: Install compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14
+
+      - name: Configure
+        env:
+          CC: gcc-14
+          CXX: g++-14
+        run: >
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug
+          -DNUMSIM_CODEGEN_FETCH_MATERIALS=ON
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
       - name: Build
         run: cmake --build build -j$(nproc)
