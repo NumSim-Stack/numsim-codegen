@@ -38,7 +38,8 @@ TEST(LinearAlgebraEmitter, EigenEmitsDenseSolveBody) {
   EigenLinearAlgebraEmitter const e;
   std::ostringstream os;
   e.emit_newton_step(os, "sys", {"a", "b"}, {"Ra", "Rb"},
-                     {{"J00", "J01"}, {"J10", "J11"}}, 1e-10);
+                     {{"J00", "J01"}, {"J10", "J11"}}, 1e-10, "sys_converged",
+                     "sys_iter", 25);
   auto const src = os.str();
   // Fixed-size matrices, row-major fill, ∞-norm convergence, partial-pivot LU.
   EXPECT_NE(src.find("Eigen::Matrix<double, 2, 1> sys_r"), std::string::npos)
@@ -51,6 +52,10 @@ TEST(LinearAlgebraEmitter, EigenEmitsDenseSolveBody) {
       << src;
   EXPECT_NE(src.find("sys_J.partialPivLu().solve(sys_r)"), std::string::npos)
       << src;
+  // issue #85: convergence recorded, update capped at max_iter, singular guard.
+  EXPECT_NE(src.find("sys_converged = true"), std::string::npos) << src;
+  EXPECT_NE(src.find("sys_iter == 25"), std::string::npos) << src;
+  EXPECT_NE(src.find("sys_dx.allFinite()"), std::string::npos) << src;
   // Each unknown updated from the solution vector.
   EXPECT_NE(src.find("a -= sys_dx(0)"), std::string::npos) << src;
   EXPECT_NE(src.find("b -= sys_dx(1)"), std::string::npos) << src;
@@ -73,7 +78,8 @@ TEST(LinearAlgebraEmitter, ArmadilloEmitsDenseSolveBody) {
   ArmadilloLinearAlgebraEmitter const a;
   std::ostringstream os;
   a.emit_newton_step(os, "sys", {"a", "b"}, {"Ra", "Rb"},
-                     {{"J00", "J01"}, {"J10", "J11"}}, 1e-10);
+                     {{"J00", "J01"}, {"J10", "J11"}}, 1e-10, "sys_converged",
+                     "sys_iter", 25);
   auto const src = os.str();
   // Fixed-size types, element assignment, ∞-norm via arma::norm, arma::solve.
   EXPECT_NE(src.find("arma::vec::fixed<2> sys_r"), std::string::npos) << src;
@@ -83,7 +89,11 @@ TEST(LinearAlgebraEmitter, ArmadilloEmitsDenseSolveBody) {
   EXPECT_NE(src.find("sys_J(1, 0) = J10;"), std::string::npos) << src; // ∂R_1/∂x_0
   EXPECT_NE(src.find("arma::norm(sys_r, \"inf\") < 1e-10"), std::string::npos)
       << src;
-  EXPECT_NE(src.find("arma::solve(sys_J, sys_r)"), std::string::npos) << src;
+  // issue #85: the bool overload of arma::solve (out, A, B) — false on singular.
+  EXPECT_NE(src.find("arma::solve(sys_dx, sys_J, sys_r)"), std::string::npos)
+      << src;
+  EXPECT_NE(src.find("sys_converged = true"), std::string::npos) << src;
+  EXPECT_NE(src.find("sys_iter == 25"), std::string::npos) << src;
   EXPECT_NE(src.find("a -= sys_dx(0)"), std::string::npos) << src;
   EXPECT_NE(src.find("b -= sys_dx(1)"), std::string::npos) << src;
   // No Eigen leakage.
@@ -100,7 +110,8 @@ TEST(LinearAlgebraEmitter, EveryBackendEmitsItsUsageMarker) {
   for (auto const *la : backends) {
     std::ostringstream os;
     la->emit_newton_step(os, "p", {"a", "b"}, {"Ra", "Rb"},
-                         {{"J00", "J01"}, {"J10", "J11"}}, 1e-10);
+                         {{"J00", "J01"}, {"J10", "J11"}}, 1e-10, "p_converged",
+                         "p_iter", 10);
     auto const src = os.str();
     EXPECT_NE(src.find(la->usage_marker()), std::string::npos)
         << "marker '" << la->usage_marker() << "' absent from its emission";
