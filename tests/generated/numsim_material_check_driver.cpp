@@ -44,6 +44,7 @@
 #include "J2Voce.h"         // generated: J2 with Voce (saturating) hardening
 #include "J2Swift.h"        // generated: J2 with Swift (power-law) hardening
 #include "J2PathDep.h"      // generated: PATH-DEPENDENT J2 (tensor εᵖ history, #92)
+#include "J2ReturnDerived.h" // generated: J2 return map DERIVED from yield f (#108)
 #endif
 
 #include <gtest/gtest.h>
@@ -66,6 +67,7 @@ using J2Return = numsim::materials::generated::J2Return<policy>;
 using J2Voce = numsim::materials::generated::J2Voce<policy>;
 using J2Swift = numsim::materials::generated::J2Swift<policy>;
 using J2PathDep = numsim::materials::generated::J2PathDep<policy>;
+using J2ReturnDerived = numsim::materials::generated::J2ReturnDerived<policy>;
 using tensor2 = tmech::tensor<T, 3, 2>;
 #endif
 
@@ -585,6 +587,107 @@ TEST(NumSimMaterialEndToEnd, J2RadialReturnTangentMatchesNumericalDiff) {
     ctx.commit();
   }
   EXPECT_LT(max_rel, 1e-6) << "J2 consistent tangent disagrees with numerical diff";
+}
+
+// #108 plastic front-end: the DERIVED J2 return map (add_j2_radial_return —
+// author writes only the yield f = ‖dev σ‖ − (σy + H·Δγ), the helper derives
+// n = ∂f/∂σ, the consistency residual, the stress update and the tangent) must
+// reproduce the hand-written `J2Return` golden step-for-step through the real
+// backward_euler solver, and its consistent tangent must independently FD-match.
+TEST(NumSimMaterialEndToEnd, J2DerivedFromYieldReproducesHandWrittenGolden) {
+  struct Step { T dgamma; tensor2 stress; T tangent_rel; T eps00; };
+  const T G = T{80.0}, sy = T{1.0}, H = T{10.0};
+
+  auto run = [&]<class Material>(const char* mat_name) -> std::vector<Step> {
+    ctx_type ctx;
+    param_type p;
+    p.insert<std::string>("name", "stepper");
+    p.insert<T>("increment", T{0.02}); // monotonic uniaxial-ish loading
+    p.insert<std::vector<std::size_t>>("indices", {0, 0});
+    ctx.create<numsim::materials::tensor_component_stepper<2, policy>>(p);
+
+    p.clear();
+    p.insert<std::string>("name", "solver");
+    p.insert<T>("tolerance", T{1e-13});
+    p.insert<int>("max_iter", 50);
+    ctx.create<numsim::materials::backward_euler<policy>>(p);
+
+    p.clear();
+    p.insert<std::string>("name", mat_name);
+    p.insert<T>("G", G);
+    p.insert<T>("sy", sy);
+    p.insert<T>("H", H);
+    p.insert<std::string>("solver_source", "solver");
+    p.insert<std::string>("strain_source", "stepper");
+    ctx.create<Material>(p);
+
+    p.clear();
+    p.insert<std::string>("name", "checker");
+    p.insert<ctx_type*>("context", &ctx);
+    p.insert<std::string>("output_source", std::string(mat_name) + "::stress");
+    p.insert<std::string>("input_source", "stepper::strain");
+    p.insert<std::string>("analytical_source",
+                          std::string(mat_name) + "::dstress_dstrain");
+    p.insert<std::vector<std::string>>("history_sources",
+                                       {std::string(mat_name) + "::dgamma"});
+    p.insert<T>("epsilon", T{1e-7});
+    ctx.create<numsim::materials::tangent_checker<policy>>(p);
+
+    ctx.finalize();
+
+    std::vector<Step> trace;
+    for (int i = 0; i < 8; ++i) {
+      ctx.update();
+      trace.push_back({ctx.get<T>(mat_name, "dgamma"),
+                       read_tensor(ctx, mat_name, "stress"),
+                       ctx.get<T>("checker", "rel_error"),
+                       read_tensor(ctx, "stepper", "strain")(0, 0)});
+      ctx.commit();
+    }
+    return trace;
+  };
+
+  const auto hand = run.template operator()<J2Return>("J2Return");
+  const auto derived =
+      run.template operator()<J2ReturnDerived>("J2ReturnDerived");
+
+  // Independent closed-form oracle (not either generated path). Uniaxial-strain
+  // loading ε = diag(ε₀₀,0,0) ⇒ ‖dev ε‖ = ε₀₀·√(2/3), so the trial equivalent
+  // stress is q_trial = 2G·ε₀₀·√(2/3). Linear-hardening radial return gives the
+  // consistency solution Δγ = (q_trial − σy)/(2G + H) directly. This pins the
+  // PHYSICS, catching a reduction that is self-consistent (F-D passes) but wrong.
+  auto dgamma_oracle = [&](T eps00) {
+    const T q_trial = T{2} * G * eps00 * std::sqrt(T{2} / T{3});
+    return (q_trial - sy) / (T{2} * G + H);
+  };
+
+  ASSERT_EQ(hand.size(), derived.size());
+  for (std::size_t i = 0; i < hand.size(); ++i) {
+    ASSERT_GT(derived[i].dgamma, T{0})
+        << "step " << i << ": expected plastic loading";
+    // (1) derived Δγ matches the independent closed-form oracle (soundness, not
+    // just agreement with the sibling generated path).
+    EXPECT_NEAR(derived[i].dgamma, dgamma_oracle(derived[i].eps00), 1e-10)
+        << "step " << i << ": derived Δγ disagrees with the closed-form J2 oracle";
+    // (2) plastic multiplier identical to the hand-written golden
+    EXPECT_NEAR(derived[i].dgamma, hand[i].dgamma, 1e-12)
+        << "step " << i << ": derived Δγ must match the hand-written golden";
+    // (3) return-mapped stress identical, component-wise
+    const tensor2 d = derived[i].stress - hand[i].stress;
+    EXPECT_LT(std::sqrt(tmech::dcontract(d, d)), 1e-10)
+        << "step " << i << ": derived stress must match the hand-written golden";
+    // (4) returned stress lies on the hardened yield surface ‖dev σ‖ = σy+H·Δγ
+    // (independent physics check on the stress, not just Δγ).
+    const tensor2 ds = derived[i].stress -
+                       (derived[i].stress(0, 0) + derived[i].stress(1, 1) +
+                        derived[i].stress(2, 2)) / T{3} * tmech::eye<T, 3, 2>();
+    EXPECT_NEAR(std::sqrt(tmech::dcontract(ds, ds)), sy + H * derived[i].dgamma,
+                1e-9)
+        << "step " << i << ": derived stress must lie on the yield surface";
+    // (5) derived consistent tangent FD-matches through the real re-solve
+    EXPECT_LT(derived[i].tangent_rel, 1e-6)
+        << "step " << i << ": derived consistent tangent disagrees with FD";
+  }
 }
 
 // Same J2 golden with NONLINEAR isotropic hardening. Now σ_y(Δγ) is nonlinear, so
