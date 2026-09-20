@@ -190,6 +190,19 @@ public:
   return eigen_linear_algebra_emitter();
 }
 
+// Include-gating predicate (#139): does the EMITTED body actually use `la`'s
+// backend? Keyed on the emitter's usage marker so the include decision tracks
+// the emitted code, not a re-derived coupling predicate (PR #83 round-2 #4) —
+// gating on a predicate could diverge from what was emitted (e.g. a future
+// pass-synthesized coupling) → a missing header for code that uses it. Shared
+// by every target that gates a linalg include on `body`; pass the SAME `la`
+// that drove emission so they cannot disagree.
+[[nodiscard]] inline auto uses_linear_algebra(std::string const &body,
+                                              LinearAlgebraEmitter const &la)
+    -> bool {
+  return body.find(la.usage_marker()) != std::string::npos;
+}
+
 } // namespace numsim::codegen
 
 #endif // NUMSIM_CODEGEN_LINEAR_ALGEBRA_EMITTER_H
