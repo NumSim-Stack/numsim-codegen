@@ -181,6 +181,7 @@ add_library(numsim_codegen STATIC
     src/targets/standalone_cxx.cpp
     src/targets/moose_material.cpp
     src/targets/numsim_material.cpp
+    src/targets/calculix_external.cpp
     src/targets/target_factory.cpp)
 add_library(numsim::codegen ALIAS numsim_codegen)
 target_link_libraries(numsim_codegen
