@@ -3,6 +3,7 @@
 
 #include <numsim_codegen/recipe.h>
 
+#include <expected>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,23 @@ public:
   // framework conventions.
   [[nodiscard]] virtual auto emit(ConstitutiveModel const &model) const
       -> std::vector<EmittedFile> = 0;
+
+  // Capability query (#137): would this target's UP-FRONT scope guards accept
+  // the recipe's shape? On rejection the error carries the exact reason string
+  // the matching emit() throw uses — one message, two transports — so a
+  // generic driver can skip-and-report without catching exceptions.
+  //
+  // Success does NOT guarantee emit() succeeds: can_emit checks only the
+  // up-front recipe-shape guards; emit-time validation (name collisions with
+  // synthesized members, unbound expression leaves, non-finite parameter
+  // defaults, pass-level checks) may still throw. The default implementation
+  // is conservatively permissive — it reports success ("try emit"), so a
+  // target without shape guards needs no override and one with them still
+  // rejects loudly inside emit().
+  [[nodiscard]] virtual auto can_emit(ConstitutiveModel const & /*model*/) const
+      -> std::expected<void, std::string> {
+    return {};
+  }
 
   // Human-readable name of the target framework — used in error messages
   // and diagnostics.

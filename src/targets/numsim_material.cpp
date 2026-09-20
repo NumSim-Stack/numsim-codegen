@@ -17,11 +17,14 @@
 #include <numsim_cas/tensor_to_scalar/tensor_to_scalar_operators.h>
 
 #include <cmath>
+#include <expected>
 #include <format>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -83,25 +86,26 @@ std::string tensor_cxx_type(std::size_t dim, std::size_t rank) {
 // evolution equation `dx/dt = f(x, params)`, and NOTHING this increment can't
 // emit. Rejecting (rather than silently emitting a partial material) is the
 // whole contract — a code generator that quietly drops a declared output is a
-// correctness hazard.
-void check_scope(ConstitutiveModel const &model) {
+// correctness hazard. Returns the first rejection reason — thrown by emit(),
+// reported by can_emit() (one message, two transports, #137) — or nullopt
+// when the recipe shape is in scope.
+std::optional<std::string>
+rate_scope_rejection(ConstitutiveModel const &model) {
   auto const svs = model.state_variables();
   auto const eqs = model.evolution_equations();
   if (svs.size() != 1 || eqs.size() != 1) {
-    throw std::runtime_error(
-        "NumSimMaterialTarget: first increment supports exactly one scalar "
-        "state variable with one scalar evolution equation (the rk_integrator "
-        "rate contract). Coupled / multi-state systems need the "
-        "numsim-materials vector solver (numsim-materials#12).");
+    return "NumSimMaterialTarget: first increment supports exactly one scalar "
+           "state variable with one scalar evolution equation (the "
+           "rk_integrator rate contract). Coupled / multi-state systems need "
+           "the numsim-materials vector solver (numsim-materials#12).";
   }
   if (svs[0].kind != SymbolDecl::Kind::Scalar) {
     // Defensive: unreachable through the public API today (evolution equations
     // are scalar-only — add_scalar_evolution_equation binds only scalar state),
     // so a tensor state has no equation and is caught above. Kept for the day a
     // tensor-evolution API lands; until then this branch cannot fire.
-    throw std::runtime_error(
-        "NumSimMaterialTarget: tensor-valued state is not yet supported "
-        "(needs Mandel + the vector solver, numsim-materials#11/#12).");
+    return "NumSimMaterialTarget: tensor-valued state is not yet supported "
+           "(needs Mandel + the vector solver, numsim-materials#11/#12).";
   }
   // Outputs (scalar AND tensor, e.g. stress = f(state, strain)) are emitted as
   // properties with their own update callbacks. Only tensor INTERNAL STATE is
@@ -117,29 +121,28 @@ void check_scope(ConstitutiveModel const &model) {
     for (auto const &o : model.outputs())
       if (o.name == t.of_output && o.kind == OutputDecl::Kind::Tensor) of_ok = true;
     if (!of_ok) {
-      throw std::runtime_error(
-          "NumSimMaterialTarget: tangent '" + t.name + "' differentiates '" +
-          t.of_output + "', which is not a declared tensor output (stress).");
+      return "NumSimMaterialTarget: tangent '" + t.name + "' differentiates '" +
+             t.of_output + "', which is not a declared tensor output (stress).";
     }
     bool wrt_ok = false;
     for (auto const &in : model.inputs())
       if (in.name == t.wrt_input && in.kind == SymbolDecl::Kind::Tensor) wrt_ok = true;
     if (!wrt_ok) {
-      throw std::runtime_error(
-          "NumSimMaterialTarget: tangent '" + t.name + "' differentiates w.r.t. '" +
-          t.wrt_input + "', which is not a declared tensor input (strain).");
+      return "NumSimMaterialTarget: tangent '" + t.name +
+             "' differentiates w.r.t. '" + t.wrt_input +
+             "', which is not a declared tensor input (strain).";
     }
   }
   // Tensor inputs (e.g. strain) ARE wired (Global-edge input_property); scalar
   // inputs are a separate small follow-up — reject those loudly for now.
   for (auto const &in : model.inputs()) {
     if (in.kind != SymbolDecl::Kind::Tensor) {
-      throw std::runtime_error(
-          "NumSimMaterialTarget: scalar input '" + in.name +
-          "' is not yet wired into the material — a Phase B follow-up (tensor "
-          "inputs like strain ARE supported).");
+      return "NumSimMaterialTarget: scalar input '" + in.name +
+             "' is not yet wired into the material — a Phase B follow-up "
+             "(tensor inputs like strain ARE supported).";
     }
   }
+  return std::nullopt;
 }
 
 // ── Mode-B strain-coupled residual emission ────────────────────────────────
@@ -169,71 +172,79 @@ void check_scope(ConstitutiveModel const &model) {
 // generated residual material therefore correctly models only states whose
 // solved INCREMENT is non-negative. This is surfaced in the emitted header;
 // lifting it needs an unclamped solver mode upstream (numsim-materials).
-std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) {
-  // ── Scope validation (residual contract) ──
+// ── Scope validation (residual contract) ──
+// Exactly ONE scalar Newton unknown (the residual's state). Any OTHER state
+// variable must be an INTERNAL variable — set by a post-solve update equation,
+// not solved. This is the #92 path: a scalar solve (no vector solver / Mandel)
+// with tensor/scalar HISTORY (e.g. J2 plastic strain εᵖ) carried across steps.
+// Returns the first rejection reason — thrown by emit_residual_material,
+// reported by can_emit (one message, two transports, #137) — or nullopt.
+std::optional<std::string>
+residual_scope_rejection(ConstitutiveModel const &model) {
   auto const reqs = model.residual_equations();
   auto const svs = model.state_variables();
   auto const ueqs = model.update_equations();
-  // Exactly ONE scalar Newton unknown (the residual's state). Any OTHER state
-  // variable must be an INTERNAL variable — set by a post-solve update equation,
-  // not solved. This is the #92 path: a scalar solve (no vector solver / Mandel)
-  // with tensor/scalar HISTORY (e.g. J2 plastic strain εᵖ) carried across steps.
   if (reqs.size() != 1) {
-    throw std::runtime_error(
-        "NumSimMaterialTarget: a residual material needs exactly one residual "
-        "equation (one scalar Newton unknown). Coupled multi-unknown return maps "
-        "need the numsim-materials vector solver (numsim-materials#12).");
+    return "NumSimMaterialTarget: a residual material needs exactly one "
+           "residual equation (one scalar Newton unknown). Coupled "
+           "multi-unknown return maps need the numsim-materials vector solver "
+           "(numsim-materials#12).";
   }
   {
     std::size_t const newton_idx = reqs[0].state_variable_idx;
     std::set<std::size_t> updated;
     for (auto const &ue : ueqs) {
       if (ue.state_variable_idx == newton_idx) {
-        throw std::runtime_error(
-            "NumSimMaterialTarget: the Newton state '" +
-            svs[newton_idx].name +
-            "' has both a residual and an update equation — a state is either "
-            "solved (residual) or updated post-solve (internal variable), not "
-            "both.");
+        return "NumSimMaterialTarget: the Newton state '" +
+               svs[newton_idx].name +
+               "' has both a residual and an update equation — a state is "
+               "either solved (residual) or updated post-solve (internal "
+               "variable), not both.";
       }
       if (!updated.insert(ue.state_variable_idx).second) {
-        throw std::runtime_error(
-            "NumSimMaterialTarget: internal variable '" +
-            svs[ue.state_variable_idx].name +
-            "' has more than one update equation.");
+        return "NumSimMaterialTarget: internal variable '" +
+               svs[ue.state_variable_idx].name +
+               "' has more than one update equation.";
       }
     }
     for (std::size_t i = 0; i < svs.size(); ++i) {
       if (i == newton_idx || updated.contains(i)) continue;
-      throw std::runtime_error(
-          "NumSimMaterialTarget: state variable '" + svs[i].name +
-          "' is neither the Newton unknown (a residual) nor an internal "
-          "variable (an update equation). Add one via "
-          "add_scalar/tensor_update_equation, or remove it.");
+      return "NumSimMaterialTarget: state variable '" + svs[i].name +
+             "' is neither the Newton unknown (a residual) nor an internal "
+             "variable (an update equation). Add one via "
+             "add_scalar/tensor_update_equation, or remove it.";
     }
   }
   if (!model.evolution_equations().empty()) {
     // Unreachable through the public API (a state carries a rate XOR a residual,
     // enforced by the recipe), but a residual recipe must never also carry a
     // rate — guard against a future API that could mix them.
-    throw std::runtime_error(
-        "NumSimMaterialTarget: a residual recipe must not also declare rate "
-        "(evolution) equations — the state is defined by the residual alone.");
+    return "NumSimMaterialTarget: a residual recipe must not also declare "
+           "rate (evolution) equations — the state is defined by the residual "
+           "alone.";
   }
   for (auto const &in : model.inputs()) {
     if (in.kind != SymbolDecl::Kind::Tensor) {
-      throw std::runtime_error(
-          "NumSimMaterialTarget: scalar input '" + in.name +
-          "' is not yet wired into a residual material — a follow-up (tensor "
-          "inputs like strain ARE supported).");
+      return "NumSimMaterialTarget: scalar input '" + in.name +
+             "' is not yet wired into a residual material — a follow-up "
+             "(tensor inputs like strain ARE supported).";
     }
   }
   if (model.outputs().empty()) {
-    throw std::runtime_error(
-        "NumSimMaterialTarget: a residual material needs at least one output "
-        "(e.g. stress) to anchor compute() — the output's pull drives the "
-        "Newton solve. A state-only solve has no consumer.");
+    return "NumSimMaterialTarget: a residual material needs at least one "
+           "output (e.g. stress) to anchor compute() — the output's pull "
+           "drives the Newton solve. A state-only solve has no consumer.";
   }
+  return std::nullopt;
+}
+
+std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) {
+  if (auto const reason = residual_scope_rejection(model)) {
+    throw std::runtime_error(*reason);
+  }
+  auto const reqs = model.residual_equations();
+  auto const svs = model.state_variables();
+  auto const ueqs = model.update_equations();
 
   auto const &req = reqs[0];
   auto const &sv = svs[req.state_variable_idx];
@@ -909,15 +920,33 @@ std::vector<EmittedFile> emit_residual_material(ConstitutiveModel const &model) 
 
 } // namespace
 
+auto NumSimMaterialTarget::can_emit(ConstitutiveModel const &model) const
+    -> std::expected<void, std::string> {
+  // Route exactly like emit(): residual recipes are judged against the Mode-B
+  // scope, everything else against the rate (rk_integrator) scope. Only the
+  // up-front shape guards are queried — emit-time validation (reserved-name /
+  // member collisions, unbound expression leaves, non-finite defaults) can
+  // still throw after a success here.
+  auto reason = model.residual_equations().empty()
+                    ? rate_scope_rejection(model)
+                    : residual_scope_rejection(model);
+  if (reason) {
+    return std::unexpected(std::move(*reason));
+  }
+  return {};
+}
+
 auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
     -> std::vector<EmittedFile> {
   // Strain-coupled implicit-residual recipes take the Mode-B path; the rate
-  // (rk_integrator) path below handles the rest. Routing here (before
-  // check_scope) keeps each path's scope validation self-contained.
+  // (rk_integrator) path below handles the rest. Routing here (before the
+  // rate-scope guard) keeps each path's scope validation self-contained.
   if (!model.residual_equations().empty()) {
     return emit_residual_material(model);
   }
-  check_scope(model);
+  if (auto const reason = rate_scope_rejection(model)) {
+    throw std::runtime_error(*reason);
+  }
 
   auto const &sv = model.state_variables()[0];
   auto const &eq = model.evolution_equations()[0];
@@ -936,7 +965,8 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
   // Tensor inputs (e.g. strain): each is wired from a producer material via a
   // Global-edge input_property, read by the property name `<input-name>` (the
   // producer must publish a property of that name). Each gets a `<name>_source`
-  // string parameter naming the producer. check_scope already rejected scalars.
+  // string parameter naming the producer. The rate-scope guard already
+  // rejected scalars.
   std::vector<SymbolDecl> tensor_inputs;
   std::set<std::string> tensor_input_names;
   for (auto const &in : model.inputs()) {
@@ -1125,8 +1155,9 @@ auto NumSimMaterialTarget::emit(ConstitutiveModel const &model) const
     for (auto const &[name, h] : model.tensor_symbol_map()) {
       if (name == t.wrt_input) eps = h;
     }
-    // check_scope already verified both resolve; guard belt-and-braces so a
-    // future check_scope/emit drift surfaces as a clear error, not cas::diff UB.
+    // The rate-scope guard already verified both resolve; guard belt-and-braces
+    // so a future scope-guard/emit drift surfaces as a clear error, not
+    // cas::diff UB.
     if (!sigma.is_valid() || !eps.is_valid()) {
       throw std::runtime_error(
           "NumSimMaterialTarget: tangent '" + t.name +

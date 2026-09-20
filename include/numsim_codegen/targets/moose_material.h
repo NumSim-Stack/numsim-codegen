@@ -38,6 +38,11 @@ public:
 
   [[nodiscard]] auto emit(ConstitutiveModel const &model) const
       -> std::vector<EmittedFile> override;
+  // Up-front scope guards (stateful inputs, evolution without local Newton,
+  // >1 tangent, `Jacobian_mult` name collision) as a query; shares the exact
+  // reason strings with the emit() throws (#137).
+  [[nodiscard]] auto can_emit(ConstitutiveModel const &model) const
+      -> std::expected<void, std::string> override;
   [[nodiscard]] auto target_name() const -> std::string override;
 
 private:
