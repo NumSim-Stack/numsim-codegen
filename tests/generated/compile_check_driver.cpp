@@ -13,6 +13,7 @@
 #include "NewtonCheck.h"
 #include "PiecewiseCheck.h"
 #include "PiecewiseT2sCheck.h"
+#include "ReservedNamesCheck.h"
 #include "TangentCheck.h"
 #include "numerical_tangent_verifier.h"
 #include <array>
@@ -371,6 +372,33 @@ TEST(CompileCheckGenerated, ConsistentTangentMatchesNumericalDiff) {
         << r.worst_index[1] << "," << r.worst_index[2] << ","
         << r.worst_index[3] << ")";
   }
+}
+
+// Issue #8: the ReservedNamesCheck recipe names every symbol like a GENERATED
+// identifier (scalar inputs t0/t1 vs CSE temporaries, tensor input T0 / tensor
+// output T1 vs template parameters). That this TU compiles at all is the
+// regression gate — before the fix the generated header redeclared t0 and
+// shadowed its own template parameter T0. The numeric checks below confirm the
+// renamed generated identifiers still wire the right values through.
+TEST(CompileCheckGenerated, ReservedUserNamesCompileAndEvaluate) {
+  double const t0 = 0.5;
+  double const t1 = 2.0;
+  tmech::tensor<double, 3, 2> T0;  // zero-initialised
+  T0(0, 0) = 1.0;
+  T0(1, 2) = 0.25;
+
+  double y_out = 0.0;
+  tmech::tensor<double, 3, 2> T1_out;
+
+  // Generated signature (registration order): t0, t1, T0, y_out, T1_out.
+  ReservedNamesCheck_compute(t0, t1, T0, y_out, T1_out);
+
+  // y = t0*t1 + sin(t0)
+  EXPECT_NEAR(y_out, t0 * t1 + std::sin(t0), 1e-12);
+  // T1 = (t0 + t1) * T0
+  EXPECT_NEAR(T1_out(0, 0), (t0 + t1) * 1.0, 1e-12);
+  EXPECT_NEAR(T1_out(1, 2), (t0 + t1) * 0.25, 1e-12);
+  EXPECT_NEAR(T1_out(2, 2), 0.0, 1e-12);
 }
 
 // Negative control (review #91 H2): the verifier must have discriminating
