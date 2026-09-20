@@ -161,7 +161,9 @@ public:
 
   void operator()(cas::tensor_to_scalar_negative const &v) override {
     auto inner = apply(v.expr());
-    if (is_single_token(inner)) {
+    // Leading-'-' guard: see ScalarCodeEmit::operator()(scalar_negative)
+    // (issue #136) — `-` + `-x` would emit an invalid `--x`.
+    if (is_single_token(inner) && !inner.starts_with('-')) {
       m_result = "-" + inner;
     } else {
       m_result = register_temp(&v, "-(" + inner + ")");

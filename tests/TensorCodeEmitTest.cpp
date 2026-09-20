@@ -693,4 +693,54 @@ TEST(TensorCodeEmit, T2sWithTensorMulMultipliesScalarByTensor) {
 // "forgot to wire" failure mode is now a compile error rather than a
 // runtime throw. See M3 in issue #48 for the rationale.
 
+// ─── Negation of a leading-minus operand (issue #136) ─────────────────
+//
+// The unary `-` operator folds neg(neg(x)) = x, but that is NOT the only
+// construction path: at the current cas pin the sub simplifiers lower
+// `0 - rhs` to `make_expression<*_negative>(rhs)` with no already-negative
+// check (`sub_base::dispatch(*_zero)`), so ordinary subtraction can build
+// a nested negative. Upstream: cas round-7 fixed scalar/t2s post-pin; the
+// tensor domain is cas#422. The guard stays as defense-in-depth. Naive `-` + `-A` concatenation
+// would emit an invalid `--A` (a decrement). The inner negative of a leaf
+// emits the inline single token `-A`; the outer one must parenthesise.
+// (Direct construction below keeps the tests independent of simplifier
+// details; the operator-level reachability is pinned in
+// ScalarCodeEmitTest.ZeroMinusNegativeParenthesizesViaOperators.)
+TEST(TensorCodeEmit, NegationOfLeadingMinusOperandParenthesizes) {
+  CodeGenContext ctx;
+  ScalarCodeEmit scalar_emit(ctx);
+  TensorCodeEmit emit(ctx, scalar_emit, throwing_t2s_apply());
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  auto inner = cas::make_expression<cas::tensor_negative>(A);
+  auto outer = cas::make_expression<cas::tensor_negative>(inner);
+
+  auto result = emit.apply(outer);
+  auto rendered = ctx.render_statements();
+  EXPECT_EQ(result.find("--"), std::string::npos) << "got: " << result;
+  EXPECT_EQ(rendered.find("--"), std::string::npos) << "got: " << rendered;
+  EXPECT_NE(rendered.find("-(-A)"), std::string::npos) << "got: " << rendered;
+}
+
+// Same guard, tensor_to_scalar domain: neg(neg(trace(A))) — the innermost
+// trace CSEs to a temp `tN`, the middle negative inlines `-tN`, and the
+// outer negative must parenthesise instead of emitting `--tN`.
+TEST(TensorToScalarCodeEmit, NegationOfLeadingMinusOperandParenthesizes) {
+  CodeGenContext ctx;
+  CodeEmitPipeline pipeline(ctx);
+
+  auto A = cas::make_expression<cas::tensor>("A", 3, 2);
+  ctx.register_symbol_tensor(A, "A");
+  auto tr = cas::make_expression<cas::tensor_trace>(A);
+  auto inner = cas::make_expression<cas::tensor_to_scalar_negative>(tr);
+  auto outer = cas::make_expression<cas::tensor_to_scalar_negative>(inner);
+
+  auto result = pipeline.t2s().apply(outer);
+  auto rendered = ctx.render_statements();
+  EXPECT_EQ(result.find("--"), std::string::npos) << "got: " << result;
+  EXPECT_EQ(rendered.find("--"), std::string::npos) << "got: " << rendered;
+  EXPECT_NE(rendered.find("-(-"), std::string::npos) << "got: " << rendered;
+}
+
 } // namespace numsim::codegen
